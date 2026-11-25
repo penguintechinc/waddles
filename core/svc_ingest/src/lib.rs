@@ -1259,13 +1259,19 @@ fn build_twitch_unban(
     let client_id = std::env::var("TWITCH_CLIENT_ID")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let (Some(client_id), false, false) = (
+    // The ledger names its owners by public UUID only; the numeric keys are resolved from the
+    // svc-ingest role's PRIMARY database (column-scoped, alembic 0144).
+    let database_url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let (Some(client_id), Some(database_url), false, false) = (
         client_id,
+        database_url,
         cli.hub_api_url.trim().is_empty(),
         cli.hub_api_grpc_endpoint.trim().is_empty(),
     ) else {
         tracing::error!(
-            "twitch unban sync NOT enabled: TWITCH_CLIENT_ID / HUB_API_URL / HUB_API_GRPC_ENDPOINT missing"
+            "twitch unban sync NOT enabled: TWITCH_CLIENT_ID / DATABASE_URL / HUB_API_URL / HUB_API_GRPC_ENDPOINT missing"
         );
         return None;
     };
@@ -1294,7 +1300,11 @@ fn build_twitch_unban(
         ));
         Ok(twitch_unban::TwitchUnban::new(
             Arc::new(twitch_unban::CachedLedger::new(
-                twitch_unban::HubSubscriptionLedger::new(&cli.hub_api_url, jwt)?,
+                twitch_unban::HubSubscriptionLedger::new(
+                    &cli.hub_api_url,
+                    jwt,
+                    Arc::new(twitch_unban::PgOwnerIdResolver::new(database_url)),
+                )?,
             )),
             Arc::new(twitch_unban::ResolverOwner::new(resolver()?)),
             Arc::new(twitch_unban::HelixBanState::new(

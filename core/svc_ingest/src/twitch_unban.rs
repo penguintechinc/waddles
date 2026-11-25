@@ -7,7 +7,8 @@
 //!
 //! ```text
 //!  webhook POST /eventsub/twitch/webhook/{callback_key}
-//!    -> ledger lookup (hub-api): callback_key -> secret + (tenant, community, connection)
+//!    -> ledger lookup (hub-api): callback_key -> secret + owners' public_id UUIDs
+//!       -> numeric (tenant, community, connection) resolved from the DB  [`OwnerIdResolver`]
 //!    -> HMAC over the raw body with THAT subscription's secret   [twitch_eventsub::handle_webhook]
 //!    -> subscription/event broadcaster agree; the broadcaster is the one bound to
 //!       that tenant/community/connection (hub-api binding list)
@@ -409,41 +410,218 @@ impl<L: SubscriptionLedger> SubscriptionLedger for CachedLedger<L> {
     }
 }
 
+/// hub-api's `SecretDTO`. The owners are `public_id` UUID strings ONLY (numeric PKs never cross
+/// the API boundary): a JSON number in any id field fails deserialization (fail closed).
 #[derive(Deserialize)]
 struct LedgerBody {
     #[serde(default)]
     secret: String,
-    #[serde(default)]
-    tenant_id: i64,
-    #[serde(default)]
-    community_id: i64,
-    #[serde(default)]
-    connection_id: i64,
+    tenant_id: String,
+    community_id: String,
+    connection_id: String,
+}
+
+/// The owners' public UUIDs a ledger answer carries (validated, non-nil).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LedgerOwners {
+    /// Tenant `public_id`.
+    pub tenant: Uuid,
+    /// Community `public_id`.
+    pub community: Uuid,
+    /// Connection `public_id`.
+    pub connection: Uuid,
+}
+
+/// Parses hub-api's secret-route body into the secret plus the owners' public UUIDs.
+///
+/// Any missing/empty secret, a non-string id (e.g. a numeric PK), an unparseable or nil UUID is
+/// [`LedgerError::Unavailable`]: the delivery is never bound to an owner it cannot name exactly.
+///
+/// # Errors
+/// [`LedgerError::Unavailable`] as above.
+pub fn parse_ledger_body(body: &[u8]) -> Result<(SecretString, LedgerOwners), LedgerError> {
+    let b: LedgerBody = serde_json::from_slice(body).map_err(|_| LedgerError::Unavailable)?;
+    let id = |s: &str| {
+        Uuid::parse_str(s)
+            .ok()
+            .filter(|u| !u.is_nil())
+            .ok_or(LedgerError::Unavailable)
+    };
+    if b.secret.is_empty() {
+        return Err(LedgerError::Unavailable);
+    }
+    let owners = LedgerOwners {
+        tenant: id(&b.tenant_id)?,
+        community: id(&b.community_id)?,
+        connection: id(&b.connection_id)?,
+    };
+    Ok((SecretString::new(b.secret), owners))
+}
+
+/// The data plane's own numeric keys of a ledger row's owners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerIds {
+    /// Tenant (numeric, internal).
+    pub tenant_id: i64,
+    /// Community (numeric, internal).
+    pub community_id: i64,
+    /// Connection (numeric, internal).
+    pub connection_id: i64,
+}
+
+/// Resolves the owners' public UUIDs (from hub-api) to the data plane's numeric keys, from the
+/// database -- hub-api never puts numeric ids on the wire.
+pub trait OwnerIdResolver: Send + Sync {
+    /// `Ok(None)` when no community+connection pair with those public ids exists under one tenant.
+    fn resolve<'a>(
+        &'a self,
+        owners: LedgerOwners,
+    ) -> BoxFut<'a, Result<Option<OwnerIds>, LedgerError>>;
+}
+
+/// The single resolution statement: the community and the connection must belong to the SAME
+/// tenant (the tenant is derived from the community row, never taken from the wire; hub-api only
+/// serves a ledger row whose tenant owns both). Column-scoped `waddles_svc_ingest` reads
+/// (alembic 0144): `communities (id, tenant_id, public_id)`, `platform_connections (id,
+/// tenant_id, public_id)` -- never `tenants`, never a token column.
+pub const OWNER_IDS_SQL: &str = "\
+SELECT c.id::bigint, c.tenant_id::bigint, pc.id::bigint FROM communities c \
+JOIN platform_connections pc ON pc.tenant_id = c.tenant_id \
+WHERE c.public_id = $1::uuid AND pc.public_id = $2::uuid LIMIT 1";
+
+/// Production [`OwnerIdResolver`] over a lazily-connected, small pool on the svc-ingest role's
+/// PRIMARY `DATABASE_URL` (a fresh subscription must resolve immediately; no replica lag).
+pub struct PgOwnerIdResolver {
+    url: String,
+    conn: tokio::sync::Mutex<Option<sea_orm::DatabaseConnection>>,
+}
+
+impl PgOwnerIdResolver {
+    /// A resolver that has not connected yet. `url` carries the role's credential; never logged.
+    #[must_use]
+    pub fn new(url: String) -> Self {
+        Self {
+            url,
+            conn: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn connection(&self) -> Result<sea_orm::DatabaseConnection, &'static str> {
+        let mut slot = self.conn.lock().await;
+        if let Some(c) = slot.as_ref() {
+            return Ok(c.clone());
+        }
+        let mut opts = sea_orm::ConnectOptions::new(self.url.clone());
+        opts.max_connections(2)
+            .min_connections(0)
+            .connect_timeout(CALL_TIMEOUT)
+            .acquire_timeout(CALL_TIMEOUT)
+            .sqlx_logging(false);
+        let conn = sea_orm::Database::connect(opts)
+            .await
+            .map_err(|_| "connection")?;
+        *slot = Some(conn.clone());
+        Ok(conn)
+    }
+
+    async fn query(&self, owners: LedgerOwners) -> Result<Option<OwnerIds>, &'static str> {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let conn = self.connection().await?;
+        let row = tokio::time::timeout(
+            CALL_TIMEOUT,
+            conn.query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                OWNER_IDS_SQL,
+                [
+                    owners.community.to_string().into(),
+                    owners.connection.to_string().into(),
+                ],
+            )),
+        )
+        .await
+        .map_err(|_| "timeout")?
+        .map_err(|_| "query")?;
+        let Some(row) = row else { return Ok(None) };
+        let get = |i: usize| row.try_get_by_index::<i64>(i).map_err(|_| "type");
+        Ok(Some(OwnerIds {
+            community_id: get(0)?,
+            tenant_id: get(1)?,
+            connection_id: get(2)?,
+        }))
+    }
+}
+
+impl OwnerIdResolver for PgOwnerIdResolver {
+    fn resolve<'a>(
+        &'a self,
+        owners: LedgerOwners,
+    ) -> BoxFut<'a, Result<Option<OwnerIds>, LedgerError>> {
+        Box::pin(async move {
+            self.query(owners).await.map_err(|kind| {
+                note("error", "owner_ids_db");
+                // The error kind only: a driver message can echo the DSN or bound values.
+                tracing::warn!(kind, "twitch unban: owner public-id resolution failed");
+                LedgerError::Unavailable
+            })
+        })
+    }
 }
 
 /// Production [`SubscriptionLedger`]: hub-api over HTTP with a machine JWT of scope
-/// [`SECRET_READ_SCOPE`]. Uncached by itself; production wraps it in [`CachedLedger`].
+/// [`SECRET_READ_SCOPE`], owners resolved from their public UUIDs via an [`OwnerIdResolver`].
+/// Uncached by itself; production wraps it in [`CachedLedger`].
 pub struct HubSubscriptionLedger {
     http: reqwest::Client,
     base: String,
     jwt: Arc<service_auth::MachineJwtClient>,
+    ids: Arc<dyn OwnerIdResolver>,
 }
 
 impl HubSubscriptionLedger {
-    /// `base` is the hub-api root; `jwt` must mint [`SECRET_READ_SCOPE`].
+    /// `base` is the hub-api root; `jwt` must mint [`SECRET_READ_SCOPE`]; `ids` resolves the
+    /// owners' public UUIDs to numeric keys.
     ///
     /// # Errors
     /// The `reqwest` client builder error.
     pub fn new(
         base: &str,
         jwt: Arc<service_auth::MachineJwtClient>,
+        ids: Arc<dyn OwnerIdResolver>,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             http: reqwest::Client::builder().timeout(CALL_TIMEOUT).build()?,
             base: base.trim_end_matches('/').to_string(),
             jwt,
+            ids,
         })
     }
+}
+
+/// Turns a 200 secret-route body into a [`LedgerEntry`]: parse (UUIDs only), then resolve the
+/// owners to numeric keys. Owners that do not resolve under one tenant are
+/// [`LedgerError::Unavailable`] (retryable; never an unbound or guessed entry).
+///
+/// # Errors
+/// [`LedgerError::Unavailable`] on a malformed body, a resolution failure or no matching owners.
+pub async fn entry_from_body(
+    body: &[u8],
+    ids: &dyn OwnerIdResolver,
+) -> Result<LedgerEntry, LedgerError> {
+    let (secret, owners) = parse_ledger_body(body)?;
+    let Some(o) = ids.resolve(owners).await? else {
+        note("error", "owner_ids_unresolved");
+        tracing::warn!("twitch unban: ledger owners did not resolve to one tenant");
+        return Err(LedgerError::Unavailable);
+    };
+    if o.tenant_id < 1 || o.community_id < 1 || o.connection_id < 1 {
+        return Err(LedgerError::Unavailable);
+    }
+    Ok(LedgerEntry {
+        secret,
+        tenant_id: o.tenant_id,
+        community_id: o.community_id,
+        connection_id: o.connection_id,
+    })
 }
 
 /// A short, non-reversible tag of a callback key for logs (never the full key).
@@ -488,20 +666,8 @@ impl SubscriptionLedger for HubSubscriptionLedger {
                 404 => return Ok(None),
                 _ => return Err(LedgerError::Unavailable),
             }
-            let body: LedgerBody = resp.json().await.map_err(|_| LedgerError::Unavailable)?;
-            if body.secret.is_empty()
-                || body.tenant_id < 1
-                || body.community_id < 1
-                || body.connection_id < 1
-            {
-                return Err(LedgerError::Unavailable);
-            }
-            Ok(Some(LedgerEntry {
-                secret: SecretString::new(body.secret),
-                tenant_id: body.tenant_id,
-                community_id: body.community_id,
-                connection_id: body.connection_id,
-            }))
+            let body = resp.bytes().await.map_err(|_| LedgerError::Unavailable)?;
+            entry_from_body(&body, self.ids.as_ref()).await.map(Some)
         })
     }
 }

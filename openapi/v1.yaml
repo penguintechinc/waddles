@@ -20236,16 +20236,17 @@ paths:
           content:
             application/json:
               schema:
-                description: Webhook secret for one callback key.
+                description: Webhook secret for one callback key plus its owners'
+                  ``public_id`` UUIDs (never PKs).
                 properties:
                   community_id:
-                    default: 0
+                    default: ''
                     title: Community Id
-                    type: integer
+                    type: string
                   connection_id:
-                    default: 0
+                    default: ''
                     title: Connection Id
-                    type: integer
+                    type: string
                   secret:
                     default: ''
                     title: Secret
@@ -20254,14 +20255,15 @@ paths:
                     title: Success
                     type: boolean
                   tenant_id:
-                    default: 0
+                    default: ''
                     title: Tenant Id
-                    type: integer
+                    type: string
                 required:
                 - success
                 title: SecretDTO
                 type: object
-          description: Webhook secret for one callback key.
+          description: Webhook secret for one callback key plus its owners' ``public_id``
+            UUIDs (never PKs).
       summary: Webhook secret for the ingest verifier (404 for an unknown key).
   /api/v1/internal/live:
     get:

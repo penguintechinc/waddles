@@ -7,8 +7,9 @@
   secret lookup (separate, narrower scope).
 
 Machine JWT / verified SVID only, ``system`` tenant, scope ``eventsub:reconcile`` (the secret
-route: ``eventsub:secret-read``). Ids are numeric tenant/community/connection (data-plane
-convention) plus the subscription ``public_id`` UUID; no raw broadcaster id or PII exists here --
+route: ``eventsub:secret-read``). Reconcile work ids are numeric tenant/community/connection
+(data-plane convention) plus the subscription ``public_id`` UUID; the secret route carries only the
+owners' ``public_id`` UUIDs (svc-ingest resolves them itself). No raw broadcaster id or PII here --
 the bundle resolves the broadcaster/app token through the connection resolver. Enums are int codes.
 The webhook secret is NEVER in the reconcile response (it must not enter guest memory); only the
 host (svc-ingest) reads it, via the secret route, and injects it host-side. ``no-store``.
@@ -116,13 +117,13 @@ class ResultsResponse:
 
 @dataclass(slots=True, frozen=True)
 class SecretDTO:
-    """Webhook secret for one callback key."""
+    """Webhook secret for one callback key plus its owners' ``public_id`` UUIDs (never PKs)."""
 
     success: bool
     secret: str = field(repr=False, default="")
-    tenant_id: int = 0
-    community_id: int = 0
-    connection_id: int = 0
+    tenant_id: str = ""
+    community_id: str = ""
+    connection_id: str = ""
 
 
 _auth = machine_authenticated(
@@ -272,9 +273,9 @@ async def secret_route(callback_key: str) -> Any:
         return SecretDTO(
             success=True,
             secret=bound.secret,
-            tenant_id=bound.tenant_id,
-            community_id=bound.community_id,
-            connection_id=bound.connection_id,
+            tenant_id=bound.tenant_public_id,
+            community_id=bound.community_public_id,
+            connection_id=bound.connection_public_id,
         )
     except es.EventSubError as exc:
         return _refusal(exc, "secret")

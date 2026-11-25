@@ -776,12 +776,16 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
 
 @dataclass(slots=True, frozen=True)
 class CallbackBinding:
-    """A callback key's secret and the tenant, community and connection that own it."""
+    """A callback key's secret and the PUBLIC UUIDs of the tenant, community and connection.
+
+    Only ``public_id`` UUIDs cross the API boundary (numeric PKs are enumerable); the data plane
+    resolves them back to its internal numeric keys itself, from the database.
+    """
 
     secret: str = field(repr=False)
-    tenant_id: int
-    community_id: int
-    connection_id: int
+    tenant_public_id: str
+    community_public_id: str
+    connection_public_id: str
 
 
 async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> str:
@@ -794,10 +798,12 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
 
 
 async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> CallbackBinding:
-    """Secret AND owning ``(tenant, community, connection)`` of a callback key.
+    """Secret AND owning ``(tenant, community, connection)`` public UUIDs of a callback key.
 
     A delivery is only meaningful for the subscription that received it: the ingest verifier
-    binds an event to exactly this tuple (never to anything read from the payload).
+    binds an event to exactly this tuple (never to anything read from the payload). The ledger
+    row's tenant must own both the community and the connection -- the data plane derives the
+    tenant from the community when it resolves the UUIDs, so a disagreeing row is never served.
     """
     if not _CALLBACK_KEY_RE.fullmatch(callback_key):
         raise UnknownSubscriptionError("unknown callback key") from None
@@ -805,8 +811,16 @@ async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> C
         row = (
             await conn.execute(
                 text(
-                    f"SELECT public_id, secret_enc, tenant_id, community_id, connection_id "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
-                    f"FROM {_TABLE} WHERE callback_key = :k"
+                    "SELECT s.public_id, s.secret_enc, "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                    "t.public_id::text AS tenant_public_id, "
+                    "c.public_id::text AS community_public_id, "
+                    "pc.public_id::text AS connection_public_id, "
+                    "(c.tenant_id = s.tenant_id AND pc.tenant_id = s.tenant_id) AS owners_agree "
+                    f"FROM {_TABLE} s "
+                    "JOIN tenants t ON t.id = s.tenant_id "
+                    "JOIN communities c ON c.id = s.community_id "
+                    "JOIN platform_connections pc ON pc.id = s.connection_id "
+                    "WHERE s.callback_key = :k"
                 ),
                 {"k": callback_key},
             )
@@ -814,12 +828,16 @@ async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> C
     if row is None:
         _ops.add(1, {"op": "secret", "outcome": "not_found"})
         raise UnknownSubscriptionError("unknown callback key") from None
+    if not row.owners_agree:
+        _ops.add(1, {"op": "secret", "outcome": "owner_mismatch"})
+        logger.warning("eventsub_secret_owner_mismatch op=secret code=NOT_FOUND")
+        raise UnknownSubscriptionError("unknown callback key") from None
     _ops.add(1, {"op": "secret", "outcome": "ok"})
     # Every eventsub row is sealed AAD-bound (there is no legacy layout), so pin SEAL_AAD:
     # a no-AAD ciphertext is refused rather than accepted through the migration fallback.
     return CallbackBinding(
         secret=open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD),
-        tenant_id=int(row.tenant_id),
-        community_id=int(row.community_id),
-        connection_id=int(row.connection_id),
+        tenant_public_id=str(row.tenant_public_id),
+        community_public_id=str(row.community_public_id),
+        connection_public_id=str(row.connection_public_id),
     )

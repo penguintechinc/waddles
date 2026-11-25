@@ -43,7 +43,7 @@ class TestMigrationMetadata:
         cfg = Config(str(_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(_ROOT / "alembic"))
         heads = ScriptDirectory.from_config(cfg).get_heads()
-        assert heads == ["0143_eventsub_channel_unban"], f"unexpected alembic heads: {heads}"
+        assert len(heads) == 1, f"diverged alembic heads: {heads}"
 
 
 @pytest.fixture(scope="module")

@@ -895,3 +895,121 @@ async fn forged_signatures_cannot_force_repeated_eviction_refetches() {
         inner.hits()
     );
 }
+
+const T_UUID: &str = "0a0a0a0a-0000-4000-8000-000000000001";
+const C_UUID: &str = "0b0b0b0b-0000-4000-8000-000000000002";
+const N_UUID: &str = "0c0c0c0c-0000-4000-8000-000000000003";
+
+fn secret_body(t: Value, c: Value, n: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "success": true, "secret": "s3cret", "tenant_id": t, "community_id": c, "connection_id": n
+    }))
+    .unwrap()
+}
+
+/// [`OwnerIdResolver`] double: answers `found` and records the owners it was asked for.
+struct FakeIds {
+    found: Option<OwnerIds>,
+    asked: Mutex<Vec<LedgerOwners>>,
+}
+
+impl OwnerIdResolver for FakeIds {
+    fn resolve<'a>(
+        &'a self,
+        owners: LedgerOwners,
+    ) -> BoxFut<'a, Result<Option<OwnerIds>, LedgerError>> {
+        self.asked.lock().unwrap().push(owners);
+        let found = self.found;
+        Box::pin(async move { Ok(found) })
+    }
+}
+
+fn fake_ids(found: Option<OwnerIds>) -> FakeIds {
+    FakeIds {
+        found,
+        asked: Mutex::new(Vec::new()),
+    }
+}
+
+#[test]
+fn secret_body_owners_are_public_uuids() {
+    let (secret, owners) =
+        parse_ledger_body(&secret_body(json!(T_UUID), json!(C_UUID), json!(N_UUID))).unwrap();
+    assert_eq!(secret.expose(), "s3cret");
+    assert_eq!(owners.tenant.to_string(), T_UUID);
+    assert_eq!(owners.community.to_string(), C_UUID);
+    assert_eq!(owners.connection.to_string(), N_UUID);
+}
+
+/// Regression (PR #1514): a numeric PK in any owner field is refused, never coerced.
+#[test]
+fn secret_body_with_numeric_ids_is_refused() {
+    let nil = Uuid::nil().to_string();
+    for body in [
+        secret_body(json!(7), json!(C_UUID), json!(N_UUID)),
+        secret_body(json!(T_UUID), json!(70), json!(N_UUID)),
+        secret_body(json!(T_UUID), json!(C_UUID), json!(700)),
+        secret_body(json!("7"), json!(C_UUID), json!(N_UUID)),
+        secret_body(json!(T_UUID), json!(nil), json!(N_UUID)),
+        secret_body(json!(T_UUID), json!(C_UUID), Value::Null),
+    ] {
+        assert_eq!(
+            parse_ledger_body(&body).err(),
+            Some(LedgerError::Unavailable)
+        );
+    }
+    let no_secret = serde_json::to_vec(&json!({
+        "success": true, "secret": "", "tenant_id": T_UUID, "community_id": C_UUID,
+        "connection_id": N_UUID
+    }))
+    .unwrap();
+    assert_eq!(
+        parse_ledger_body(&no_secret).err(),
+        Some(LedgerError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn entry_resolves_owner_uuids_to_numeric_keys() {
+    let ids = fake_ids(Some(OwnerIds {
+        tenant_id: 7,
+        community_id: 70,
+        connection_id: 700,
+    }));
+    let body = secret_body(json!(T_UUID), json!(C_UUID), json!(N_UUID));
+    let e = entry_from_body(&body, &ids).await.unwrap();
+    assert_eq!((e.tenant_id, e.community_id, e.connection_id), (7, 70, 700));
+    assert_eq!(e.secret.expose(), "s3cret");
+    let asked = ids.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].community.to_string(), C_UUID);
+    assert_eq!(asked[0].connection.to_string(), N_UUID);
+}
+
+#[tokio::test]
+async fn unresolved_owners_fail_closed() {
+    let body = secret_body(json!(T_UUID), json!(C_UUID), json!(N_UUID));
+    let before = count("error", "owner_ids_unresolved");
+    assert_eq!(
+        entry_from_body(&body, &fake_ids(None)).await.err(),
+        Some(LedgerError::Unavailable)
+    );
+    assert!(count("error", "owner_ids_unresolved") > before);
+    let zero = fake_ids(Some(OwnerIds {
+        tenant_id: 0,
+        community_id: 70,
+        connection_id: 700,
+    }));
+    assert_eq!(
+        entry_from_body(&body, &zero).await.err(),
+        Some(LedgerError::Unavailable)
+    );
+}
+
+#[test]
+fn owner_sql_never_reads_tenants_and_requires_one_tenant() {
+    let sql = OWNER_IDS_SQL.to_lowercase();
+    assert!(!sql.contains("from tenants") && !sql.contains("join tenants"));
+    assert!(sql.contains("pc.tenant_id = c.tenant_id"));
+    assert!(!sql.contains("access_token") && !sql.contains("refresh_token"));
+}
