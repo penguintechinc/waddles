@@ -2197,6 +2197,12 @@ pipeline:
         # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
         twitchReconcileIntervalSecs: 60
         twitchResolveTimeoutSecs: 10
+      # Twitch EventSub `channel.unban` -> Waddles unban sync (core/svc_ingest/src/twitch_unban.rs).
+      # ON renders TWITCH_CLIENT_ID (platform-credentials Secret) into svc-ingest for the Helix
+      # ban-state re-check. Effective only with dynamicConnections.enabled (hub-api endpoints +
+      # machine JWT); without it nothing renders. Default false; values-alpha.yaml enables it.
+      twitchUnbanSync:
+        enabled: false
       # P6a -- `waddles.connector-tools` env baseline (CONNECTOR_TOOLS_ENABLED). OFF (default) =
       # the legacy outbound drains, nothing below renders. ON = the generic outbound executor:
       # requires dynamicConnections.enabled + hubApi.enabled, the three pinned connector digests,
