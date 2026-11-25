@@ -20238,6 +20238,14 @@ paths:
               schema:
                 description: Webhook secret for one callback key.
                 properties:
+                  community_id:
+                    default: 0
+                    title: Community Id
+                    type: integer
+                  connection_id:
+                    default: 0
+                    title: Connection Id
+                    type: integer
                   secret:
                     default: ''
                     title: Secret
@@ -20245,6 +20253,10 @@ paths:
                   success:
                     title: Success
                     type: boolean
+                  tenant_id:
+                    default: 0
+                    title: Tenant Id
+                    type: integer
                 required:
                 - success
                 title: SecretDTO
