@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.customcommand
 name: Custom Command Bundle (Python)
-version: 1.0.6
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

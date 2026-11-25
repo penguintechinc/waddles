@@ -17,7 +17,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.count
 name: Dynamic Counter Bundle (Python)
-version: 1.0.13
+version: 1.0.14
 module: core
 provider: builtin
 author: github:penguintechinc

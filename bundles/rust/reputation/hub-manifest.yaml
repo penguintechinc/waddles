@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.reputation
 name: Reputation Service Bundle (Rust)
-version: 1.1.6
+version: 1.1.7
 module: core
 provider: builtin
 author: github:penguintechinc

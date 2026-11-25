@@ -109,7 +109,7 @@ from collections.abc import Callable
 from math import isqrt
 from typing import Any, NoReturn
 
-from waddle_sdk import community_kv, db, identity, log, relay, tool
+from waddle_sdk import SCOPE_ADMIN, caller_can, community_kv, db, identity, log, relay, tool
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
@@ -133,9 +133,9 @@ _LEVEL_BASE_XP = 100
 _USAGE = (
     "Usage: !rank | !rank <user> | !rank top | "
     "!rank add <amount> <user> | !rank sub <amount> <user> "
-    "(add/sub are broadcaster/mod only)"
+    "(add/sub are community-admin only)"
 )
-_PERMISSION_DENIED_MSG = "only moderators/broadcasters can adjust rank XP"
+_PERMISSION_DENIED_MSG = "only community admins can adjust rank XP"
 _UNAVAILABLE_MSG = "rank is temporarily unavailable, try again shortly."
 
 _KNOWN_COMMANDS = frozenset(
@@ -209,18 +209,6 @@ def _index_key(pseudonym: str) -> str:
     return f"{_INDEX_KEY_PREFIX}{pseudonym}"
 
 
-def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
-    """`True`/`False` from the normalized event's own badge fields, or `None` if absent.
-
-    See `fish`/`count`/`lurk`/`loyalty`'s own identical helper -- `None`
-    (neither `is_mod`/`is_broadcaster` present, e.g. Discord's normalizer
-    today) must be treated as denied, never as an implicit allow.
-    """
-    if "is_mod" not in payload and "is_broadcaster" not in payload:
-        return None
-    return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
-
-
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!rank` and its grammar.
 
@@ -254,13 +242,8 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         payload["target"] = target
     if amount is not None:
         payload["amount"] = amount
-    # Forward the normalized badge signal, if present -- see `fish`/`count`/`lurk`/`loyalty`'s
-    # own identical forwarding comment for why absence must reach `dispatch` as absence, not
-    # `False`.
-    if "is_mod" in event.payload:
-        payload["is_mod"] = event.payload["is_mod"] is True
-    if "is_broadcaster" in event.payload:
-        payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
+    # is_mod / is_broadcaster are display-only platform badges and are deliberately NOT
+    # forwarded: `dispatch` authorizes with `caller_can(SCOPE_ADMIN)` (host-resolved role).
 
     return PlatformEvent(
         platform=event.platform,
@@ -620,9 +603,8 @@ async def dispatch(
         return DispatchResult(transport=provider, detail="usage")
 
     if command in ("add", "sub"):
-        role_signal = _caller_role_signal(payload)
-        if role_signal is not True:
-            log.info("rank.adjust_denied", command=command, role_signal=str(role_signal))
+        if not await caller_can(SCOPE_ADMIN):
+            log.info("rank.adjust_denied", command=command)
             await relay.push(provider, {"channel": channel_id, "text": _PERMISSION_DENIED_MSG})
             return DispatchResult(transport=provider, detail=f"{command}:denied")
         target = payload.get("target")

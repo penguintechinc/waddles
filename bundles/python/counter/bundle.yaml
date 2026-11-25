@@ -2,7 +2,7 @@ schema_version: 2
 app_id: penguintechinc.waddles.counter
 name: Named Counter Bundle (Python)
 # 1.0.0: new bundle -- see src/app.py's module docstring. Activation-gated only (no feature flag).
-version: 1.0.4
+version: 1.0.5
 module: core
 provider: builtin
 author: github:penguintechinc

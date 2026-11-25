@@ -10,4 +10,24 @@ Sec6.5; normative WIT source ``wit/waddle-bundle/stage.wit``).
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from waddle_sdk.authz import (
+    SCOPE_ADMIN,
+    SCOPE_BAN,
+    SCOPE_MEMBER,
+    SCOPE_MODERATE,
+    SCOPE_OWNER,
+    SCOPE_TIMEOUT,
+    SCOPE_VIP,
+    caller_can,
+)
+
+__all__: list[str] = [
+    "SCOPE_ADMIN",
+    "SCOPE_BAN",
+    "SCOPE_MEMBER",
+    "SCOPE_MODERATE",
+    "SCOPE_OWNER",
+    "SCOPE_TIMEOUT",
+    "SCOPE_VIP",
+    "caller_can",
+]

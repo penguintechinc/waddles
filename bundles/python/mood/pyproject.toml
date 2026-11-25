@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-mood"
-version = "1.0.6"
+version = "1.0.7"
 description = "Random Mood"
 requires-python = ">=3.13"
 dependencies = []

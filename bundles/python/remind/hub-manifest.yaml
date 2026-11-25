@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.remind
 name: Remind Bundle (Python)
-version: 1.0.8
+version: 1.0.9
 module: core
 provider: builtin
 author: github:penguintechinc

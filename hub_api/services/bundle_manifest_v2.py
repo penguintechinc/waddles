@@ -588,6 +588,8 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "community:member",
         "community:vip",
         "community:moderate",
+        "community:ban",
+        "community:timeout",
         "community:admin",
         "community:owner",
         # Dedicated room-management scopes (admin/owner bundles carry them; a moderator

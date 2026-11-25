@@ -28,16 +28,16 @@ only (renamed to resolve a command-trigger collision), so both bundles can be ac
 
 | Command | Who | Behavior |
 |---|---|---|
-| `!giveaway start <5m\|30s\|1h>` | mod/broadcaster | Opens a giveaway. Bad/zero/over-24h duration -> explicit reply; one already active (or ended and undrawn) -> rejected. |
+| `!giveaway start <5m\|30s\|1h>` | community admin | Opens a giveaway. Bad/zero/over-24h duration -> explicit reply; one already active (or ended and undrawn) -> rejected. |
 | `!giveaway enter` | anyone | Enter once. Replies if none active, already entered, ended, or full (5000 max). |
-| `!giveaway draw` | mod/broadcaster | One random winner announced, giveaway closed. No entries -> "no entries" reply, giveaway stays open. May run before or after the deadline. |
+| `!giveaway draw` | community admin | One random winner announced, giveaway closed. No entries -> "no entries" reply, giveaway stays open. May run before or after the deadline. |
 | `!giveaway status` | anyone | Entry count + time remaining (or "ended, waiting for a draw"). |
-| `!giveaway cancel` | mod/broadcaster | Closes without drawing. Also clears a corrupt stored state. |
+| `!giveaway cancel` | community admin | Closes without drawing. Also clears a corrupt stored state. |
 | anything else | anyone | Usage reply -- never silently dropped. |
 
-Mod gate is strict-boolean and **fail-closed**: only a real `is_mod is True` /
-`is_broadcaster is True` admits; absent badges (Discord's normalizer today), strings and ints
-deny. Denied before any `kv` access.
+Admin gate is `await caller_can(SCOPE_ADMIN)` (host-resolved community role) and
+**fail-closed**: a platform mod/broadcaster badge never admits (display-only), and an
+unavailable host denies. Denied before any `kv` access. Built against WIT world `stage-next`.
 
 `start`/`draw`/`cancel` are special-cased rather than parsed by `waddle_sdk.command.parse_command`
 (they are not in the shared `VERBS`), same approach as `raffle`'s `open`/`close`/`draw`.

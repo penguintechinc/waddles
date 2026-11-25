@@ -113,9 +113,9 @@ impl ActorContext {
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner`, `owner` | member, vip, moderate, admin, owner, rooms:* + all music scopes |
-/// | `community-admin` | member, vip, moderate, admin, rooms:* + all music scopes |
-/// | `moderator` | member, moderate, rooms:kick, rooms:mute, rooms:lock, rooms:hands + all music scopes |
+/// | `community-owner`, `owner` | member, vip, moderate, ban, timeout, admin, owner, rooms:* + all music scopes |
+/// | `community-admin` | member, vip, moderate, ban, timeout, admin, rooms:* + all music scopes |
+/// | `moderator` | member, moderate, ban, timeout, rooms:kick, rooms:mute, rooms:lock, rooms:hands + all music scopes |
 /// | `vip` | member, vip + music read/write/stats |
 /// | `member` | member + music read/write/stats |
 ///
@@ -134,6 +134,8 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:member",
             "community:vip",
             "community:moderate",
+            "community:ban",
+            "community:timeout",
             "community:admin",
             "community:owner",
             "rooms:create",
@@ -156,6 +158,8 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:member",
             "community:vip",
             "community:moderate",
+            "community:ban",
+            "community:timeout",
             "community:admin",
             "rooms:create",
             "rooms:update",
@@ -176,6 +180,8 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
         "moderator" => &[
             "community:member",
             "community:moderate",
+            "community:ban",
+            "community:timeout",
             "rooms:kick",
             "rooms:mute",
             "rooms:lock",
@@ -205,6 +211,28 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
         ],
         _ => &[],
     }
+}
+
+/// Longest scope string `authz.caller_can` accepts.
+pub const MAX_AUTHZ_SCOPE_LEN: usize = 64;
+
+/// `true` iff `scope` is 1..=64 bytes matching
+/// `^[a-z][a-z0-9_.]*:[a-z][a-z0-9_.]*$` -- the shape `authz.caller_can`
+/// accepts (checked by the executor AND by the stage handlers).
+pub fn is_valid_authz_scope(scope: &str) -> bool {
+    if scope.is_empty() || scope.len() > MAX_AUTHZ_SCOPE_LEN {
+        return false;
+    }
+    let mut parts = scope.split(':');
+    let (Some(a), Some(b), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let seg_ok = |p: &str| {
+        let mut chars = p.chars();
+        matches!(chars.next(), Some('a'..='z'))
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+    };
+    seg_ok(a) && seg_ok(b)
 }
 
 /// The `required_scope` the target tool declares, if any -- lets a stage pay

@@ -1,4 +1,5 @@
 using WaddleSdk.Ai;
+using WaddleSdk.Authorization;
 using WaddleSdk.Economy;
 using WaddleSdk.Identity;
 using WaddleSdk.Media;
@@ -22,4 +23,11 @@ public interface IWaddleHostNext : IWaddleHost
     IOverlayClient Overlay { get; }
     IAiClient Ai { get; }
     IMediaClient Media { get; }
+
+    /// <summary>
+    /// `authz.caller-can` (`stage-next`/`stage-v2`/`stage-tools`; always granted). Default-implemented as deny-all so existing
+    /// adapters keep compiling and fail closed; a bundle on a world with `authz` overrides it with its generated-import adapter.
+    /// Gate privileged actions with <see cref="Authz.CallerCan"/> -- never on the payload's DISPLAY-ONLY `is_mod`/`is_broadcaster`.
+    /// </summary>
+    IAuthzClient Authz => DenyAllAuthzClient.Instance;
 }

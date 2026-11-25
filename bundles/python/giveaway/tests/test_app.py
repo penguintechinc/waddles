@@ -14,7 +14,9 @@ import types
 from typing import Any
 
 import pytest
+from waddle_sdk import SCOPE_ADMIN, SCOPE_BAN, SCOPE_TIMEOUT
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.testing import FakeAuthzHost
 
 from app import (
     ACTIVE_KEY,
@@ -88,6 +90,8 @@ class _Host:
         self.relay_calls: list[tuple[str, dict[str, Any]]] = []
         self.log_calls: list[tuple[int, str, str]] = []
         self.now_ms = _T0
+        # default: community admin; tests narrow `h.authz.scopes` / flip `unavailable`
+        self.authz = FakeAuthzHost.for_role("community-admin")
 
     def state(self) -> dict[str, Any]:
         loaded: dict[str, Any] = json.loads(self.kv.store[ACTIVE_KEY])
@@ -110,6 +114,7 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
             Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
             write=lambda lvl, msg, fields: h.log_calls.append((lvl, msg, fields)),
         ),
+        authz=types.SimpleNamespace(caller_can=h.authz.caller_can),
         clock=types.SimpleNamespace(
             now_millis=lambda: h.now_ms,
             now_rfc3339=lambda: "2023-11-14T22:13:20.000Z",
@@ -467,33 +472,40 @@ def test_unknown_or_malformed_shapes_reply_with_usage(text: str, host: _Host) ->
 
 # --- mod gate: fail closed --------------------------------------------------------------
 
-_HOSTILE_BADGES: list[dict[str, Any]] = [
-    {},
-    {"is_mod": False, "is_broadcaster": False},
-    {"is_mod": "true", "is_broadcaster": False},
-    {"is_mod": "false", "is_broadcaster": "false"},
-    {"is_mod": 1, "is_broadcaster": 0},
-    {"is_mod": None, "is_broadcaster": None},
-    {"is_mod": "yes"},
-]
-
-
 @pytest.mark.parametrize("command", ["start 5m", "draw", "cancel"])
-@pytest.mark.parametrize("badges", _HOSTILE_BADGES)
-def test_mod_commands_fail_closed_for_non_mods(
-    command: str, badges: dict[str, Any], host: _Host
+@pytest.mark.parametrize("role", ["moderator", "vip", "member", "unknown-role"])
+def test_platform_mod_badge_without_admin_role_cannot_manage(
+    command: str, role: str, host: _Host
 ) -> None:
+    host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
     host.seed(_T0 + 60_000, ["a"])
     before = dict(host.kv.store)
-    reply = _say(f"!giveaway {command}", badges=badges)
-    assert reply == "only moderators/broadcasters can do that"
+    # platform badges claim mod AND broadcaster; they are display-only and must not matter
+    reply = _say(f"!giveaway {command}", badges={"is_mod": True, "is_broadcaster": True})
+    assert reply == "only community admins can do that"
     assert host.kv.store == before
     assert host.kv.calls == []  # denied before any kv access
 
 
-def test_mod_commands_admit_real_booleans_only(host: _Host) -> None:
-    assert "open for" in _say("!giveaway start 5m", badges={"is_mod": True})
-    assert "no entries" in _say("!giveaway draw", badges={"is_broadcaster": True})
+@pytest.mark.parametrize("command", ["start 5m", "draw", "cancel"])
+def test_host_unavailable_denies_management(command: str, host: _Host) -> None:
+    host.authz.unavailable = True
+    host.seed(_T0 + 60_000, ["a"])
+    reply = _say(f"!giveaway {command}", badges=_MOD)
+    assert reply == "only community admins can do that"
+    assert host.kv.calls == []
+
+
+def test_community_admin_manages_without_any_badge(host: _Host) -> None:
+    assert "open for" in _say("!giveaway start 5m", badges=_NOBODY)
+    assert "no entries" in _say("!giveaway draw", badges={})
+    assert SCOPE_ADMIN in host.authz.calls
+
+
+def test_moderator_map_still_allows_ban_and_timeout() -> None:
+    mod = FakeAuthzHost.for_role("moderator")
+    assert mod.caller_can(SCOPE_BAN) and mod.caller_can(SCOPE_TIMEOUT)
+    assert not mod.caller_can(SCOPE_ADMIN)
 
 
 # --- kv failures fail loud --------------------------------------------------------------

@@ -46,6 +46,14 @@ waddle_sdk::export_stage!(MyBundle);
 
 See `bundles/rust/example` for a complete, building example.
 
+## Authorization: `authz::caller_can`
+
+Payload `is_mod` / `is_broadcaster` are **display-only, never authorization**; gate privileged actions on
+`waddle_sdk::authz::caller_can(authz::SCOPE_BAN)`. The `stage-next` `authz` import is generated in the bundle
+crate (this crate only generates `stage`), so the bundle installs a thin `AuthzTransport` adapter once with
+`authz::install_transport(..)` -- same seam as `tool`/`storage_v2`; no cargo feature needed. Fails closed
+(`false`) on an invalid scope, host error or no transport. Tests use `authz::StaticAuthz::for_role("moderator")`.
+
 ## Building a bundle to a component
 
 ```bash

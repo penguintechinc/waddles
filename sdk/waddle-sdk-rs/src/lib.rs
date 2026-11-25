@@ -46,6 +46,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod bindings_glue;
 
+pub mod authz;
 pub mod clock;
 pub mod command;
 pub mod context;

@@ -3558,6 +3558,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "not_implemented",
                 "platform-table is hosted by the process stage only (not the action stage)",
             )),
+            // `authz.*` is likewise answered by the PROCESS stage only; the action
+            // stage serves no identity ops, so it fails LOUD (the executor maps
+            // `not_implemented` to `unavailable`, SDKs fail closed) instead of
+            // falling into `handle_db`.
+            CapabilityKind::Db if call.op.starts_with("authz.") => Err(denied(
+                "not_implemented",
+                "authz is hosted by the process stage only (not the action stage)",
+            )),
             // `object_storage.*` is likewise hosted by the PROCESS stage only (its S3
             // wiring + audit sink live in `svc_process::bundle_storage`). Fail LOUD
             // instead of falling into `handle_db`'s unrelated `storage.tables` path.
@@ -5327,6 +5335,23 @@ mod tests {
             assert_eq!(err.code, "not_implemented", "{op}");
             assert!(err.message.contains("process stage only"), "{op}");
         }
+    }
+
+    #[tokio::test]
+    async fn authz_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Db,
+                    "authz.caller_can",
+                    serde_json::json!({"scope": "community:admin"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
     }
 
     #[tokio::test]

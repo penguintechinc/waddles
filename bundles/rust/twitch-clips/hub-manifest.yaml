@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.twitch-clips
 name: Twitch Clips Bundle (Rust)
-version: 1.0.4
+version: 1.0.5
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -27,12 +27,12 @@ import wit_fake_db
 from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.testing import FakeKvHost, install_fake_kv_host
+from waddle_sdk import SCOPE_ADMIN, SCOPE_BAN, SCOPE_TIMEOUT
+from waddle_sdk.testing import FakeAuthzHost, FakeKvHost, install_fake_kv_host
 
 from app import (
     _KNOWN_COMMANDS,
     _USAGE,
-    _caller_role_signal,
     _format_adjust_reply,
     _index_key,
     _level_for_xp,
@@ -96,6 +96,8 @@ class _FakeHost:
         self.db = wit_fake_db.FakeDb()
         self.relay_calls: list[tuple[str, str]] = []
         self.log_calls: list[tuple[str, str, str]] = []
+        # default: community admin; tests narrow `authz.scopes` / flip `authz.unavailable`
+        self.authz = FakeAuthzHost.for_role("community-admin")
 
 
 @pytest.fixture
@@ -138,6 +140,9 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, flag_enabled: bool = True) -> _
     wit_world.imports.db = db_mod  # type: ignore[attr-defined]
     wit_world.imports.relay = relay_mod  # type: ignore[attr-defined]
     wit_world.imports.log = log_mod  # type: ignore[attr-defined]
+    wit_world.imports.authz = types.SimpleNamespace(  # type: ignore[attr-defined]
+        caller_can=host.authz.caller_can
+    )
     return host
 
 
@@ -306,11 +311,11 @@ def test_non_string_text_is_ignored(fake_host: _FakeHost) -> None:
     assert _run(transform(event)) is None
 
 
-def test_transform_forwards_present_badge_fields(fake_host: _FakeHost) -> None:
-    result = _run(transform(_sample_event("!rank", is_mod=True, is_broadcaster=False)))
+def test_transform_does_not_forward_badge_fields(fake_host: _FakeHost) -> None:
+    result = _run(transform(_sample_event("!rank", is_mod=True, is_broadcaster=True)))
     assert result is not None
-    assert result.payload["is_mod"] is True
-    assert result.payload["is_broadcaster"] is False
+    assert "is_mod" not in result.payload
+    assert "is_broadcaster" not in result.payload
 
 
 def test_transform_omits_absent_badge_fields(fake_host: _FakeHost) -> None:
@@ -532,55 +537,58 @@ def test_sub_clamps_at_zero_rather_than_going_negative(fake_host: _FakeHost) -> 
     assert "Now level 1 (0 XP)" in _reply_text(fake_host)
 
 
-@pytest.mark.parametrize(
-    ("is_mod", "is_broadcaster"),
-    [(True, None), (None, True), (True, True)],
-)
-def test_adjust_allowed_for_mod_or_broadcaster(
-    is_mod: bool | None, is_broadcaster: bool | None, fake_host: _FakeHost
+@pytest.mark.parametrize("role", ["community-admin", "owner"])
+def test_adjust_allowed_for_community_admin_without_any_badge(
+    role: str, fake_host: _FakeHost
 ) -> None:
-    result = _run(
-        dispatch(
-            _sample_envelope(
-                "twitch",
-                "add",
-                target="alice",
-                amount=5,
-                is_mod=is_mod,
-                is_broadcaster=is_broadcaster,
-            ),
-            {},
-            http_client=None,
-        )
-    )
-    assert result.detail == "add"
-
-
-def test_adjust_rejected_for_non_mod(fake_host: _FakeHost) -> None:
-    result = _run(
-        dispatch(
-            _sample_envelope(
-                "twitch", "add", target="alice", amount=5, is_mod=False, is_broadcaster=False
-            ),
-            {},
-            http_client=None,
-        )
-    )
-    assert result.detail == "add:denied"
-    assert "only moderators/broadcasters" in _reply_text(fake_host)
-    assert fake_host.db.rows == {}
-
-
-def test_adjust_rejected_when_role_signal_entirely_absent(fake_host: _FakeHost) -> None:
-    """Discord today has no is_mod/is_broadcaster at all -- must deny, never implicitly allow."""
+    fake_host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
     result = _run(
         dispatch(
             _sample_envelope("discord", "add", target="alice", amount=5), {}, http_client=None
         )
     )
+    assert result.detail == "add"
+    assert SCOPE_ADMIN in fake_host.authz.calls
+
+
+@pytest.mark.parametrize("command", ["add", "sub"])
+@pytest.mark.parametrize("role", ["moderator", "vip", "member", "unknown-role"])
+def test_platform_mod_badge_without_admin_role_cannot_adjust(
+    command: str, role: str, fake_host: _FakeHost
+) -> None:
+    fake_host.authz.scopes = set(FakeAuthzHost.for_role(role).scopes)
+    result = _run(
+        dispatch(
+            _sample_envelope(
+                "twitch", command, target="alice", amount=5, is_mod=True, is_broadcaster=True
+            ),
+            {},
+            http_client=None,
+        )
+    )
+    assert result.detail == f"{command}:denied"
+    assert "only community admins" in _reply_text(fake_host)
+    assert fake_host.db.rows == {}
+    assert [m for _lvl, m, _f in fake_host.log_calls if m == "rank.adjust_denied"]
+
+
+def test_adjust_denied_when_authz_host_unavailable(fake_host: _FakeHost) -> None:
+    fake_host.authz.unavailable = True
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", "add", target="alice", amount=5, is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
     assert result.detail == "add:denied"
-    denial_logs = [m for _lvl, m, _f in fake_host.log_calls if m == "rank.adjust_denied"]
-    assert denial_logs
+    assert fake_host.db.rows == {}
+
+
+def test_moderator_map_still_allows_ban_and_timeout() -> None:
+    mod = FakeAuthzHost.for_role("moderator")
+    assert mod.caller_can(SCOPE_BAN) and mod.caller_can(SCOPE_TIMEOUT)
+    assert not mod.caller_can(SCOPE_ADMIN)
 
 
 def test_adjust_raises_on_malformed_payload(fake_host: _FakeHost) -> None:
@@ -916,13 +924,3 @@ def test_format_adjust_reply_crosses_a_level_boundary() -> None:
     assert text == "Added 100 XP to alice. Now level 3 (400 XP)."
 
 
-def test_caller_role_signal_absent_is_none() -> None:
-    assert _caller_role_signal({}) is None
-
-
-def test_caller_role_signal_true_from_mod() -> None:
-    assert _caller_role_signal({"is_mod": True}) is True
-
-
-def test_caller_role_signal_false_when_both_false() -> None:
-    assert _caller_role_signal({"is_mod": False, "is_broadcaster": False}) is False

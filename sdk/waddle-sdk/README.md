@@ -25,6 +25,14 @@ async def dispatch(envelope: StageEnvelope, config: dict, *, http_client) -> Any
     ...  # action-stage.dispatch
 ```
 
+## Authorization: `caller_can` (not `is_mod`)
+
+The event payload's `is_mod` / `is_broadcaster` are platform chat badges and are **display-only, never
+authorization**. Gate privileged actions on `await waddle_sdk.caller_can(waddle_sdk.SCOPE_BAN)` (scopes:
+`SCOPE_MEMBER/VIP/MODERATE/BAN/TIMEOUT/ADMIN/OWNER`). `stage-next` only; fails closed (`False`, logged with
+scope + error kind only) on an invalid scope or any host error. Tests: `waddle_sdk.testing.install_fake_authz_host(
+monkeypatch, role="moderator")` (or `scopes={...}`, `unavailable=True`).
+
 ## Building the component
 
 `componentize-py componentize`'s app module is always
