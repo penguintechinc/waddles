@@ -134,6 +134,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
             "chat:read",
             "chat:edit",
             "moderator:manage:banned_users",
+            "channel:moderate",
             "moderator:manage:chat_messages",
             "moderator:manage:shoutouts",
             "channel:manage:broadcast",

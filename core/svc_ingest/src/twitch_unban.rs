@@ -618,12 +618,20 @@ struct BannedBody {
     data: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+struct ValidateBody {
+    client_id: String,
+}
+
+const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
+
 /// Production [`BanState`]: Helix `GET /moderation/banned` with the community's own OAuth token.
 pub struct HelixBanState<C: TwitchCredentialSource> {
     creds: C,
     client_id: String,
     client: bundle_host_http::guarded::GuardedClient,
     url: String,
+    validate_url: String,
 }
 
 impl<C: TwitchCredentialSource> HelixBanState<C> {
@@ -649,16 +657,50 @@ impl<C: TwitchCredentialSource> HelixBanState<C> {
         client: bundle_host_http::guarded::GuardedClient,
         url: String,
     ) -> Self {
+        Self::with_endpoints(creds, client_id, client, url, VALIDATE_URL.to_string())
+    }
+
+    /// Explicit Helix + OAuth-validate endpoints (tests point both at a local fake).
+    #[must_use]
+    pub fn with_endpoints(
+        creds: C,
+        client_id: String,
+        client: bundle_host_http::guarded::GuardedClient,
+        url: String,
+        validate_url: String,
+    ) -> Self {
         Self {
             creds,
             client_id,
             client,
             url,
+            validate_url,
         }
     }
 }
 
 impl<C: TwitchCredentialSource> HelixBanState<C> {
+    async fn resolve_token_client_id(&self, token: &str) -> Result<String, ()> {
+        let resp = self
+            .client
+            .fetch(
+                reqwest::Method::GET,
+                &self.validate_url,
+                vec![("Authorization".to_string(), format!("OAuth {token}"))],
+                None,
+            )
+            .await
+            .map_err(|_| ())?;
+        if !(200..300).contains(&resp.status) {
+            return Err(());
+        }
+        let body: ValidateBody = serde_json::from_slice(&resp.body).map_err(|_| ())?;
+        if body.client_id.trim().is_empty() {
+            return Err(());
+        }
+        Ok(body.client_id)
+    }
+
     /// Reads Twitch's current ban state of `user_id` in `broadcaster_id`'s channel with `token`
     /// (the community's own OAuth token). `Ok(true)` when banned or timed out; any transport,
     /// status or parse failure is `Err` (fail closed).
@@ -672,7 +714,7 @@ impl<C: TwitchCredentialSource> HelixBanState<C> {
         url.query_pairs_mut()
             .append_pair("broadcaster_id", broadcaster_id)
             .append_pair("user_id", user_id);
-        let resp = self
+        let mut resp = self
             .client
             .fetch(
                 reqwest::Method::GET,
@@ -685,6 +727,27 @@ impl<C: TwitchCredentialSource> HelixBanState<C> {
             )
             .await
             .map_err(|_| ())?;
+        // Tenant-owned Twitch apps mint tokens under their own Client-Id; on 401 resolve the
+        // token's Client-Id via oauth2/validate and retry once before failing closed.
+        if resp.status == 401 {
+            if let Ok(token_client_id) = self.resolve_token_client_id(token).await {
+                if token_client_id != self.client_id {
+                    resp = self
+                        .client
+                        .fetch(
+                            reqwest::Method::GET,
+                            url.as_str(),
+                            vec![
+                                ("Authorization".to_string(), format!("Bearer {token}")),
+                                ("Client-Id".to_string(), token_client_id),
+                            ],
+                            None,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                }
+            }
+        }
         if !(200..300).contains(&resp.status) {
             return Err(());
         }

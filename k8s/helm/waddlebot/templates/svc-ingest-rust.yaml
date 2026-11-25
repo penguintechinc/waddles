@@ -247,12 +247,6 @@ spec:
         - name: SENDER_EXEC_DIGEST_SPECTRUM
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "spectrum") | quote }}
         {{- end }}
-        # Public Helix application client id, from the operator-managed platform-credentials Secret.
-        - name: TWITCH_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
-              key: TWITCH_CLIENT_ID
         # svc-ingest's OWN server-only cert/key (dedicated Secret, svc-ingest SAN only) -- never the
         # shared executor/stage host-api-tls material. The client identity is pinned.
         - name: HOST_API_SERVER_CERT_FILE
@@ -263,6 +257,16 @@ spec:
           value: /etc/waddlebot/svc-ingest-host-api-tls/ca.crt
         - name: HOST_API_CLIENT_IDENTITY
           value: {{ include "waddlebot.svcIngestHostApiClientIdentity" . | quote }}
+        {{- end }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # Public Helix application client id, from the operator-managed platform-credentials Secret.
+        # Rendered whenever connectorTools OR dynamicConnections is enabled so Twitch unban sync works
+        # even when connectorTools.enabled is false (e.g. alpha / dal2alpha).
+        - name: TWITCH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: TWITCH_CLIENT_ID
         {{- end }}
         {{- if include "waddlebot.connectorRuntimeActive" . }}
         {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime }}
