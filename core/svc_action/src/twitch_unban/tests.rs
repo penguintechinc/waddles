@@ -54,6 +54,15 @@ impl UnbanSync for FakeLift {
 #[derive(Default)]
 struct FakeSeen(Mutex<HashSet<String>>, bool);
 impl SeenStore for FakeSeen {
+    fn is_seen<'a>(&'a self, id: &'a str) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            if self.1 {
+                return Err("down".into());
+            }
+            Ok(self.0.lock().unwrap().contains(id))
+        })
+    }
+
     fn claim<'a>(&'a self, id: &'a str) -> StoreFuture<'a, bool> {
         Box::pin(async move {
             if self.1 {
