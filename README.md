@@ -1,117 +1,91 @@
 # Waddles
 
-> **Multi-platform community & bot platform — App Bundle marketplace on an ingest → process → action → presentation pipeline.**
+> **One community platform across every channel — powered by sandboxed App Bundles.**
 >
-> Twitch, Discord, Slack, YouTube, Kick, Teams, Mattermost, and Google Chat in one platform, extended by an App Bundle marketplace.
+> Unify Twitch, Discord, Slack, YouTube, Kick, Microsoft Teams, Mattermost, and Google Chat with extensible moderation, chat automation, live overlays, music queues, streaming, and AI workflows.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](docs/LICENSE.md)
 [![Architecture](https://img.shields.io/badge/architecture-v3.0.x%20(alpha)-orange.svg)](docs/ARCHITECTURE.md)
 [![Rust Data Plane Spec](https://img.shields.io/badge/spec-Rust%20Data%20Plane%20%2B%20WASM-blueviolet.svg)](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md)
-[![Kubernetes](https://img.shields.io/badge/kubernetes-Helm%20v3-blue.svg)](https://kubernetes.io/)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-Helm%20v3-blue.svg)](docs/KUBERNETES.md)
 
 ---
 
-## What is Waddles?
+## Why Waddles?
 
-Waddles is a chat bot and community platform built around the **SCCEBM** module set — **S**ocials, **C**ustomer, **C**ommunity, **E**vent, **B**ot, **M**arketing.
+Modern communities live across chat, voice, and live streams — yet most bots lock you into a single platform or a rigid set of built-in commands.
 
-Every capability ships as an **App Bundle**: a versioned package of per-stage components (`process`, `action`, `presentation`) that a tenant installs, makes available, and a community activates. The platform provides the pipeline, identity, entitlement, and marketplace; App Bundles provide the behavior.
+Waddles separates the **platform** from the **extensions**:
 
-## Architecture: 8 Containers & Data Plane
+- **Unified Multi-Platform Reach** — Connect Twitch, Discord, Slack, YouTube, Kick, Teams, Mattermost, and Google Chat into one tenant-isolated control plane.
+- **SCCEBM Module Architecture** — Built around **S**ocials, **C**ustomer, **C**ommunity, **E**vent, **B**ot, and **M**arketing workflows.
+- **App Bundle Marketplace** — Every feature ships as a versioned **App Bundle** (`installed ⊆ available ⊆ activated`). Communities can run multiple bundles side-by-side, upgrade independently, and customize behavior without touching core infrastructure.
+- **Zero-Trust Bundle Isolation** — Untrusted or third-party bundles run as credential-less **WASI 0.2 WebAssembly components** inside gVisor (`runsc`) sandboxes, with strict host-enforced capabilities and scopes.
 
-Waddles runs on a fixed 8-container pipeline:
+---
 
-```
- inbound                                                              outbound
-   │                                                                     ▲
-   ▼        ┌───────────────┐    ┌───────────────┐    ┌───────────────┐ │
- svc-ingest │ Valkey stream │ svc-process │ Valkey │  svc-action  │─────┘
-   │  ────▶ └───────────────┘  ────▶       ────▶   └──────┬────────┘
-   │                                                       │ overlay target
-   │                                                ┌──────▼─────────┐
-   │                                                │ svc-presentation │ overlays + Music Station
-   │                                                └──────────────────┘ (OBS browser sources)
-   │        ┌───────────────┐
-   └───────▶│ svc-streaming │ RTC + HLS/RTMP/AV1 record/forward/transcode
-            └───────────────┘
+## Core Capabilities
 
-  svc-core   identity · security · credentials · entitlement (RustLang, gRPC :50203)
-  hub-api    admin + tenancy + marketplace + billing + gRPC/REST/MCP (Python/Quart control plane)
-  hub-webui  ExpressScript + ReactJS (static-serve / API proxy)
-```
+- **App Bundle Marketplace & Polyglot SDKs** — Build extensions in **Python, Rust, or JavaScript/TypeScript**, or bring any language that compiles to **WASI 0.2** (C/C++, Go, Zig, Swift, and more).
+  - *Learn more:* [App Bundle Authoring Guide](docs/APP_BUNDLE_AUTHORING.md) · [App Bundle SDK Spec](docs/plans/2026-08-31-app-bundle-sdk-design.md)
+- **Live Overlays & Music Station** — Per-community music queues (YouTube, Spotify) paired with real-time OBS browser-source overlays (`full_screen`, `media`, `crawler`, `ticker`, `alert_box`, `chat`, `goals`).
+  - *Learn more:* [Overlay Browser-Source Guide](docs/guides/overlay-browser-source.md) · [Music Requests Service](docs/music-requests-service.md)
+- **Streaming & RTC Control Plane** — Native WebRTC rooms (WHIP/WHEP) and HLS/RTMP/AV1 recording, transcoding, and relay.
+  - *Learn more:* [System Architecture](docs/ARCHITECTURE.md) · [RTC Media Exposure](docs/RTC_MEDIA_EXPOSURE.md)
+- **Moderation, Reputation & Cross-Platform Sync** — Community-scoped floor bans, native Twitch and Discord unban synchronization, and host-verified OIDC scopes.
+  - *Learn more:* [Reputation Service](docs/bundle-reputation-service.md) · [Roles & Scopes](docs/roles-and-scopes.md)
+- **AI Routing & Token Billing** — Free local inference, metered models, Bring-Your-Own-Key (BYOK) routing, and a built-in token ledger.
+  - *Learn more:* [Token Billing](docs/token-billing-debit.md) · [AI Knowledge Sources](docs/ai-knowledge-sources.md)
+- **Enterprise Multi-Tenancy & Compliance** — Hard tenant isolation, SSO (OAuth2, SAML 2.0, OIDC), DSAR inbox workflows, and per-tenant encryption at rest.
+  - *Learn more:* [Security Model](docs/SECURITY.md) · [SSO](docs/SSO.md) · [Privacy & Compliance](docs/PRIVACY.md)
 
-### Core Container Responsibilities
+---
 
-| Container | Responsibility | Stack | Port |
-|---|---|---|---|
-| `svc-ingest` | Inbound platform receivers (Twitch, Slack, Discord, Kick, YouTube, generic intake) | RustLang | 8200 |
-| `svc-process` | Event routing, workflow orchestration & `process`-stage WASM execution | RustLang | 8201 |
-| `svc-action` | Outbound actions, target adapters & `action`-stage WASM execution | RustLang | 8202 |
-| `svc-core` | Identity, security, credentials & entitlement (gRPC) | RustLang | 8203 / 50203 |
-| `svc-presentation` | Core overlays (`full_screen`/`media`/`crawler`) + Music Station | RustLang | 8207 |
-| `svc-streaming` | RTC + broadcast media control plane | RustLang | 8208 / 50208 |
-| `hub-api` | Control plane: admin, tenancy, marketplace, billing, AI routing & MCP | Python/Quart | 8204 / 50204 |
-| `hub-webui` | Admin portal & community web UI | ExpressScript + ReactJS | 8205 |
+## Architecture at a Glance
 
-For in-depth service architectures, transport security, and stream specifications, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the [`Rust Data Plane Specification`](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md).
+Waddles pairs a high-throughput **Rust data plane** (`svc-*`) over **Valkey Streams** with a **Python/Quart control plane** (`hub-api`), a **React 18 web portal** (`hub-webui`), and **WASI 0.2 App Bundles** isolated in **gVisor**.
 
-## App Bundle Model & WASM Sandbox
+For the full pipeline flow diagram, container responsibilities, ports, isolation keys, and typed stage contracts, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and the **[Rust Data Plane Specification](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md)**.
 
-- **Logical Hierarchy**: `Core → Module → Feature → App (Bundle)`.
-- **Security & Multi-Tenant Isolation**: All App Bundles execute as **WASI 0.2 WebAssembly components** inside a credential-less executor (`svc-bundles-executor`) under a **gVisor `RuntimeClass` (`runsc`)**, providing memory safety and strict capability-scoped isolation.
-- **Polyglot Language Portability**: WebAssembly provides full language freedom — **any application or language that compiles to WASI 0.2 can run as an App Bundle**. Tier 1 SDKs support Python, Rust, and JavaScript/TypeScript, while prebuilt WASI 0.2 components compiled from any language (C/C++, Go, Zig, Swift, etc.) are supported out of the box (Tier 2).
-- **Lifecycle & Coexistence**: 3-tier lifecycle (`installed ⊆ available ⊆ activated`). Multiple bundles for the same Feature can run side-by-side per community.
-
-For full bundle creation guidelines, see the [`App Bundle SDK Specification`](docs/plans/2026-08-31-app-bundle-sdk-design.md).
-
-## Technology Stack
-
-- **Data Plane (`svc-*`)**: RustLang (Axum, tokio, SeaORM, gRPC, OTel)
-- **Control Plane (`hub-api`)**: Python 3.13 / Quart (async)
-- **Web UI (`hub-webui`)**: ExpressScript + ReactJS (React 18), Vite, TailwindCSS v4
-- **App Bundle Runtime**: Sandboxed WASI 0.2 WASM components in gVisor (`runsc`)
-- **Pipeline Spine**: Valkey Streams (TLS + ACL authenticated)
-- **Storage & Infrastructure**: PostgreSQL, Valkey, SeaweedFS (S3), Qdrant, Docker, Kubernetes (Helm v3)
+---
 
 ## Quick Start
+
+Deploy the alpha stack to a local Kubernetes cluster (MicroK8s or Docker Desktop) with Helm v3:
 
 ```bash
 git clone https://github.com/penguintechinc/waddles.git
 cd waddles
 
-# Local / Alpha (MicroK8s or Docker Desktop)
 helm install waddlebot ./k8s/helm/waddlebot -n waddlebot --create-namespace \
   -f k8s/helm/waddlebot/values-alpha.yaml
 ```
 
-See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for detailed deployment and first-run instructions.
+See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for prerequisites, secret provisioning, and first-run setup.
 
-## Hero Features
+---
 
-- **App Bundle Marketplace** — vendor submission, review, and multi-tier lifecycle management.
-- **Music Station** — per-community queue mixing YouTube and Spotify with live OBS overlay integration.
-- **Presentation & Overlays** — `full_screen`, `media`, and `crawler` OBS browser-source overlay surfaces.
-- **Streaming Proxy Control Plane** — RTMP/AV1 record, transcode, relay, and RTC control plane.
-- **AI Routing & Token Billing** — free local models, metered local inference, BYOK routing, and token ledger.
+## Documentation
 
-## Documentation Map
-
-| Guide | Description |
+| Guide | What's Inside |
 |---|---|
-| **[Architecture Overview](docs/ARCHITECTURE.md)** | Container architecture, pipeline flow, and module ownership |
-| **[Rust Data Plane & WASM Spec](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md)** | Technical specification for Rust services, WASM sandbox, and Valkey Streams |
-| **[Quick Start Guide](docs/QUICKSTART.md)** | Helm deployment and first-time setup walkthrough |
-| **[App Bundle SDK Spec](docs/plans/2026-08-31-app-bundle-sdk-design.md)** | Bundle authoring, stage contracts, and manifest reference |
-| **[Kubernetes Deployment](docs/KUBERNETES.md)** | Helm values and Kubernetes configuration reference |
-| **[Database Architecture](docs/DATABASE.md)** | Schema, migrations, and database access design |
-| **[Contributing](docs/CONTRIBUTING.md)** | Guidelines for developing bundles and contributing code |
-| **[Security Policy](docs/SECURITY.md)** | Vulnerability reporting and security model |
+| **[Architecture Overview](docs/ARCHITECTURE.md)** | 8-container topology, pipeline flow diagram, ports, and isolation model |
+| **[Rust Data Plane & WASM Spec](docs/superpowers/specs/2026-09-14-rust-data-plane-design.md)** | Deep-dive specification for Rust services, WASI 0.2 sandbox, and Valkey Streams |
+| **[Quick Start Guide](docs/QUICKSTART.md)** | Step-by-step local deployment and first-run walkthrough |
+| **[App Bundle Authoring](docs/APP_BUNDLE_AUTHORING.md)** | End-to-end guide to building, testing, and publishing App Bundles |
+| **[App Bundle SDK Spec](docs/plans/2026-08-31-app-bundle-sdk-design.md)** | Stage contracts, WIT interfaces, and manifest schemas |
+| **[Kubernetes Deployment](docs/KUBERNETES.md)** | Helm values, overlays, and cluster configuration reference |
+| **[Database Architecture](docs/DATABASE.md)** | Schema design, Alembic migrations, and per-service DB accounts |
+| **[Security Policy](docs/SECURITY.md)** | Threat model, tenant isolation, and vulnerability reporting |
+| **[Contributing](docs/CONTRIBUTING.md)** | Development workflow, testing standards, and PR guidelines |
 
-**Browse all docs:** [/docs](docs/)
+**Browse all documentation:** [/docs](docs/)
+
+---
 
 ## Client Applications
 
-Mobile and desktop client code does not live in this repository. Mobile apps (Android/iOS/Flutter) are owned by the **`penguinm`** repo; the desktop client is owned by **`penguind`** (the `penguin` repo). Waddles keeps only the server-side, client-facing APIs (hub-api).
+Mobile and desktop client code is maintained in separate repositories (`penguinm` for Android/iOS Flutter apps and `penguind` in `penguin` for the desktop client). Waddles hosts the server-side services and APIs (`hub-api`).
 
 ## Acknowledgements
 
@@ -119,7 +93,7 @@ Mobile and desktop client code does not live in this repository. Mobile apps (An
 
 ## License
 
-**Open Source (AGPL-3.0, with PenguinTech exceptions)** — free for personal, internal, and non-commercial use. Commercial license required for SaaS hosting, resale, and embedded commercial deployments. SDKs/client libraries are MIT. See [docs/LICENSE.md](docs/LICENSE.md) and [docs/LICENSING.md](docs/LICENSING.md).
+**Open Source (AGPL-3.0, with PenguinTech exceptions)** — free for personal, internal, and non-commercial use. A commercial license is required for SaaS hosting, resale, and embedded commercial deployments. SDKs and client libraries are licensed under MIT. See [docs/LICENSE.md](docs/LICENSE.md) and [docs/LICENSING.md](docs/LICENSING.md).
 
 ---
 
