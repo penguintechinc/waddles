@@ -19,6 +19,7 @@ Product capability is organized into 7 modules, **SCCEBM** (+ Streaming): Social
 
 ### Fixed pipeline, App Bundle extensibility
 - 8-container ingest → process → action → presentation pipeline, each stage independently scalable
+- App Bundles execute as **WASI 0.2 WebAssembly components** in credential-less gVisor (`runsc`) sandboxes, using host-resolved `caller_can(scope)` authorization
 - App Bundles installed/available/activated through a 3-tier lifecycle (`installed ⊆ available ⊆ activated`, narrowing global → tenant → community)
 - Multiple bundles can run side by side for the same Feature — no single-winner override
 
@@ -41,8 +42,8 @@ Product capability is organized into 7 modules, **SCCEBM** (+ Streaming): Social
 ## Getting Started
 
 ```bash
-git clone https://github.com/penguintechinc/waddlebot.git
-cd waddlebot
+git clone https://github.com/penguintechinc/waddles.git
+cd waddles
 helm install waddlebot ./k8s/helm/waddlebot -n waddlebot --create-namespace \
   -f k8s/helm/waddlebot/values-alpha.yaml
 ```

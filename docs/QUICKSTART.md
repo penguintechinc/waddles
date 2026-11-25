@@ -32,8 +32,8 @@ To connect Waddles to a platform, you'll need:
 ### Step 1: Clone the repository
 
 ```bash
-git clone https://github.com/penguintechinc/waddlebot.git
-cd waddlebot
+git clone https://github.com/penguintechinc/waddles.git
+cd waddles
 ```
 
 ### Step 2: Install

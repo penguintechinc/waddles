@@ -23,6 +23,8 @@ Complete technical reference for deploying, managing, and operating Waddles on K
 
 ## Overview
 
+> **v3.0.x Note:** Waddles has consolidated from the legacy 31-container layout to the **8-container Rust data plane + Python/Quart + React topology** backed by **Valkey** (not Redis). See [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md) for the current container list and mapping.
+
 Waddles is a microservices-based application designed for Kubernetes deployment. The platform consists of:
 
 - **32 Services**: 24+ application modules + 6 infrastructure services

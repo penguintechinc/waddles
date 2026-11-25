@@ -2,7 +2,7 @@
 
 **Architecture generation:** v3.0.x (alpha, `release/v3.0.X`)
 
-This is the reference architecture doc. For a quick orientation, see the [README](../README.md#architecture-8-containers).
+This is the reference architecture doc. For a high-level product overview, see the [README](../README.md).
 For the App Bundle authoring spec, see [`docs/plans/2026-08-31-app-bundle-sdk-design.md`](plans/2026-08-31-app-bundle-sdk-design.md).
 
 ## Table of Contents
@@ -134,7 +134,11 @@ stream directly from its own JS for live data.
 | Transport | Direct function call | `webhook_push` (HMAC-SHA256 signed) or `rest_pull` (bearer/HMAC) |
 | Failure mode | Exception → DLQ | Timeout (default 5000ms) or non-2xx → DLQ |
 
-Going forward, all App Bundles execute within a sandboxed **gVisor + WASM runtime environment**, ensuring strong multi-tenant isolation, memory safety, and controlled syscall capability gating across native and third-party bundles.
+Going forward, all App Bundles execute within a sandboxed **WASI 0.2 + gVisor (`runsc`) runtime environment** (`svc-bundles-executor`), ensuring strong multi-tenant isolation, memory safety, and controlled capability gating across native and third-party bundles.
+
+### Host-resolved authorization (`caller_can`)
+
+Platform badges (`is_mod`, `is_broadcaster`) are per-channel display hints only — because channels and servers map N:M to Waddles communities, a platform moderator must never implicitly authorize community-wide state changes. Bundles authorize privileged actions via the WIT `authz` interface (`caller_can(scope)` in Python, Rust, and C# SDKs), which resolves the triggering actor's Waddles community role to OIDC scopes on `svc-process` and fails closed on unlinked or unprivileged actors.
 
 ### Standardized action targets
 
@@ -228,21 +232,13 @@ order: community → tenant (narrowest first).
 
 Read this before assuming a container is production-ready:
 
-- **App code is real** for `svc-ingest`, `svc-process`, `svc-action`, `svc-presentation`,
-  `svc-streaming`, `hub-api`, and `hub-webui` — each has a working implementation, tests, and
-  its own `Dockerfile`.
-- **Helm chart wiring lags the code**: every pipeline container's Deployment template still pins
-  `image:` to a shared placeholder base digest (`pipeline.pythonBaseImage` /
-  formerly `pipeline.nodeBaseImage`, removed) — no CI build publishes a per-container image yet.
+- **App code & container builds are real** for `svc-ingest`, `svc-process`, `svc-action`, `svc-presentation`,
+  `svc-streaming`, `svc-bundles-executor`, `hub-api`, and `hub-webui` — each has a working implementation,
+  tests, its own `Dockerfile`, and dedicated CI image builds.
 - **`svc-core` is folded into `hub-api`**: identity, security, and credential logic live in `hub_api/` rather than separate module containers; `svc-core.yaml` is a retired Helm skeleton.
 - **v2.2.x legacy per-module Deployments have been retired** (full historical 31→8 mapping: [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md)).
-- **`svc-streaming` fronts external engines**, it does not implement its own media transport: an
-  internal RTMP/AV1 transcode proxy and LiveKit (SFU) sit behind it today. A native Rust data
-  plane is a documented future direction (`docs/plans/2026-08-31-svc-streaming-design.md`).
-- **Music Station**: the presentation layer (player, overlay, live SSE push to OBS) and the
-  YouTube/Spotify provider resolvers (normalized `Track` model, `hub_api/services/music_providers/`)
-  are real. Per-source `ingest` bundles, a shared `process`-stage queue manager, and SoundCloud
-  support are not yet built — the presentation layer reads an existing queue key format directly.
+- **`svc-streaming` native Rust SFU**: `svc-streaming` implements native WHIP/WHEP WebRTC rooms and moderation alongside HLS/RTMP/AV1 record/forward/transcode control (`LiveKit` is retired).
+- **Music Station**: the presentation layer (player, overlay, live SSE push to OBS), `music-requests`, and the YouTube, Spotify, and SoundCloud provider bundles are implemented.
 
 ## Technology stack
 
