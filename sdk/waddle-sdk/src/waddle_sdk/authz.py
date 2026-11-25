@@ -63,8 +63,10 @@ def _log_denied(reason: str, scope: object, error_kind: str | None = None) -> No
         if error_kind is not None:
             fields["error_kind"] = error_kind
         log.warn("authz.caller_can failed closed", **fields)
-    except Exception:  # noqa: BLE001, S110 - telemetry failure must not change the verdict
-        pass
+    except Exception as exc:  # noqa: BLE001 - telemetry failure must not change the verdict
+        import sys
+
+        sys.stderr.write(f"authz.caller_can telemetry error: {type(exc).__name__}\n")
 
 
 async def caller_can(scope: str) -> bool:

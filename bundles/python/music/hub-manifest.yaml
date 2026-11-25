@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.music
 name: Song Request Queue Bundle (Python)
-version: 1.1.1
+version: 1.1.2
 module: core
 provider: builtin
 author: github:penguintechinc

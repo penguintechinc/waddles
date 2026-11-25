@@ -105,12 +105,7 @@ mod tests {
 
     #[test]
     fn scope_charset_and_length_are_enforced() {
-        for ok in [
-            "community:admin",
-            "community:ban",
-            "a:b",
-            "a.b_c1:d.e_f2",
-        ] {
+        for ok in ["community:admin", "community:ban", "a:b", "a.b_c1:d.e_f2"] {
             assert!(scope_is_valid(ok), "{ok:?}");
         }
         let long = format!("a:{}", "b".repeat(63));
@@ -185,7 +180,7 @@ mod tests {
     async fn a_bad_scope_is_refused_before_any_host_call() {
         // No bridge: an attempted call would surface as `backend`, so
         // `Invalid` proves none was made.
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         for bad in ["", "admin", "Community:admin", &"a".repeat(65)] {
             assert!(matches!(
                 authz::Host::caller_can(&mut state, bad.to_string()).await,

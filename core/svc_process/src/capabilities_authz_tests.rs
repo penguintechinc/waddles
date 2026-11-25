@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-authz";
+const APP_ID: &str = "penguintechinc.waddles.test-authz";
 const ACTOR: &str = "1001";
 
 /// Directory with a scripted role answer and call counters.

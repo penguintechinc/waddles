@@ -4778,9 +4778,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             }
             // `authz.caller_can`: always granted (no gate permission), own
             // handler, never the `storage.tables` path.
-            CapabilityKind::Db if call.op.starts_with("authz.") => {
-                self.handle_authz(&call).await
-            }
+            CapabilityKind::Db if call.op.starts_with("authz.") => self.handle_authz(&call).await,
             // `ai.*` ops likewise: own gate permission (`ai.generate`), own
             // handler, never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("ai.") => self.handle_ai(&call).await,
