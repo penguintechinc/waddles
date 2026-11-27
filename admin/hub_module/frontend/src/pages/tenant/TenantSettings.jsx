@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { tenantApi } from '../../services/api';
 import { Alert, Button, Card, CardBody, LoadingState, PageHeader, TextField } from '../../components/ui';
 import { serverErrorMessage } from '../../lib/reputationPolicy';
+import TenantSignupDomains from './TenantSignupDomains';
 
 /**
  * Tenant settings: editable key/value pairs for one tenant.
@@ -86,6 +87,7 @@ function TenantSettings() {
   return (
     <div className="p-6 max-w-2xl">
       <PageHeader title="Tenant settings" description="Key/value settings for this tenant." />
+      <TenantSignupDomains tenantSlug={tenantSlug} />
       {!rows && !loadError && <LoadingState label="Loading tenant settings" />}
       {loadError && (
         <div data-testid="tenant-settings-load-error">

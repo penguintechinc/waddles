@@ -861,6 +861,9 @@ export const tenantApi = {
   updateTenant: (slug, data) => api.put(`/api/v1/tenant/${slug}`, data),
   getSettings: (slug) => api.get(`/api/v1/tenant/${slug}/settings`),
   updateSettings: (slug, settings) => api.put(`/api/v1/tenant/${slug}/settings`, { settings }),
+  // Signup email-domain restriction (PUT needs the per-action tenant.signup_domains:write scope).
+  getSignupDomains: (slug) => api.get(`/api/v1/tenant/${slug}/signup-domains`),
+  updateSignupDomains: (slug, domains) => api.put(`/api/v1/tenant/${slug}/signup-domains`, { domains }),
   getCommunities: (slug, params) => api.get(`/api/v1/tenant/${slug}/communities`, { params }),
   getAdmins: (slug) => api.get(`/api/v1/tenant/${slug}/admins`),
   addAdmin: (slug, userId, role) => api.post(`/api/v1/tenant/${slug}/admins`, { userId, role }),
