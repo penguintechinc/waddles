@@ -25,6 +25,9 @@ Call with:
         "selector" (dict ...)                 # optional, pod matchLabels (default instance+component)
         "name" "x"                            # optional, policy-name suffix (default component)
         "tetragon" false                      # optional, skip the exec allowlist (third-party images)
+        "initContainers" (list (dict "name" "x" "binaries" (list ...)))  # optional: each init
+                                              # container gets its OWN exec allowlist (Tetragon
+                                              # containerSelector), never merged into the workload's
         "cnp" false)                          # optional, skip the CNP (workload has its own dedicated one)
 */}}
 
@@ -222,6 +225,12 @@ spec:
 {{- $runcCallers := $runcInit.callerBinaries | default list -}}
 {{- if and $runcInit.enabled (not $runcCallers) -}}
 {{- fail (printf "workload %q: tetragon.runcInit.enabled requires a non-empty tetragon.runcInit.callerBinaries (refusing to allow /proc/self/fd/ execs unscoped)" $c) -}}
+{{- end -}}
+{{- $inits := .initContainers | default list -}}
+{{- $initNames := list -}}
+{{- range $inits -}}
+{{- if not .binaries -}}{{- fail (printf "workload %q: initContainers entry %q needs a non-empty binaries allowlist" $c .name) -}}{{- end -}}
+{{- $initNames = append $initNames .name -}}
 {{- end }}
 ---
 apiVersion: cilium.io/v1alpha1
@@ -236,6 +245,17 @@ spec:
   podSelector:
     matchLabels:
       {{- toYaml $sel | nindent 6 }}
+  {{- if $initNames }}
+  # Main container(s) only: each init container below is judged by its own policy.
+  containerSelector:
+    matchExpressions:
+      - key: name
+        operator: NotIn
+        values:
+          {{- range $initNames }}
+          - {{ . | quote }}
+          {{- end }}
+  {{- end }}
   kprobes:
     - call: "sys_execve"
       syscall: true
@@ -276,5 +296,66 @@ spec:
           matchActions:
             - action: {{ $root.Values.tetragon.action }}
         {{- end }}
+{{- range $inits }}
+---
+# Init container {{ .name }}: its own exec allowlist, scoped by containerSelector so the
+# workload's main container never inherits these binaries. Same selector shape as the workload
+# policy above (one NotEqual list + the runc guard).
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "waddlebot.fullname" $root }}-{{ $c }}-{{ .name }}-exec-allowlist
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $c }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+  containerSelector:
+    matchExpressions:
+      - key: name
+        operator: In
+        values:
+          - {{ .name | quote }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                {{- range (.binaries | uniq) }}
+                - {{ . | quote }}
+                {{- end }}
+            {{- if $runcInit.enabled }}
+            - index: 0
+              operator: "NotPrefix"
+              values:
+                - "/proc/self/fd/"
+            {{- end }}
+          matchActions:
+            - action: {{ $root.Values.tetragon.action }}
+        {{- if $runcInit.enabled }}
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                {{- range $runcCallers }}
+                - {{ . | quote }}
+                {{- end }}
+          matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/proc/self/fd/"
+          matchActions:
+            - action: {{ $root.Values.tetragon.action }}
+        {{- end }}
+{{- end }}
 {{- end }}
 {{- end -}}

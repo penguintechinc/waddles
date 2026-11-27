@@ -39,10 +39,20 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no initContainers: hub-api
-      # bootstraps its own schema in-process at startup (hub_api/bootstrap.py), gated on
-      # its own `/ready` readinessProbe below rather than a pre-run initContainer. hub-api
-      # is the one Deployment in this chart that never waits on itself.
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no wait-for-hub-api / schema
+      # initContainer: hub-api observes its own schema in-process at startup
+      # (hub_api/bootstrap.py), gated on its own `/ready` readinessProbe below. hub-api is the
+      # one Deployment in this chart that never waits on itself.
+      {{- if .Values.infrastructure.seaweedfs.enabled }}
+      # fix/escrow-bucket-init-ordering -- SeaweedFS bucket init (escrow bucket included) runs
+      # HERE, before the hub-api container, instead of as a post-install hook: the platform vault
+      # refuses to boot without the escrow bucket (`escrow_unavailable`), and a post hook never
+      # runs while `helm upgrade --wait` waits on this pod (fresh-install deadlock). Idempotent
+      # create-if-absent; bounded wait for the S3 gateway; kubelet retries on failure. The vault's
+      # runtime fail-closed check is unchanged. Spec: templates/_seaweedfs_bucket_init.tpl.
+      initContainers:
+      {{- include "waddlebot.seaweedfsBucketInit.container" . | nindent 6 }}
+      {{- end }}
       containers:
       - name: hub-api
         # fix/alpha-helm-deploy -- hub_api/Dockerfile (Python 3.13 + Quart control-plane
@@ -498,5 +508,5 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort) "initContainers" (ternary (list (dict "name" "seaweedfs-bucket-init" "binaries" $.Values.infrastructure.seaweedfs.bucketInitJob.execBinaries)) (list) $.Values.infrastructure.seaweedfs.enabled)) }}
 {{- end }}
