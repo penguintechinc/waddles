@@ -140,6 +140,7 @@ from services.credential_resolver import (
     TransportUnavailable,
 )
 from services.guild_pairing import INBOUND_COMMUNITY_ROLES, list_bindings
+from services.member_roles import set_member_role
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
 from services.scope_registry import KIND_ADMIN
 from services.sync_worker_dal import open_worker_dal
@@ -804,17 +805,16 @@ def _community_grant(dal: Any, community_id: int, hub_user_id: int) -> Any | Non
 
 
 def _set_member_role(dal: Any, member: Any, community_id: int, role: str) -> None:
-    """Write `role` (+ its `community_role_id`) and reset the claims cache; caller commits."""
-    role_row = (
-        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
-        .select()
-        .first()
-    )
-    dal(dal.community_members.id == member.id).update(
+    """Write `role` (+ its `community_role_id`) and reset the claims cache; caller commits.
+
+    Non-strict: a synced role the community never defined links no role row (no scopes), as before.
+    """
+    set_member_role(
+        dal,
+        community_id=community_id,
         role=role,
-        community_role_id=int(role_row.id) if role_row is not None else None,
-        claims_cache=None,
-        updated_at=datetime.now(UTC),
+        members=dal.community_members.id == member.id,
+        strict=False,
     )
 
 

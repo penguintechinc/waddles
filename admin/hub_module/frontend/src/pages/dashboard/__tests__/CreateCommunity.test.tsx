@@ -10,6 +10,7 @@ import CreateCommunity from '../CreateCommunity';
 import { toCreatePayload } from '../../../services/communityAdminApi';
 import { apiClient } from '../../../lib/apiClient';
 import { createTestQueryClient } from '../../../test/renderWithProviders';
+import { communityKeys } from '../../../hooks/useMyCommunities';
 import { httpError, ok } from '../../../test/api';
 
 const auth = vi.hoisted(() => ({ isSuperAdmin: true }));
@@ -18,9 +19,9 @@ vi.mock('../../../contexts/AuthContext', () => ({
   useAuth: () => ({ user: { username: 'tux' }, isAuthenticated: true, isSuperAdmin: auth.isSuperAdmin, refreshUser: vi.fn() }),
 }));
 
-function renderPage() {
+function renderPage(client = createTestQueryClient()) {
   return render(
-    <QueryClientProvider client={createTestQueryClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/communities/create']}>
         <Routes>
           <Route path="/communities/create" element={<CreateCommunity />} />
@@ -51,6 +52,29 @@ describe('CreateCommunity', () => {
     expect(url).toBe('/api/v1/superadmin/communities');
     expect(body).toMatchObject({ name: 'penguin-pals', platform: 'discord', isPublic: true, communityType: 'creator' });
     expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/communities/create');
+  });
+
+  it('invalidates the "my communities" query after a successful create', async () => {
+    vi.spyOn(apiClient, 'post').mockResolvedValue(ok({ success: true, community: { id: '0000002a-0000-4000-8000-000000000000', name: 'penguin-pals', displayName: 'Penguin Pals' } }, 201));
+    const client = createTestQueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    renderPage(client);
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'Penguin Pals' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByText('community dashboard')).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['communities', 'mine'] });
+    expect(communityKeys.mine).toEqual(['communities', 'mine']);
+  });
+
+  it('leaves "my communities" cached when the create fails', async () => {
+    vi.spyOn(apiClient, 'post').mockRejectedValue(httpError(409, { success: false, error: { code: 'CONFLICT', message: 'taken' } }));
+    const client = createTestQueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    renderPage(client);
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'dupe' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByTestId('community-form-error')).toBeInTheDocument();
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it('refuses a numeric community id in the create response instead of navigating to it', async () => {

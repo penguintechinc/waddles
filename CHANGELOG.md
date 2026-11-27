@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Community creators now hold the admin role (roles seeded + creator linked in the create transaction).** Community create never called `seed_community_system_roles()` nor set `community_members.community_role_id`, so the creator resolved no scopes. Create now seeds the system roles via the DB function and links the creator to `community-admin` in the same transaction; `communities.owner_id` is no longer written from the payload. Global-community auto-join links the `member` role. Every membership-role write goes through one helper (`hub_api/services/member_roles.set_member_role`, keeps the legacy `role` string in sync). Alembic `0145_community_role_backfill` seeds roles for any community missing them and backfills `community_role_id` from the role string. Webui invalidates "my communities" after create. See `docs/roles-and-scopes.md`.
+
 ### Removed
 - **Retired the Go `core/module_rtc` and the `svc-rtc` Helm skeleton; `svc-streaming` (Rust) is the sole RTC/rooms backend.** Removed the module, its chart template and `pipeline.svcRtc` values, `modules.social`, SPIRE entry, `go-gates` and `rtc-parity-gate` workflows, CodeQL Go setup, dependabot gomod entry, and image-inputs entry. hub-api already reaches rooms over gRPC (`waddles.streaming.internal.v1.RoomsService`); nothing called module_rtc's REST.
 

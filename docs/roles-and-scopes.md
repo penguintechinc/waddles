@@ -25,6 +25,14 @@ checks). A `roles` claim such as `super_admin` or `platform-admin` authorizes no
 The kind is set by migration `0117_community_role_kind` (backfill plus a `BEFORE INSERT` trigger for
 `seed_community_system_roles()`), so the guards read data, not names.
 
+Every community gets its predefined roles from the database function `seed_community_system_roles()`
+(the only definition of their names and scopes), called inside community create's transaction; the
+creator is linked to `community-admin`. A member holds one role through
+`community_members.community_role_id`, and authz resolves scopes only through that link. All
+membership-role writes go through `hub_api/services/member_roles.set_member_role` (it also keeps the
+legacy `role` string in sync). Migration `0145_community_role_backfill` repaired communities created
+before this.
+
 ## Role management rules
 
 * Create, edit and delete need the `roles:manage` scope (held by the admin kind; global and tenant

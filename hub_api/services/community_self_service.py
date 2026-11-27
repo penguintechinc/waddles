@@ -1,9 +1,8 @@
 """Member-facing community self-create and recent-activity feed.
 
-Self-create CALLS `superadmin_service.create_community` (name validation, free-tier cap, creator
-membership row all live there) and then links the creator's membership to the community's
-admin-kind `community_roles` row (`community_role_id`), creating that row only if the community
-has none yet. Authority is always the role's scopes, never a role name.
+Self-create CALLS `superadmin_service.create_community` (name validation, free-tier cap, role
+seeding and the creator's link to the seeded owner/admin role all live there). Authority is always
+the role's scopes, never a role name.
 
 The activity feed merges `community_members.joined_at` (active, non-banned members) with
 published announcements, newest first, exposing hub user public UUIDs only.
@@ -11,16 +10,12 @@ published announcements, newest first, exposing hub user public UUIDs only.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Final
 
 from services import superadmin_service
 from services.community_common import ensure_community_tables
-from services.member_roles import COMMUNITY_OWNER_ROLE
 from services.membership_state import MembershipState
-from services.scope_registry import KIND_ADMIN
 
 #: PostHog flag gating self-create; default OFF until validated.
 FEATURE_COMMUNITY_SELF_CREATE: Final = "waddles.community-self-create"
@@ -38,39 +33,6 @@ class ActivityItem:
     actorId: str | None  # noqa: N815 - wire contract is camelCase
     actorName: str | None  # noqa: N815
     title: str | None
-
-
-def _link_creator_admin_role_sync(dal: Any, *, community_id: int, user_id: int) -> None:
-    """Point the creator's membership at the community's admin-kind role (create it if absent)."""
-    role = (
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.role_kind == KIND_ADMIN)
-        )
-        .select()
-        .first()
-    )
-    if role is not None:
-        role_id = int(role.id)
-    else:
-        role_id = int(
-            dal.community_roles.insert(
-                community_id=community_id,
-                name=COMMUNITY_OWNER_ROLE,
-                display_name="Community Owner",
-                is_system=True,
-                role_kind=KIND_ADMIN,
-                priority=100,
-                base_claims={"scopes": []},
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-        )
-    dal(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id))
-    ).update(community_role_id=role_id)
-    dal.commit()
 
 
 async def create_own_community(
@@ -103,11 +65,6 @@ async def create_own_community(
         caller_id=caller_id,
         tenant_slug=tenant_slug,
         tenant_id=tenant_id,
-    )
-    community_id = int(community.id)
-    await asyncio.get_running_loop().run_in_executor(
-        async_dal.executor,
-        lambda: _link_creator_admin_role_sync(dal, community_id=community_id, user_id=caller_id),
     )
     return community
 

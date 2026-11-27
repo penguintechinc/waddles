@@ -42,7 +42,7 @@ from flask_core.tenancy import TenantContext
 from services import community_authz, community_interaction
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, conflict, forbidden, not_found
-from services.member_roles import ASSIGNABLE_MEMBER_ROLES
+from services.member_roles import ASSIGNABLE_MEMBER_ROLES, set_member_role_async
 from services.membership_state import MembershipState
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
@@ -416,7 +416,6 @@ async def update_member_role(
             async_dal, dal, community_id=community_id, target=target, action="demote"
         )
     role = role_row.name
-    community_role_id = role_row.id
     # Scope-based escalation guard (never a role-name check): the caller must hold every scope
     # of the role being assigned.
     stored = (role_row.base_claims or {}).get("scopes", [])
@@ -431,13 +430,8 @@ async def update_member_role(
     if enforce and not target_scopes <= held:
         raise forbidden("Cannot assign a role holding scopes you do not hold")
 
-    await async_dal.update_async(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id)),
-        role=role,
-        community_role_id=community_role_id,
-        claims_cache=None,
-        updated_at=datetime.now(UTC),
+    await set_member_role_async(
+        async_dal, dal, community_id=community_id, role=role, user_id=user_id
     )
 
 

@@ -193,6 +193,8 @@ class CreateCommunityRequest:
     displayName: str | None = None
     description: str | None = None
     platformServerId: str | None = None
+    # Accepted for webui compatibility but NOT stored: the creator holds the seeded admin role
+    # (`community_roles`), never `communities.owner_id` (column removal follows separately).
     ownerId: str | None = None
     ownerName: str | None = None
     isPublic: bool | None = None
@@ -497,8 +499,6 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
             description=data.description,
             platform=data.platform,
             platform_server_id=data.platformServerId,
-            owner_id=data.ownerId,
-            owner_name=data.ownerName,
             is_public=data.isPublic,
             community_type=data.communityType,
             caller_id=caller_id,
