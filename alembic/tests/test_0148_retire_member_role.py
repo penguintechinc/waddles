@@ -1,8 +1,9 @@
-"""Tests for 0147_retire_member_role: final link backfill, contract swap, drop + downgrade restore."""
+"""Tests for 0148_retire_member_role: final link backfill, contract swap, drop + downgrade restore."""
 
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from types import ModuleType
 
@@ -17,13 +18,14 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PATH = _ROOT / "alembic" / "versions" / "0147_retire_member_role.py"
-_REV = "0147_retire_member_role"
-_PREV = "0146_membership_state"
+_PATH = _ROOT / "alembic" / "versions" / "0148_retire_member_role.py"
+_REV = "0148_retire_member_role"
+_PREV = "0147_temp_password_user_bind"
+_LEGACY_058 = _ROOT / "config" / "postgres" / "migrations" / "058_tenants_and_claims.sql"
 
 
 def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("migration_0147", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0148", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -38,7 +40,7 @@ def test_chain_and_id_length() -> None:
     assert module.down_revision == _PREV
 
 
-def test_single_head_and_0147_in_history() -> None:
+def test_single_head_and_0148_in_history() -> None:
     """The chain keeps exactly one head."""
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
@@ -63,9 +65,32 @@ def _column_count(cur: psycopg2.extensions.cursor, table: str, column: str) -> i
     )
 
 
+def _deployed_role_schema(cur: psycopg2.extensions.cursor) -> None:
+    """Give the minimal harness the role tables every real deploy has before 0148.
+
+    The harness bootstraps without the 058 `community_roles` table, so 0148 creates (and its
+    downgrade drops) a marked stub. A deployed DB already holds the table and the member link
+    columns at the previous revision; seed that shape so the link backfill is exercised.
+    """
+    cur.execute("SELECT to_regclass('public.community_roles')")
+    if cur.fetchone()[0] is None:  # type: ignore[index]
+        match = re.search(
+            r"CREATE TABLE IF NOT EXISTS community_roles \(.*?\n\);",
+            _LEGACY_058.read_text("utf-8"),
+            re.DOTALL,
+        )
+        assert match is not None, "community_roles DDL moved out of 058_tenants_and_claims.sql"
+        cur.execute(match.group(0))
+    cur.execute(
+        "ALTER TABLE community_members "
+        "ADD COLUMN IF NOT EXISTS community_role_id INTEGER REFERENCES community_roles(id), "
+        "ADD COLUMN IF NOT EXISTS claims_cache JSONB DEFAULT NULL"
+    )
+
+
 def _seed(cur: psycopg2.extensions.cursor) -> dict[str, int]:
     """One community, its system owner/moderator/member rows, a SHADOW custom `member`, members."""
-    cur.execute("INSERT INTO communities (name, tenant_id) VALUES ('c0147', 1) RETURNING id")
+    cur.execute("INSERT INTO communities (name, tenant_id) VALUES ('c0148', 1) RETURNING id")
     cid = cur.fetchone()[0]  # type: ignore[index]
     roles: dict[str, int] = {}
     for name, is_system in (
@@ -102,12 +127,13 @@ def _seed(cur: psycopg2.extensions.cursor) -> dict[str, int]:
 @requires_docker
 def test_upgrade_drops_columns_and_downgrade_restores_from_links() -> None:
     """Upgrade links late rows, swaps the view to the link, drops columns; downgrade restores."""
-    with migrated_postgres("0147-retire-member-role") as db:
+    with migrated_postgres("0148-retire-member-role") as db:
         alembic_cli("downgrade", _PREV, dsn=db.dsn)
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
+                _deployed_role_schema(cur)
                 ids = _seed(cur)
                 cid = ids["cid"]
 
@@ -200,7 +226,7 @@ def test_upgrade_drops_columns_and_downgrade_restores_from_links() -> None:
 @requires_docker
 def test_platform_table_role_granted_link_not_string() -> None:
     """`waddles_platform_table` reads/writes the role LINK; the string column is gone."""
-    with migrated_postgres("0147-platform-table-grants") as db:
+    with migrated_postgres("0148-platform-table-grants") as db:
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         try:

@@ -33,6 +33,7 @@ from blueprints.v1.join_request import join_request_bp
 from config import HubAPIConfig
 from services import dsar_rate_limit, join_request_service
 from services import suppression_keys as keys
+from services.membership_state import MembershipState
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 from tests.entity_ids import pid
@@ -466,6 +467,19 @@ class TestApproveReject:
             )
         )
         assert len(member_rows) == 1
+        # Regression (PR #1542 review): the approved joiner LINKS the seeded `member` system role.
+        roles = auth_db.dal.community_roles
+        member_role = (
+            auth_db.dal(
+                (roles.community_id == community_id)
+                & (roles.name == "member")
+                & (roles.is_system == True)  # noqa: E712
+            )
+            .select()
+            .first()
+        )
+        assert member_role is not None
+        assert member_rows.first().community_role_id == member_role.id
         req_rows = await auth_db.select_async(
             auth_db.dal(auth_db.dal.community_join_requests.id == request_id)
         )
@@ -552,8 +566,11 @@ class TestApproveReject:
         )
         request = auth_db.dal(auth_db.dal.community_join_requests.id == request_id).select().first()
         auth_db.dal.commit()
-        # restriction re-applied: the ban is the membership STATE (2 = BANNED), not a role name
-        assert (member.membership_state, member.is_active) == (2, False)
+        # restriction re-applied: the ban is the BANNED state (alembic 0146), never a role string
+        assert (int(member.membership_state), member.is_active) == (
+            int(MembershipState.BANNED),
+            False,
+        )
         assert (request.status, request.reviewed_by) == ("rejected", admin_id)
 
     async def test_approve_ignores_a_suppression_from_another_tenant(

@@ -1,7 +1,7 @@
--- 0147: data-plane contracts read a member's community role through the LINKED role row
+-- 0148: data-plane contracts read a member's community role through the LINKED role row
 -- (`community_members.community_role_id` -> `community_roles`), never the legacy
--- `community_members.role` string (dropped by alembic 0147 right after this file runs).
--- Shared verbatim by alembic 0147 and the Rust integration tests so the shipped contract and the
+-- `community_members.role` string (dropped by alembic 0148 right after this file runs).
+-- Shared verbatim by alembic 0148 and the Rust integration tests so the shipped contract and the
 -- tested contract cannot drift. Idempotent. Prerequisites: `community_roles` (id, community_id,
 -- name) and `community_members.community_role_id` / `claims_cache` exist.
 --

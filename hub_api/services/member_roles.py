@@ -27,7 +27,17 @@ COMMUNITY_ADMIN_ROLE = "community-admin"
 #: The seeded baseline role every joining member gets.
 COMMUNITY_MEMBER_ROLE = "member"
 
-#: Roles an admin may assign to a member (`community-owner` is never assignable).
+#: THE seeded system roles a role change may assign. Every other system role -- the owner (only
+#: through an explicit ownership transfer) and the remaining seeded roles -- is refused; a
+#: community's own custom roles are assignable too (see :func:`is_assignable_role`).
+ASSIGNABLE_SYSTEM_ROLES: tuple[str, ...] = (
+    COMMUNITY_ADMIN_ROLE,
+    "moderator",
+    COMMUNITY_MEMBER_ROLE,
+)
+
+#: Role-sync binding vocabulary (migration 0036's CHECK): the assignable system roles plus the
+#: non-system ``vip`` (`community-owner` is never assignable).
 ASSIGNABLE_MEMBER_ROLES: tuple[str, ...] = (
     COMMUNITY_ADMIN_ROLE,
     "moderator",
@@ -76,6 +86,23 @@ def is_owner_role(role_row: Any) -> bool:
         and bool(getattr(role_row, "is_system", False))
         and getattr(role_row, "name", None) == COMMUNITY_OWNER_ROLE
     )
+
+
+def is_assignable_role(role_row: Any, community_id: int) -> bool:
+    """True iff a role change may link ``role_row`` (never the owner, see :func:`is_owner_role`).
+
+    Assignable: a role of THIS community whose name is not a reserved system name (its custom
+    roles), or the SYSTEM row of a name in `ASSIGNABLE_SYSTEM_ROLES`. Every other reserved name
+    (owner, communicator, speaker) -- and any non-system row squatting on one -- is refused.
+    """
+    if role_row is None or getattr(role_row, "community_id", None) != community_id:
+        return False
+    if is_owner_role(role_row):
+        return False
+    name = getattr(role_row, "name", None)
+    if name not in SYSTEM_ROLE_NAMES:
+        return True
+    return bool(getattr(role_row, "is_system", False)) and name in ASSIGNABLE_SYSTEM_ROLES
 
 
 def seed_community_system_roles(dal: Any, community_id: int) -> None:
@@ -155,3 +182,22 @@ async def run_write_job[T](async_dal: Any, dal: Any, job: Callable[[], T]) -> T:
 async def set_member_role_async(async_dal: Any, dal: Any, **kwargs: Any) -> int | None:
     """:func:`set_member_role` as ONE committed executor job (rolled back on any error)."""
     return await run_write_job(async_dal, dal, lambda: set_member_role(dal, **kwargs))
+
+
+async def add_joining_member_async(
+    async_dal: Any, dal: Any, *, community_id: int, user_id: int
+) -> int | None:
+    """Add a joiner as an active member LINKED to the seeded `member` role (scopes + roleId).
+
+    THE join-path writer: (idempotently) ensures the community's system roles exist -- so a
+    legacy community seeded before roles still links -- then :func:`set_member_role` with
+    ``add=True`` (an existing row keeps its role). ONE transaction; returns the role id.
+    """
+
+    def job() -> int | None:
+        seed_community_system_roles(dal, community_id)
+        return set_member_role(
+            dal, community_id=community_id, role=COMMUNITY_MEMBER_ROLE, user_id=user_id, add=True
+        )
+
+    return await run_write_job(async_dal, dal, job)

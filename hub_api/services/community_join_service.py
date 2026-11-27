@@ -13,7 +13,7 @@ from typing import Any
 from services import ban_suppression
 from services.bundle_telemetry import get_meter
 from services.errors import ApiError, not_found
-from services.member_roles import COMMUNITY_MEMBER_ROLE, set_member_role_async
+from services.member_roles import add_joining_member_async
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,9 @@ async def join_open_community(
         _count("restricted")
         raise ApiError("Membership is restricted", 403, "MEMBERSHIP_RESTRICTED")
 
-    await set_member_role_async(
-        async_dal,
-        dal,
-        community_id=community_id,
-        role=COMMUNITY_MEMBER_ROLE,
-        user_id=user_id,
-        add=True,
-    )
+    # The ONE membership writer: links the seeded `member` role (scopes + roleId), never a bare
+    # role string (`member_roles.set_member_role`).
+    await add_joining_member_async(async_dal, dal, community_id=community_id, user_id=user_id)
     _count("joined")
     logger.info("community_join.joined", extra={"community_id": community_id})
     return JoinResult(community_id=community_id, joined=True)

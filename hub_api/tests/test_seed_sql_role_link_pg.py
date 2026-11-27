@@ -1,4 +1,4 @@
-r"""Seed SQL loads on the post-0147 schema and links members to ROLE ROWS (real Postgres + psql).
+r"""Seed SQL loads on the post-0148 schema and links members to ROLE ROWS (real Postgres + psql).
 
 `config/postgres/seed_admin.sql` (run by `scripts/seed-admin.sh`) and the community/member block
 of `config/postgres/seed_ui_mock.sql` (`scripts/seed-ui-mock-data.sh`) used to write the dropped
@@ -64,7 +64,7 @@ ALTER TABLE community_members ADD COLUMN IF NOT EXISTS reputation INTEGER;
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[pg.PgTestDatabase]:
-    """One migrated Postgres container (post-0147) + real role seeding objects + seed prereqs."""
+    """One migrated Postgres container (post-0148) + real role seeding objects + seed prereqs."""
     with pg.migrated_postgres("hub-api-seed-sql") as db:
         pg.prepare_database(db)
         conn = psycopg2.connect(db.dsn)
@@ -123,7 +123,7 @@ async def _linked_role(adal: AsyncDAL, community_id: int, user_id: int) -> tuple
 
 
 async def test_schema_has_no_legacy_authority_columns(adal: AsyncDAL) -> None:
-    """Post-0147 the string role and the free-form owner columns are gone."""
+    """Post-0148 the string role and the free-form owner columns are gone."""
     assert "role" not in _columns(adal.dal, "community_members")
     assert "community_role_id" in _columns(adal.dal, "community_members")
     assert {"owner_id", "owner_name"}.isdisjoint(_columns(adal.dal, "communities"))

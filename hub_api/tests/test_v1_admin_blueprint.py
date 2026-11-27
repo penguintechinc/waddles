@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from quart import Quart
@@ -188,7 +189,16 @@ def _fake_reputation_apply(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, An
         balances[key] = new
         return reputation_svc.ApplyResult(new_score=new, applied=True)
 
+    def fake_sync(dal: Any, **kw: Any) -> reputation_svc.ApplyResult:
+        calls.append(kw)
+        key = (kw["community_id"], kw["user_uuid"])
+        new = max(300, min(850, balances.get(key, 600) + kw["delta"]))
+        balances[key] = new
+        return reputation_svc.ApplyResult(new_score=new, applied=True)
+
     monkeypatch.setattr(reputation_svc, "apply_reputation", fake)
+    # The admin override applies inside its locked transaction through the sync twin.
+    monkeypatch.setattr(reputation_svc, "apply_reputation_sync", fake_sync)
     return calls
 
 
@@ -336,6 +346,24 @@ class TestMembers:
         one = await (await client.get(f"{base}?search=user43", headers=_headers())).get_json()
         assert one["pagination"]["total"] == 1
         assert one["members"][0]["userId"] == uid(43)
+
+    async def test_get_members_search_escapes_like_metacharacters(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """Regression (PR #1542 review): `%` and `_` in `search` match literally."""
+        community_id = _seed_community(admin_db)
+        for user_id in (61, 62):
+            _seed_member(admin_db, community_id=community_id, user_id=user_id)
+        base = f"/api/v1/admin/{public_id(admin_db, community_id)}/members"
+        examined = 0
+        for term in ("%", "_", "user_", "%6%", "\\"):
+            response = await client.get(f"{base}?search={quote(term)}", headers=_headers())
+            assert response.status_code == 200
+            assert (await response.get_json())["members"] == [], term
+            examined += 1
+        assert examined == 5
+        control = await (await client.get(f"{base}?search=user6", headers=_headers())).get_json()
+        assert len(control["members"]) == 2
 
     async def test_get_members_excludes_banned(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
@@ -503,6 +531,56 @@ class TestMembers:
             json=_role_json(admin_db, community_id, "member"),
         )
         assert ok.status_code == 200
+
+    async def test_owner_role_is_never_assignable_by_role_change(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """Regression (PR #1542 review, HIGH): PUT role with the OWNER role UUID is 403.
+
+        Ownership moves only through the explicit ownership transfer -- not even a global admin
+        (bypass) may mint a second owner through the role route.
+        """
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        url = f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(43)}/role"
+        owner_role = _role_json(admin_db, community_id, "community-owner")
+        for headers in (_headers(user_id=OWNER, scope=_MEMBER_SCOPE), _headers()):
+            response = await client.put(url, headers=headers, json=owner_role)
+            assert response.status_code == 403
+        dal = admin_db.dal
+        row = dal(dal.community_members.user_id == "43").select().first()
+        assert row.role == "member"
+
+    async def test_only_assignable_system_roles_or_own_custom_roles(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """A non-assignable seeded role (`speaker`) is refused; an own custom role is not."""
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        speaker = self._seed_role(admin_db, community_id, "speaker", 3, [])
+        dal = admin_db.dal
+        custom = int(
+            dal.community_roles.insert(
+                community_id=community_id,
+                name="event-helper",
+                is_system=False,
+                role_kind=0,
+                base_claims={"scopes": ["community:read"]},
+            )
+        )
+        dal.commit()
+        url = f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(43)}/role"
+        refused = await client.put(
+            url, headers=_headers(), json={"roleId": self._rid(admin_db, speaker)}
+        )
+        assert refused.status_code == 403
+        assert dal(dal.community_members.user_id == "43").select().first().role == "member"
+        ok = await client.put(url, headers=_headers(), json={"roleId": self._rid(admin_db, custom)})
+        assert ok.status_code == 200
+        row = dal(dal.community_members.user_id == "43").select().first()
+        assert row.community_role_id == custom
 
     async def test_global_admin_may_change_owner(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
@@ -868,17 +946,77 @@ class TestMembers:
 
 
 class TestTempPassword:
+    #: A moderator holding the temp-password scope -- but not the admin-kind full set.
+    MOD_SCOPES = ["members:temp_password.reset", "community:read"]
+
+    @staticmethod
+    def _url(admin_db: Any, community_id: int) -> str:
+        return f"/api/v1/admin/{public_id(admin_db, community_id)}/temp-password"
+
     async def test_generate_temp_password_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.post(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/temp-password",
+            self._url(admin_db, community_id),
             headers=_headers(),
-            json={"userIdentifier": "some-platform-user"},
+            json={"userIdentifier": "user42"},
         )
         assert response.status_code == 201
         body = await response.get_json()
         assert "tempPassword" in body
         assert "-" in body["tempPassword"]
+        # The row is bound to THAT member's hub user (login honors it).
+        dal = admin_db.dal
+        row = dal(dal.hub_temp_passwords.community_id == community_id).select().first()
+        assert row.hub_user_id == 42
+
+    async def test_non_member_identifier_is_404(self, client: Any, admin_db: Any) -> None:
+        """Regression (PR #1542 review): an identifier that is not an active member HERE is 404."""
+        community_id = _seed_community(admin_db)
+        other = _seed_community(admin_db, name="other-community")
+        _seed_member(admin_db, community_id=other, user_id=77)  # a member elsewhere only
+        _seed_member(admin_db, community_id=community_id, user_id=78, is_active=False)
+        for identifier in ("some-platform-user", "user77", "user78", "user77@example.com"):
+            response = await client.post(
+                self._url(admin_db, community_id),
+                headers=_headers(),
+                json={"userIdentifier": identifier},
+            )
+            assert response.status_code == 404, identifier
+        dal = admin_db.dal
+        assert dal(dal.hub_temp_passwords).count() == 0
+
+    async def test_moderator_cannot_mint_for_owner_or_admin(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """Regression (PR #1542 review): the shared owner + scope-subset target guard applies."""
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        mod_role = TestMembers._seed_role(admin_db, community_id, "moderator", 2, self.MOD_SCOPES)
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=9,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        mod = _headers(user_id=9, scope=_MEMBER_SCOPE)
+        for target in (OWNER, APPOINTEE):
+            response = await client.post(
+                self._url(admin_db, community_id),
+                headers=mod,
+                json={"userIdentifier": f"user{target}"},
+            )
+            assert response.status_code == 403, target
+        dal = admin_db.dal
+        assert dal(dal.hub_temp_passwords).count() == 0
+        # control: the same moderator may mint for a plain member it out-scopes
+        ok = await client.post(
+            self._url(admin_db, community_id), headers=mod, json={"userIdentifier": "user43"}
+        )
+        assert ok.status_code == 201
+        assert dal(dal.hub_temp_passwords).select().first().hub_user_id == 43
 
 
 class TestModules:

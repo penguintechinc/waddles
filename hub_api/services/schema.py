@@ -320,6 +320,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("user_identifier", "string", length=255, notnull=True),
         Field("password_hash", "string", length=255, notnull=True),
         Field("community_id", "integer"),
+        # The ONE hub user this temp password authenticates as (alembic 0147).
+        Field("hub_user_id", "integer"),
         Field("force_oauth_link", "boolean", default=False),
         Field("linked_oauth_platform", "string", length=50),
         Field("linked_oauth_user_id", "string", length=255),

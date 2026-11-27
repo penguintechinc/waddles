@@ -50,7 +50,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Final, TypeVar
+from typing import Any, Final
 
 from opentelemetry import trace
 
@@ -68,8 +68,6 @@ from services.suppression_keys import (
 )
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 #: Optional ceiling (days) on how long ANY suppression row lives, applied when a row is written.
@@ -664,7 +662,45 @@ def lift_suppression(
             ).delete()
             or 0
         )
+    if deleted:
+        _restore_unsuppressed_members(
+            dal,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
+            keys=keys,
+        )
     return int(deleted)
+
+
+def _restore_unsuppressed_members(
+    dal: Any, *, tenant_id: int, platform: str, platform_user_id: str, keys: SuppressionKeySource
+) -> int:
+    """After a suppression lift, restore the linked hub users' BANNED memberships in the tenant.
+
+    Skipped for a user another of whose identities is still suppressed (fail closed). Runs in
+    the caller's transaction; returns rows restored.
+    """
+    now = datetime.now(UTC)
+    ids = dal.hub_user_identities
+    linked = dal((ids.platform == platform) & (ids.platform_user_id == platform_user_id)).select(
+        ids.hub_user_id, distinct=True
+    )
+    restored = 0
+    for row in linked:
+        hub_user_id = int(row.hub_user_id)
+        still = check_identities(
+            dal,
+            tenant_id=tenant_id,
+            identities=identities_of(dal, hub_user_id),
+            keys=keys,
+            now=now,
+        )
+        if still is None:
+            restored += lift_membership_bans_in_tenant(
+                dal, tenant_id=tenant_id, hub_user_id=hub_user_id, now=now
+            )
+    return restored
 
 
 def purge_expired(dal: Any, *, now: datetime) -> int:
@@ -720,6 +756,27 @@ def lift_membership_ban(dal: Any, *, community_id: int, hub_user_id: int, now: d
     )
 
 
+def lift_membership_bans_in_tenant(
+    dal: Any, *, tenant_id: int, hub_user_id: int, now: datetime
+) -> int:
+    """:func:`lift_membership_ban` in every community of ``tenant_id`` (a tenant-wide lift).
+
+    Used where the lifted restriction is tenant-wide (floor bans, suppression). Runs in the
+    caller's transaction; returns rows restored.
+    """
+    members, communities = dal.community_members, dal.communities
+    rows = dal(
+        (members.user_id == str(hub_user_id))
+        & (members.membership_state == MembershipState.BANNED)
+        & (members.community_id == communities.id)
+        & (communities.tenant_id == tenant_id)
+    ).select(members.community_id, distinct=True)
+    return sum(
+        lift_membership_ban(dal, community_id=int(r.community_id), hub_user_id=hub_user_id, now=now)
+        for r in rows
+    )
+
+
 def reapply_for_hub_user(
     dal: Any, *, hub_user_id: int, keys: SuppressionKeySource, now: datetime
 ) -> int:
@@ -772,7 +829,7 @@ def reapply_for_hub_user(
     return int(banned)
 
 
-async def run_in_transaction(async_dal: Any, dal: Any, work: Callable[[], T]) -> T:
+async def run_in_transaction[T](async_dal: Any, dal: Any, work: Callable[[], T]) -> T:
     """Run `work` as ONE executor job: same pool thread, one commit, rollback on any failure.
 
     Mirrors `data_privacy_service.anonymize_user_data`: `AsyncDAL`'s per-call helpers each

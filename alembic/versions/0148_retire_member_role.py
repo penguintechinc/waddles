@@ -27,8 +27,8 @@ comment) is removed again, so older revisions' downgrades see the schema they ex
 
 Revision id <= 32 chars; `down_revision` is #1542's head (re-pointed at merge -- single-head gate).
 
-Revision ID: 0147_retire_member_role
-Revises: 0146_membership_state
+Revision ID: 0148_retire_member_role
+Revises: 0147_temp_password_user_bind
 Create Date: 2026-11-27
 """
 
@@ -43,8 +43,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0147_retire_member_role"
-down_revision = "0146_membership_state"
+revision = "0148_retire_member_role"
+down_revision = "0147_temp_password_user_bind"
 branch_labels = None
 depends_on = None
 
@@ -55,7 +55,7 @@ _ROLE_INDEX = "idx_community_members_role"
 _ROLE_CHECK = "community_members_role_check"
 #: Marks a `community_roles` table THIS revision created on a minimal bootstrap, so the downgrade
 #: removes exactly what it added (a real legacy table never carries it).
-_STUB_MARK = "0147: minimal-bootstrap community_roles (dropped by its downgrade)"
+_STUB_MARK = "0148: minimal-bootstrap community_roles (dropped by its downgrade)"
 
 
 def _exists(sql: str, **params: str) -> bool:
@@ -124,7 +124,7 @@ def _upgrade_members() -> None:
             )
         ).scalar()
         print(
-            f"[0147] linked {linked} members in {batches} batches; {unresolved} members name "
+            f"[0148] linked {linked} members in {batches} batches; {unresolved} members name "
             "no role row (no scopes) and lose only their dead role string"
         )
     if _has_table("hub_users"):

@@ -228,7 +228,7 @@ async fn world() -> World {
         ),
     )
     .await;
-    // Post-0147 contract: authority lives on the LINKED role row. Seed each community's roles,
+    // Post-0148 contract: authority lives on the LINKED role row. Seed each community's roles,
     // link the fixture members by name, replace the view with the link-reading one, then drop the
     // legacy string column so every read below proves the post-drop contract.
     exec(

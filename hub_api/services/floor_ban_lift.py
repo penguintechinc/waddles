@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Collection
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from services import ban_suppression
@@ -102,9 +103,15 @@ async def lift_floor_bans(
         if row is None:
             return 0
         tokens = subject_uuids_of(dal, user_id=int(row.id))
-        return lift_floor_bans_sync(
+        lifted = lift_floor_bans_sync(
             dal, tenant_id=tenant_id, user_uuids=tokens, lifted_by=actor, call=call
         )
+        if lifted:
+            # Same transaction: the BANNED memberships come back with their role link intact.
+            ban_suppression.lift_membership_bans_in_tenant(
+                dal, tenant_id=tenant_id, hub_user_id=int(row.id), now=datetime.now(UTC)
+            )
+        return lifted
 
     lifted = await ban_suppression.run_in_transaction(async_dal, dal, work)
     _emit("lifted" if lifted else "none")

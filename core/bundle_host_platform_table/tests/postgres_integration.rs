@@ -173,7 +173,7 @@ async fn fixture() -> Fixture {
     )
     .await;
     su.execute_unprepared(DDL).await.unwrap();
-    // Post-0147 contract: link-based grants/view, then the legacy string column is gone.
+    // Post-0148 contract: link-based grants/view, then the legacy string column is gone.
     su.execute_unprepared(LINK_CONTRACT).await.unwrap();
     exec(&su, "ALTER TABLE community_members DROP COLUMN role").await;
     let cfg = ConnectConfig {

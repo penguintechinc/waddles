@@ -140,7 +140,7 @@ async fn database() -> DatabaseFixture {
         ({COMMUNITY},'{ACTOR_UUID}','twitch','1001','community-admin'),({COMMUNITY},'{BOB}','twitch','1002','member');
         INSERT INTO economy_balances(tenant_id,community_id,user_uuid,balance) VALUES({TENANT},{COMMUNITY},'{pot}',100);"
     )).await.unwrap();
-    // Post-0147 contract: the stage reads the LINKED role (view replaced), legacy column dropped.
+    // Post-0148 contract: the stage reads the LINKED role (view replaced), legacy column dropped.
     admin.execute_unprepared(&format!(
         "CREATE TABLE community_roles(id SERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
            name VARCHAR(100) NOT NULL, is_system BOOLEAN NOT NULL DEFAULT false);

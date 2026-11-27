@@ -500,7 +500,7 @@ def test_strict_roles_can_perform_their_real_write_paths(pg_db: PgTestDatabase) 
 
     with _as_role(pg_db, "waddles_hub_api") as conn, conn.cursor() as cur:
         cur.execute(
-            # authority is the role LINK (alembic 0147 dropped the `role` string)
+            # authority is the role LINK (alembic 0148 dropped the `role` string)
             "INSERT INTO community_members "
             "(community_id, platform, platform_user_id, community_role_id) "
             "VALUES (%s, 'discord', 'fn-plat-hub', NULL) RETURNING user_uuid",
