@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
 # release-auto-merge.sh - watch an ORDERED list of PRs and merge each into release/* once green.
-# Usage: scripts/release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr|pr@fullsha> ...
+# Usage: scripts/release-auto-merge.sh [--dry-run] [--exit-on-stuck] [--interval S] [--max-hours H] <pr|pr@fullsha> ...
+#   --dry-run        one tick, report only; never reruns or merges
+#   --exit-on-stuck  exit 1 as soon as every open PR is stuck (real failure, rerun cap reached, zero
+#                    checks, head drift, conflicts, non-release base) instead of waiting --max-hours
+#                    (`make merge-when-green` uses this for a single PR)
+#   -h, --help       print this header and exit
 # PR@SHA pins the reviewed head: if the PR head differs it is skipped (needs human), never merged.
-# Merges via scripts/release-merge.sh <pr> <full-sha> 1 (head-pinned, non-admin; all its guards apply). Reruns apt-mirror flakes
-# ("timed out after 10 minutes") and a ci-gate that ran before reruns finished. Never resolves
-# conflicts, never forces, never touches non-release bases.
+# Merges via scripts/release-merge.sh <pr> <full-sha> 1 (head-pinned, non-admin; all its guards apply).
+# Reruns infra flakes once per run (FLAKE_PATTERN: apt-mirror "timed out after 10 minutes", sccache
+# "Timed out waiting for server startup") and a stale ci-gate (it aggregates other runs and does not
+# re-evaluate after reruns). Never resolves conflicts, never forces, never touches non-release bases.
+# Env: RELEASE_AUTO_MERGE_REPO or REPO (default `gh repo view`), FLAKE_PATTERN (ERE over job logs),
+#      NO_CHECKS_TICKS (default 10: consecutive ticks with ZERO checks examined before a PR is stuck).
 set -euo pipefail
 
-REPO="${RELEASE_AUTO_MERGE_REPO:-penguintechinc/waddles}"
+REPO="${RELEASE_AUTO_MERGE_REPO:-${REPO:-}}"
+FLAKE_PATTERN="${FLAKE_PATTERN:-timed out after 10 minutes|apt attempt .*(failed|timed out)|sccache: error: Timed out waiting for server startup}"
+NO_CHECKS_TICKS="${NO_CHECKS_TICKS:-10}"
+EXIT_ON_STUCK=0
 IGNORE_CONTEXT="submit-queue"
 MAX_RERUNS=2
 MAX_API_FAIL_TICKS=10   # consecutive ticks with any GitHub API read failure before aborting
 INTERVAL=60; MAX_HOURS=6; DRY=0; PRS=""; PINS=""
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE="${RELEASE_AUTO_MERGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/release-auto-merge/${REPO##*/}}"
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -21,6 +31,8 @@ log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
+    --exit-on-stuck) EXIT_ON_STUCK=1; shift ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
     --interval) [ $# -ge 2 ] || die "--interval needs a value"; INTERVAL="$2"; shift 2 ;;
     --max-hours) [ $# -ge 2 ] || die "--max-hours needs a value"; MAX_HOURS="$2"; shift 2 ;;
     -*) die "unknown flag $1" ;;
@@ -37,6 +49,12 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PRS" ] || die "usage: release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr> ..."
 case "$INTERVAL$MAX_HOURS" in *[!0-9]*) die "interval/max-hours must be integers" ;; esac
+case "$NO_CHECKS_TICKS" in ''|*[!0-9]*|0) die "NO_CHECKS_TICKS must be a positive integer" ;; esac
+if [ -z "$REPO" ]; then
+  REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || die "cannot determine repo (set REPO)"
+fi
+case "$REPO" in */*) ;; *) die "bad repo '$REPO' (want owner/name)" ;; esac
+STATE="${RELEASE_AUTO_MERGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/release-auto-merge/${REPO##*/}}"
 # Private state dir: 0700, owned by us, never a symlink (blocks planted-file/symlink attacks).
 if [ -L "$STATE" ]; then die "state dir $STATE is a symlink"; fi
 mkdir -p "$(dirname "$STATE")"
@@ -53,12 +71,12 @@ once_flag() { if [ -e "$STATE/flag-$1" ]; then return 1; fi; : >"$STATE/flag-$1"
 rerun_count() { if [ -e "$STATE/rerun-$1" ]; then cat "$STATE/rerun-$1"; else echo 0; fi; }
 bump_rerun() { echo $(( $(rerun_count "$1") + 1 )) >"$STATE/rerun-$1"; }
 
-# try_rerun <pr> <head> <runid> <why>: rerun failed jobs of a run, bounded by MAX_RERUNS.
+# try_rerun <pr> <head> <runid> <why>: rerun failed jobs of a run, bounded by MAX_RERUNS; returns 1 once capped.
 try_rerun() {
   local n; n="$(rerun_count "$3")"
   if [ "$n" -ge "$MAX_RERUNS" ]; then
     if once_flag "cap-$3"; then log "pr=$1 head=${2:0:12} run=$3 SKIP rerun cap ($MAX_RERUNS) reached"; fi
-    return 0
+    return 1
   fi
   if [ "$DRY" = 1 ]; then log "pr=$1 head=${2:0:12} run=$3 DRY-RUN would rerun --failed ($4)"; return 0; fi
   log "pr=$1 head=${2:0:12} run=$3 RERUN --failed ($4) attempt=$((n + 1))"
@@ -69,15 +87,15 @@ try_rerun() {
   fi
 }
 
-# is_flake_job <jobid>: 0 if the job log shows an apt-mirror timeout/retry-exhaustion (captured, not piped,
-# so grep -q cannot SIGPIPE gh). An unreadable log counts as NOT a flake (fail closed).
+# is_flake_job <jobid>: 0 if the job log matches FLAKE_PATTERN (apt-mirror timeout, sccache startup timeout).
+# The log is captured into a variable first, never piped, so grep -q cannot SIGPIPE gh under pipefail. An unreadable log counts as NOT a flake (fail closed).
 is_flake_job() {
   local logs
   if ! logs="$(gh api "repos/$REPO/actions/jobs/$1/logs" 2>/dev/null)"; then
     if once_flag "logfail-$1"; then log "job=$1 WARN could not fetch job log; treating as real failure"; fi
     return 1
   fi
-  grep -Eq 'timed out after 10 minutes|apt attempt .*(failed|timed out)' <<<"$logs"
+  grep -Eq -e "$FLAKE_PATTERN" <<<"$logs"
 }
 
 # eval_pr <pr>: examine one PR; sets RESULT to merged|open|closed|waiting|skipped|apierr.
@@ -147,6 +165,16 @@ eval_pr() {
   done <<<"$norm"
   log "pr=$pr head=${head:0:12} mstate=$mstate gate=${gate:-none} checks=$n_exam ok=$n_other_ok pending=$n_pending failed=$n_bad"
 
+  # Zero checks examined is never green: wait NO_CHECKS_TICKS ticks for CI to register, then the PR is stuck.
+  if [ "$n_exam" -eq 0 ]; then
+    local z=0; [ -e "$STATE/zero-$pr" ] && z="$(cat "$STATE/zero-$pr")"; z=$((z + 1)); echo "$z" >"$STATE/zero-$pr"
+    if [ "$z" -ge "$NO_CHECKS_TICKS" ]; then
+      RESULT=skipped; log "pr=$pr head=${head:0:12} FAIL zero checks examined for $z ticks (needs human)"
+    else log "pr=$pr head=${head:0:12} WAIT zero checks examined ($z/$NO_CHECKS_TICKS)"; fi
+    return 0
+  fi
+  rm -f "$STATE/zero-$pr"
+
   if [ "$gate" = "SUCCESS" ]; then
     if [ "$DRY" = 1 ]; then log "pr=$pr head=${head:0:12} DRY-RUN would merge via release-merge.sh pinned to $head"; return 0; fi
     log "pr=$pr head=${head:0:12} MERGE via release-merge.sh"
@@ -168,7 +196,9 @@ eval_pr() {
         fi
         [ "$is_flake" = 1 ] || run_real=1
       done
-      if [ "$run_real" = 0 ]; then flake=1; try_rerun "$pr" "$head" "$r" "all failed jobs are apt-mirror flakes"; else real=1; fi
+      if [ "$run_real" = 0 ]; then
+        if try_rerun "$pr" "$head" "$r" "all failed jobs are infra flakes"; then flake=1; fi
+      else real=1; fi
     done
     if [ "$real" = 1 ] && once_flag "real-$pr-$head"; then log "pr=$pr head=${head:0:12} REAL FAILURE:$bad_names (non-flake failed job; no rerun; needs human)"; fi
     [ "$flake" = 1 ] || RESULT=skipped
@@ -176,7 +206,7 @@ eval_pr() {
   fi
 
   if [ "$gate" = "FAILURE" ] && [ "$n_pending" -eq 0 ] && [ "$n_other_ok" -gt 0 ] && [ -n "$gate_run" ]; then
-    try_rerun "$pr" "$head" "$gate_run" "ci-gate ran before reruns finished; other checks now green"
+    if ! try_rerun "$pr" "$head" "$gate_run" "ci-gate ran before reruns finished; other checks now green"; then RESULT=skipped; fi
   fi
   return 0
 }
@@ -208,6 +238,7 @@ while :; do
   # A merge breaks the PR loop early, so the tally is partial: re-evaluate everything, never declare done.
   if [ "$merged_now" = 1 ]; then continue; fi
   if [ "$n_open" -eq 0 ]; then log "all PRs merged/closed; done"; exit 0; fi
+  if [ "$EXIT_ON_STUCK" = 1 ] && [ "$n_skip" -eq "$n_open" ]; then log "FAIL: every open PR is stuck ($n_skip); --exit-on-stuck"; exit 1; fi
   if [ "$DRY" = 1 ]; then log "dry-run: single tick only"; exit 0; fi
   [ "$(date +%s)" -lt "$DEADLINE" ] || { log "max duration ${MAX_HOURS}h reached with $n_open open"; exit 1; }
   sleep "$INTERVAL"

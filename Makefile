@@ -249,7 +249,7 @@ test:
 	@$(MAKE) test-scripts
 
 # Self-tests for repo helper scripts (gh stubbed via PATH shim; no network).
-.PHONY: test-scripts release-merge release-auto-merge
+.PHONY: test-scripts release-merge release-auto-merge merge-when-green merge-release-into-prs cleanup-merged-pr
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
 	@bash scripts/tests/test_release_auto_merge.sh
@@ -301,13 +301,32 @@ seed-latency-canary:
 # Wait for all checks, then merge a PR into release/* (non-admin, head-pinned):
 #   make release-merge PR=<n> SHA=<full-40-hex-head> [MAX=<minutes>] [DRY=1]
 release-merge:
-	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]" >&2; exit 2; }
+	@test -n "$(PR)" -a -n "$(SHA)" || { echo "usage: make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]" >&2; exit 2; }
 	@bash scripts/release-merge.sh "$(PR)" $(SHA) $(MAX) $(if $(DRY),--dry-run)
 
 # Watch ordered PRs and merge each when green: make release-auto-merge PRS="1038 1037" [DRY=1]
 release-auto-merge:
 	@test -n "$(PRS)" || { echo 'usage: make release-auto-merge PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
 	@bash scripts/release-auto-merge.sh $(if $(DRY),--dry-run) $(PRS)
+
+# One PR: wait for checks, rerun infra flakes (apt-mirror / sccache startup) and a stale ci-gate,
+# then merge head-pinned via release-merge.sh; exits 1 as soon as it is stuck (real failure, zero checks):
+#   make merge-when-green PR=<n> SHA=<full-40-hex-head> [DRY=1]
+merge-when-green:
+	@test -n "$(PR)" -a -n "$(SHA)" || { echo "usage: make merge-when-green PR=<n> SHA=<full-head-sha> [DRY=1]" >&2; exit 2; }
+	@bash scripts/release-auto-merge.sh --exit-on-stuck $(if $(DRY),--dry-run) "$(PR)@$(SHA)"
+
+# Merge origin/<release base> into each open PR branch (signed merge commit, plain push; conflicts
+# reported, never pushed): make merge-release-into-prs PRS="1038 1037" [DRY=1]
+merge-release-into-prs:
+	@test -n "$(PRS)" || { echo 'usage: make merge-release-into-prs PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
+	@bash scripts/ops/merge-release-into-prs.sh $(if $(DRY),--dry-run) $(PRS)
+
+# Delete branch (remote + local) and clean worktrees of MERGED release PRs, only when contained in
+# the base: make cleanup-merged-pr PRS="1038 1037" [DRY=1]
+cleanup-merged-pr:
+	@test -n "$(PRS)" || { echo 'usage: make cleanup-merged-pr PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
+	@bash scripts/ops/cleanup-merged-pr.sh $(if $(DRY),--dry-run) $(PRS)
 
 # hub_api pytest in a hash-pinned venv (built/refreshed automatically):
 #   make test-hub-api PYTEST_ARGS="tests/test_config.py -x"

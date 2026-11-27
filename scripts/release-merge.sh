@@ -8,8 +8,10 @@
 #                    start and pinned.
 #   max_minutes      polls before giving up (default 90; one poll per POLL_SECONDS, default 60)
 #   --dry-run        one poll: print bucket counts and what it would do; never merges
+#   -h, --help       print this header and exit
 # Env: REPO (default: `gh repo view`), IGNORE_CHECKS (space-separated, default "submit-queue"),
-#      REQUIRED_CHECK (default "ci-gate"), POLL_SECONDS, GH_RETRIES (5), GH_RETRY_SLEEP (10 * attempt)
+#      REQUIRED_CHECK (default "ci-gate"), POLL_SECONDS, GH_RETRIES (5), GH_RETRY_SLEEP (10 * attempt),
+#      NO_CHECKS_POLLS (default 10): consecutive polls with ZERO checks examined before failing (exit 1)
 #
 # Why it waits itself: the release ruleset has NO required status checks, so `gh pr merge --auto`
 # would merge immediately. Green = REQUIRED_CHECK passes AND zero pending AND zero failed checks.
@@ -17,7 +19,7 @@
 # (IGNORE_CONTEXT), so it is ignored here by default. Never uses --admin; never merges into main
 # (base must match release/*). Check buckets come from `gh pr view --json statusCheckRollup`
 # (this gh has no `gh pr checks --json`; masking that with `|| true` once looped silently to timeout).
-# Exit: 0 merged (or dry-run ok), 1 a check failed / refused, 2 head moved, 3 timeout,
+# Exit: 0 merged (or dry-run ok), 1 a check failed / refused / zero checks examined, 2 head moved, 3 timeout,
 #       4 bad usage / non-release base / base retargeted mid-wait / PR no longer OPEN,
 #       5 merged but the post-merge check (merge commit on the expected base) failed.
 # TOCTOU: every poll takes ONE `gh pr view --json baseRefName,headRefOid,state,statusCheckRollup`
@@ -28,6 +30,7 @@ set -euo pipefail
 IGNORE_CHECKS="${IGNORE_CHECKS:-submit-queue}"
 REQUIRED_CHECK="${REQUIRED_CHECK:-ci-gate}"
 POLL_SECONDS="${POLL_SECONDS:-60}"
+NO_CHECKS_POLLS="${NO_CHECKS_POLLS:-10}"
 GH_RETRIES="${GH_RETRIES:-5}"
 
 # usage prints the CLI shape to stderr and exits 4.
@@ -37,6 +40,7 @@ DRY=0; POS=()
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
     -*) echo "unknown flag $a" >&2; usage ;;
     *) POS+=("$a") ;;
   esac
@@ -46,7 +50,7 @@ pr="${POS[0]}"; sha=""; max=90
 case "$pr" in ''|*[!0-9]*) usage ;; esac
 if [ "${#POS[@]}" -ge 2 ]; then
   if [[ "${POS[1]}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    sha="${POS[1],,}"
+    sha="$(printf '%s' "${POS[1]}" | tr 'A-F' 'a-f')"   # bash 3.2: no \${x,,}
     if [ "${#POS[@]}" -ge 3 ]; then max="${POS[2]}"; fi
   elif [ "${#POS[@]}" -eq 2 ] && [[ "${POS[1]}" =~ ^[0-9]{1,5}$ ]]; then
     max="${POS[1]}"   # sha omitted
@@ -55,6 +59,7 @@ if [ "${#POS[@]}" -ge 2 ]; then
   fi
 fi
 case "$max" in ''|*[!0-9]*) usage ;; esac
+case "$NO_CHECKS_POLLS" in ''|*[!0-9]*|0) echo "NO_CHECKS_POLLS must be a positive integer" >&2; usage ;; esac
 
 # ghr runs gh with retries (api.github.com i/o timeouts are frequent from this host); a final failure is loud.
 ghr() {
@@ -96,6 +101,7 @@ if [ -z "$sha" ]; then
   echo "no sha given: pinning to current head $sha"
 fi
 
+# shellcheck disable=SC2016  # jq program: $ign is a jq variable, not shell
 BUCKETS='[.statusCheckRollup[]?
   | {name:(.name // .context), s:((.conclusion // .state // .status // "") | ascii_downcase)}
   | select(([.name] | inside($ign | split(" "))) | not)
@@ -123,12 +129,14 @@ post_merge() {
   exit 0
 }
 
+nochecks=0
 for ((i = 0; i < max; i++)); do
   raw="$(snap)"
   verify "$raw"
   checks="$(jq --arg ign "$IGNORE_CHECKS" "$BUCKETS" <<<"$raw")"
   total="$(jq length <<<"$checks")"
   if [ "$total" -gt 0 ]; then
+    nochecks=0
     pending="$(jq '[.[]|select(.bucket=="pending")]|length' <<<"$checks")"
     passed="$(jq '[.[]|select(.bucket=="pass")]|length' <<<"$checks")"
     failed="$(jq -r '[.[]|select(.bucket=="fail" or .bucket=="cancel")|.name]|join(", ")' <<<"$checks")"
@@ -156,7 +164,9 @@ for ((i = 0; i < max; i++)); do
     fi
     if [ "$DRY" -eq 1 ]; then echo "DRY-RUN: not green yet; would keep waiting (up to $max polls)"; exit 0; fi
   else
-    echo "no checks yet"
+    nochecks=$((nochecks + 1))
+    echo "no checks yet: examined=0 ($nochecks/$NO_CHECKS_POLLS polls)"
+    if [ "$nochecks" -ge "$NO_CHECKS_POLLS" ]; then echo "FAIL: zero checks examined after $nochecks polls"; exit 1; fi
     if [ "$DRY" -eq 1 ]; then echo "DRY-RUN: no checks yet; would keep waiting"; exit 0; fi
   fi
   sleep "$POLL_SECONDS"
