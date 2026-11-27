@@ -199,7 +199,7 @@ async def create_community(
     """Create a new community owned by ``tenant_id`` (free tier: capped at 1).
 
     Authority is the per-community role table: the caller becomes a member holding the seeded
-    system admin role (see `create_community_capped`); `communities.owner_id` is no longer written.
+    system owner role (see `create_community_capped`); `communities.owner_id` is no longer written.
     """
     _ensure_tables(dal)
     if not name or not platform:

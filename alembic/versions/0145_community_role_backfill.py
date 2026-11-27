@@ -10,7 +10,13 @@ This revision repairs existing data (new communities are seeded in hub-api's cre
    idempotent (`ON CONFLICT DO NOTHING`), so communities that already have roles are unchanged.
 2. Backfill `community_role_id` from the legacy `role` string wherever it is NULL and a role of
    that name exists in the member's community; `claims_cache` is cleared so scopes re-resolve.
-   Rows whose role string names no role row stay NULL (fail closed: no scopes) and are counted.
+   A reserved system name links ONLY the `is_system` row (a same-named custom role never shadows
+   it -- same rule as hub-api's `member_roles.role_by_name_query`). Rows whose role string names
+   no role row stay NULL (fail closed: no scopes) and are counted. The UPDATE runs in member-id
+   ranges of `BATCH_SIZE` so no single statement scans/locks the whole table; every batch is
+   idempotent (`community_role_id IS NULL`). It stays inside the revision's transaction (the
+   seeded rows of step 1 are only visible there, and `env.py` opens the transaction itself, so
+   an alembic autocommit block is unavailable); only the NULL-link rows it repairs are locked.
 
 Fresh/minimal DBs without `community_roles` are a no-op. A partial schema that has the table but
 lacks the seed function skips step 1 with a printed WARNING (step 2 still runs). Downgrade is a
@@ -37,16 +43,62 @@ depends_on = None
 
 _SEED_ALL = "SELECT seed_community_system_roles(id) FROM communities"
 
-_BACKFILL = """
+#: Member-id range per backfill UPDATE statement.
+BATCH_SIZE = 5000
+
+#: Names `seed_community_system_roles()` (alembic 0002) seeds; mirrors hub-api's
+#: `member_roles.SYSTEM_ROLE_NAMES` (a migration never imports app code).
+_SYSTEM_ROLE_NAMES = (
+    "member",
+    "communicator",
+    "speaker",
+    "moderator",
+    "community-admin",
+    "community-owner",
+)
+
+_BACKFILL = sa.text(
+    """
     UPDATE community_members m
        SET community_role_id = r.id, claims_cache = NULL
       FROM community_roles r
-     WHERE m.community_role_id IS NULL
+     WHERE m.id >= :lo AND m.id < :hi
+       AND m.community_role_id IS NULL
        AND r.community_id = m.community_id
        AND r.name = m.role
-"""
+       AND (r.is_system = TRUE OR r.name NOT IN :reserved)
+    """
+).bindparams(sa.bindparam("reserved", expanding=True))
+
+_ID_RANGE = (
+    "SELECT min(id), max(id) FROM community_members WHERE community_role_id IS NULL"
+)
 
 _UNRESOLVED = "SELECT count(*) FROM community_members WHERE community_role_id IS NULL"
+
+
+def backfill_links(
+    conn: sa.engine.Connection, batch_size: int = BATCH_SIZE
+) -> tuple[int, int]:
+    """Link NULL-role members in member-id ranges of ``batch_size``; return ``(linked, batches)``.
+
+    The caller owns the transaction (upgrade() runs it inside the revision transaction).
+    """
+    lo, hi = conn.execute(sa.text(_ID_RANGE)).one()
+    if lo is None:
+        return 0, 0
+    linked = batches = 0
+    for start in range(int(lo), int(hi) + 1, batch_size):
+        linked += conn.execute(
+            _BACKFILL,
+            {
+                "lo": start,
+                "hi": start + batch_size,
+                "reserved": list(_SYSTEM_ROLE_NAMES),
+            },
+        ).rowcount
+        batches += 1
+    return linked, batches
 
 
 def upgrade() -> None:
@@ -71,10 +123,11 @@ def upgrade() -> None:
             "[0145] WARNING: seed_community_system_roles(integer) is missing; "
             "system roles NOT seeded"
         )
-    linked = conn.execute(sa.text(_BACKFILL)).rowcount
+    linked, batches = backfill_links(conn)
     unresolved = conn.execute(sa.text(_UNRESOLVED)).scalar()
     print(
-        f"[0145] seeded system roles for {seeded} communities; linked {linked} members; "
+        f"[0145] seeded system roles for {seeded} communities; linked {linked} members in "
+        f"{batches} batches; "
         f"{unresolved} members still have no role row (no scopes)"
     )
 

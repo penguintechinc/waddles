@@ -15,7 +15,7 @@ export default function CreateCommunity() {
   const create = useMutation({
     mutationFn: (raw: unknown) => createCommunity(toCreatePayload(raw, isSuperAdmin)),
     onSuccess: async (community) => {
-      // The creator is now a member (admin role): refetch "my communities" instead of serving the
+      // The creator is now a member (owner role): refetch "my communities" instead of serving the
       // 5-minute-stale list that does not contain the new community yet.
       await queryClient.invalidateQueries({ queryKey: communityKeys.mine });
       navigate(`/dashboard/community/${community.id}`);

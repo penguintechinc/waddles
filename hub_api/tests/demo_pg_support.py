@@ -37,6 +37,7 @@ __all__ = [
     "PgTestDatabase",
     "fresh_dal",
     "migrated_postgres",
+    "open_dal",
     "prepare_database",
     "q",
     "scalar",
@@ -93,8 +94,8 @@ def prepare_database(db: PgTestDatabase) -> None:
     dal.close()
 
 
-def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
-    """Generator body for a per-test fixture: truncated tables + bound pydal DAL."""
+def open_dal(db: PgTestDatabase) -> AsyncDAL:
+    """A new pydal `AsyncDAL` (own connection) on the container, test tables bound, no truncate."""
     async_dal = AsyncDAL(db.dsn.replace("postgresql://", "postgres://", 1), pool_size=1)
     dal = async_dal.dal
     dal.define_table(
@@ -109,6 +110,13 @@ def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
     )
     bind_auth_tables(dal, migrate=False)
     bind_guild_pairing_tables(dal, migrate=False)
+    return async_dal
+
+
+def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
+    """Generator body for a per-test fixture: truncated tables + bound pydal DAL."""
+    async_dal = open_dal(db)
+    dal = async_dal.dal
     dal.executesql(
         "TRUNCATE guild_tenant_pairings, community_role_sync_bindings, community_roles, "
         "community_members, hub_user_identities, hub_users, communities, tenants "

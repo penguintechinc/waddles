@@ -168,7 +168,7 @@ ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
         282,
         "resolve_editor_scopes",
     ),
-    "admin reputation/": ("services/admin_service.py", 356, "require_community_admin"),
+    "admin reputation/": ("services/admin_service.py", 352, "require_community_admin"),
     "admin streams": ("blueprints/v1/streaming.py", 129, "scope=SCOPE_STREAM_CONFIG"),
     "bundles gateway membership": (
         "blueprints/v1/bundle_admin_gateway.py",
