@@ -48,6 +48,7 @@ from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
+from services import email_service
 from services.analytics_exclusions_service import (
     run_reconcile_loop as run_exclusions_reconcile_loop,
 )
@@ -332,6 +333,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # a logged no-op.
         app.config["telemetry_runtime"] = await hub_telemetry.start(app, cfg)
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
+        # Outbound email: an SMTP host with invalid settings (e.g. a missing / non-FQDN EHLO name)
+        # refuses to start rather than failing every send later. Unset host = email off; flows
+        # that need email then fail loud per request (services/email_service.py).
+        email_service.validate_startup()
         # Fired as a background task, not awaited to completion: a fresh/behind
         # schema can legitimately take longer than any reasonable startup
         # timeout to resolve (waiting on Postgres, or on an operator running
