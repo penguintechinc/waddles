@@ -1687,7 +1687,7 @@ bundles:
   # turning platform events into reputation deltas via the reputation service's adjust /
   # apply_moderation tools. Flag waddles.reputation-accrual defaults OFF.
   - app_id: penguintechinc.waddles.reputation-accrual
-    version: "1.0.3"
+    version: "1.0.4"
     language: rust
     wit_world: stage-next-tools
     kind: app
