@@ -85,6 +85,29 @@ data:
   {{- $verifyBase := .Values.config.dsarVerifyUrlBase | default "" }}
   {{- if and (not $verifyBase) .Values.webui.publicUrl }}{{ $verifyBase = printf "%s/privacy-request/verify" (trimSuffix "/" .Values.webui.publicUrl) }}{{ end }}
   DSAR_VERIFY_URL_BASE: {{ $verifyBase | quote }}
+  # Outbound email (hub-api, hub_api/services/email_service.py): non-secret relay settings from values `smtp`.
+  # SMTP_HOST blank => email OFF: flows that need it (signup verification) fail loud, nothing auto-verifies.
+  # AUTH credentials (optional) come only from the smtp.existingSecret Secret (hub-api.yaml), never from here.
+  {{- with .Values.smtp }}
+  {{- if .host }}
+  {{- if not .from }}{{ fail "smtp.from is required when smtp.host is set" }}{{ end }}
+  {{- if or (not .ehloName) (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\\.[A-Za-z]{2,}$" .ehloName)) (eq (lower .ehloName) "localhost") }}{{ fail "smtp.ehloName must be a fully-qualified hostname (not empty, localhost or an IP) when smtp.host is set" }}{{ end }}
+  {{- if ne (.tls | default "starttls") "starttls" }}{{ if ne .tls "tls" }}{{ fail "smtp.tls must be starttls or tls (plaintext is never rendered by the chart)" }}{{ end }}{{ end }}
+  {{- end }}
+  SMTP_HOST: {{ .host | default "" | quote }}
+  SMTP_PORT: {{ .port | default 587 | quote }}
+  SMTP_TLS: {{ .tls | default "starttls" | quote }}
+  SMTP_EHLO_NAME: {{ .ehloName | default "" | quote }}
+  SMTP_FROM: {{ .from | default "" | quote }}
+  SMTP_FROM_NAME: {{ .fromName | default "Waddles" | quote }}
+  SMTP_REPLY_TO: {{ .replyTo | default "" | quote }}
+  SMTP_TLS_CA_FILE: {{ .caFile | default "" | quote }}
+  SMTP_CONNECT_TIMEOUT: {{ .connectTimeoutSeconds | default 5 | quote }}
+  SMTP_SEND_TIMEOUT: {{ .sendTimeoutSeconds | default 10 | quote }}
+  SMTP_TOTAL_TIMEOUT: {{ .timeoutSeconds | default 30 | quote }}
+  SMTP_MAX_RETRIES: {{ .maxRetries | default 2 | quote }}
+  SMTP_BACKOFF_SECONDS: {{ .backoffSeconds | default 0.5 | quote }}
+  {{- end }}
   # DSAR verification mail over SMTP (hub-api, hub_api/services/dsar_email_sender.py). Non-secret settings; the
   # username/password come from the operator-supplied Secret named by config.dsarSmtp.existingSecret (hub-api.yaml).
   # DSAR_SMTP_HOST blank => no sender: delivery fails loud (event + ERROR log), never faked.

@@ -812,3 +812,14 @@ latencyCanary:
   commandText: "!ping"
   sinkMode: "post"
   intervalSeconds: 60
+
+# Outbound email (hub-api): Google Workspace SMTP relay, authenticated by our static egress IP --
+# no AUTH, so no Secret. EHLO name is what the relay checks; STARTTLS mandatory.
+smtp:
+  host: "smtp-relay.gmail.com"
+  port: 587
+  tls: "starttls"
+  ehloName: "waddles-alpha.penguintech.cloud"
+  from: "no-reply@penguintech.io"
+  fromName: "Waddles"
+  timeoutSeconds: 30
