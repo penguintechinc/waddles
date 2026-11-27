@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { FRONTEND_ROOT } from '../../../scripts/lib/backend-routes.mjs';
@@ -17,8 +17,6 @@ import { ServedFeature } from '../../components/ui';
 import { UNSERVED_FEATURES } from '../../lib/unservedFeatures';
 import AdminHome from '../admin/AdminHome';
 import AccountSettings from '../dashboard/AccountSettings';
-import AdminMusicProviders from '../admin/AdminMusicProviders';
-import AdminRadioStations from '../admin/AdminRadioStations';
 
 let http;
 afterEach(() => {
@@ -111,29 +109,3 @@ describe('AccountSettings', () => {
   });
 });
 
-describe('AdminMusicProviders', () => {
-  it('hides the unserved enable toggle and explains why', async () => {
-    http = stubHttp([api, apiClient], {
-      'GET /api/v1/admin/7/music/providers': { providers: { spotify: { connected: true, enabled: true } } },
-    });
-    at(<AdminMusicProviders />, '/admin/7/music/providers', '/admin/:communityId/music/providers');
-    expect(await screen.findByTestId('not-available-yet')).toHaveAttribute('data-feature', 'music-provider-config');
-    await waitFor(() => expect(http.seen).toHaveLength(1));
-    expect(screen.queryByText('Enable Provider')).not.toBeInTheDocument();
-  });
-});
-
-describe('AdminRadioStations', () => {
-  it('hides Test Stream / Set Default (unserved) but keeps the served list + delete', async () => {
-    http = stubHttp([api, apiClient], {
-      'GET /api/v1/admin/7/music/radio-stations': { stations: [{ id: 1, name: 'Chill', provider: 'custom', isDefault: false, streamUrl: 'https://x/y' }] },
-    });
-    at(<AdminRadioStations />, '/admin/7/music/radio', '/admin/:communityId/music/radio');
-    expect(await screen.findByText('Chill')).toBeInTheDocument();
-    expect(screen.getByTestId('not-available-yet')).toHaveAttribute('data-feature', 'radio-station-actions');
-    expect(screen.queryByText('Test Stream')).not.toBeInTheDocument();
-    expect(screen.queryByText('Set Default')).not.toBeInTheDocument();
-    expect(screen.getByTitle('Delete station')).toBeInTheDocument();
-    expect(within(document.body).getAllByTestId('not-available-yet')).toHaveLength(1);
-  });
-});

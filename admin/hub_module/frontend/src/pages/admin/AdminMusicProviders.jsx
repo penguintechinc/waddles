@@ -10,11 +10,28 @@ import {
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
-import { NotAvailableYet } from '../../components/ui';
-import { isFeatureServed } from '../../lib/unservedFeatures';
 
-/** hub-api has no `PUT .../music/providers/:provider/config` route yet. */
-const PROVIDER_CONFIG_FEATURE = 'music-provider-config';
+/** Server error message from hub-api's `{error: {message}}` envelope, else `fallback`. */
+const errorText = (err, fallback) => err?.response?.data?.error?.message || fallback;
+
+/**
+ * Keys hub-api's provider list (`[{providerName, isConnected, isActive, oauthExpiresAt}]`)
+ * by provider name, in the shape the cards render. Credentials never reach the client.
+ */
+export function toProviderMap(list) {
+  const now = Date.now();
+  return Object.fromEntries(
+    (list || []).map((p) => [
+      p.providerName,
+      {
+        connected: Boolean(p.isConnected),
+        enabled: Boolean(p.isActive),
+        tokenExpired: Boolean(p.isConnected && p.oauthExpiresAt && Date.parse(p.oauthExpiresAt) < now),
+        connectedAt: p.createdAt,
+      },
+    ]),
+  );
+}
 
 const MUSIC_PROVIDERS = {
   spotify: {
@@ -41,16 +58,15 @@ function AdminMusicProviders() {
   const { communityId } = useParams();
   const [providers, setProviders] = useState({});
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [actionLoading, setActionLoading] = useState(null);
   const [message, setMessage] = useState(null);
-  const [oauthWindow, setOauthWindow] = useState(null);
 
   useEffect(() => {
     loadProviders();
     // Listen for OAuth callback
     const handleMessage = (event) => {
-      if (event.data.type === 'OAUTH_CALLBACK') {
+      if (event.origin === window.location.origin && event.data?.type === 'OAUTH_CALLBACK') {
         loadProviders();
       }
     };
@@ -61,15 +77,12 @@ function AdminMusicProviders() {
   const loadProviders = async () => {
     try {
       setLoading(true);
-      setMessage(null);
+      setLoadError(null);
       const response = await adminApi.getMusicProviders(communityId);
-      setProviders(response.data.providers || {});
+      setProviders(toProviderMap(response.data.providers));
     } catch (err) {
-      console.error('Failed to load music providers:', err);
-      setMessage({
-        type: 'error',
-        text: err.response?.data?.error?.message || 'Failed to load music providers',
-      });
+      console.error('[AdminMusicProviders] Load failed', { status: err.response?.status });
+      setLoadError(errorText(err, 'Failed to load music providers'));
     } finally {
       setLoading(false);
     }
@@ -79,7 +92,11 @@ function AdminMusicProviders() {
     setActionLoading(providerName);
     try {
       setMessage(null);
-      const response = await adminApi.initiateMusicProviderOAuth(communityId, providerName);
+      const response = await adminApi.initiateMusicProviderOAuth(
+        communityId,
+        providerName,
+        window.location.href,
+      );
       const { authUrl } = response.data;
       // Open OAuth window
       const width = 500;
@@ -91,21 +108,22 @@ function AdminMusicProviders() {
         `${providerName}_oauth`,
         `width=${width},height=${height},left=${left},top=${top}`
       );
-      setOauthWindow(popup);
+      if (!popup) {
+        setMessage({ type: 'error', text: 'The sign-in window was blocked. Allow pop-ups and try again.' });
+        setActionLoading(null);
+        return;
+      }
       // Poll for completion
       const pollInterval = setInterval(() => {
-        if (popup?.closed) {
+        if (popup.closed) {
           clearInterval(pollInterval);
           loadProviders();
           setActionLoading(null);
         }
       }, 500);
     } catch (err) {
-      console.error('Failed to initiate OAuth:', err);
-      setMessage({
-        type: 'error',
-        text: err.response?.data?.error?.message || 'Failed to initiate connection',
-      });
+      console.error('[AdminMusicProviders] OAuth start failed', { provider: providerName, status: err.response?.status });
+      setMessage({ type: 'error', text: errorText(err, 'Failed to initiate connection') });
       setActionLoading(null);
     }
   };
@@ -124,11 +142,8 @@ function AdminMusicProviders() {
       });
       loadProviders();
     } catch (err) {
-      console.error('Failed to disconnect provider:', err);
-      setMessage({
-        type: 'error',
-        text: err.response?.data?.error?.message || 'Failed to disconnect provider',
-      });
+      console.error('[AdminMusicProviders] Disconnect failed', { provider: providerName, status: err.response?.status });
+      setMessage({ type: 'error', text: errorText(err, 'Failed to disconnect provider') });
     } finally {
       setActionLoading(null);
     }
@@ -138,18 +153,16 @@ function AdminMusicProviders() {
     setActionLoading(providerName);
     try {
       setMessage(null);
-      await adminApi.updateMusicProviderConfig(communityId, providerName, { enabled });
+      const response = await adminApi.updateMusicProviderConfig(communityId, providerName, { enabled });
+      const updated = toProviderMap([response.data.provider]);
+      setProviders((prev) => ({ ...prev, ...updated }));
       setMessage({
         type: 'success',
         text: `${MUSIC_PROVIDERS[providerName]?.name} ${enabled ? 'enabled' : 'disabled'}`,
       });
-      loadProviders();
     } catch (err) {
-      console.error('Failed to update provider config:', err);
-      setMessage({
-        type: 'error',
-        text: err.response?.data?.error?.message || 'Failed to update provider settings',
-      });
+      console.error('[AdminMusicProviders] Config update failed', { provider: providerName, status: err.response?.status });
+      setMessage({ type: 'error', text: errorText(err, 'Failed to update provider settings') });
     } finally {
       setActionLoading(null);
     }
@@ -190,10 +203,26 @@ function AdminMusicProviders() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
+        <div role="status" aria-label="Loading music providers" className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
       </div>
     );
   }
+
+  if (loadError) {
+    return (
+      <div role="alert" className="bg-red-500/10 border border-red-500/30 rounded-lg p-6 space-y-3">
+        <div className="flex items-center gap-3 text-red-300">
+          <ExclamationTriangleIcon className="w-5 h-5" />
+          <span>{loadError}</span>
+        </div>
+        <button type="button" onClick={loadProviders} className="btn btn-primary text-sm">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const anyConnected = Object.values(providers).some((p) => p.connected);
 
   return (
     <div className="space-y-6">
@@ -206,7 +235,11 @@ function AdminMusicProviders() {
           Connect and manage music streaming services for your community
         </p>
       </div>
-      {!isFeatureServed(PROVIDER_CONFIG_FEATURE) && <NotAvailableYet feature={PROVIDER_CONFIG_FEATURE} />}
+      {!anyConnected && (
+        <p className="text-sm text-navy-400" data-testid="music-providers-empty">
+          No music providers are connected yet. Connect one below to enable music requests.
+        </p>
+      )}
 
       {message && (
         <div
@@ -283,11 +316,12 @@ function AdminMusicProviders() {
               </div>
 
               {/* Enable/Disable Toggle (only if connected) */}
-              {provider?.connected && isFeatureServed(PROVIDER_CONFIG_FEATURE) && (
+              {provider?.connected && (
                 <label className="flex items-center justify-between p-3 bg-navy-900 rounded-lg cursor-pointer mb-4 border border-navy-700">
                   <span className="text-sm font-medium text-sky-100">Enable Provider</span>
                   <input
                     type="checkbox"
+                    aria-label={`Enable ${providerInfo.name}`}
                     checked={provider?.enabled || false}
                     onChange={(e) => handleToggleEnabled(key, e.target.checked)}
                     disabled={actionLoading === key}

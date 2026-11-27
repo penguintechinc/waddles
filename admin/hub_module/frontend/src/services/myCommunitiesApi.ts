@@ -15,8 +15,8 @@ import { isCommunityId } from '../lib/communityId';
 //   GET /api/v1/auth/me                      -> the caller's memberships (id, name, displayName, role)
 //   GET /api/v1/public/communities/:id       -> logo / description / member count
 //   GET /api/v1/public/communities?search=   -> discovery
-// The legacy `GET /api/v1/communities/my` does not exist on hub-api; `/auth/me`
-// already carries the membership list, so there is no second route to invent.
+// `GET /api/v1/communities/my` is served for penguind (CAT auth, #1536), but the webui
+// uses `/auth/me`, which already carries the membership list.
 
 /** One community the signed-in user belongs to, as served by `/auth/me`. */
 export interface MyCommunity {

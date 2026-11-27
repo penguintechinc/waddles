@@ -14,22 +14,18 @@ import time if that route file were ever mounted -- and it never is
 `router.use(..., musicRoutes)` anywhere; confirmed via repo-wide grep).
 `frontend/src/services/api.js`'s `updateMusicProviderConfig`/
 `testRadioStreamUrl`/`setDefaultRadioStation`/`getMusicDashboard`/
-`controlPlayback` calls are therefore contract entries with NO real
-backing implementation anywhere in the Node app today -- out of scope for
-a byte-faithful controller port (`hub_api/PORTING.md`'s "port the
-EXISTING controller endpoints, don't build new features"); a follow-up
-ticket should implement these five for real against a chosen schema (see
-`services/schema.py::bind_streaming_tables()`'s docstring for the
-`community_music_settings`-family-vs-`music_provider_config`-family
-schema-gap discussion) rather than have this port invent throwaway logic.
+`controlPlayback` calls had NO real backing implementation in the Node
+app. Three of them are now implemented natively here against the same
+`community_music_providers`/`community_radio_stations` tables:
+`update_provider_config` (enable/disable a connected provider),
+`probe_radio_station` (header-only SSRF-guarded reachability probe) and
+`set_default_radio_station` (one default per community, enforced by
+0145's partial unique index). Dashboard/playback remain unserved.
 
-Schema gap: every table this module queries
-(`community_music_settings`, `community_music_providers`,
-`community_radio_stations`, `oauth_state_tokens`, `oauth_tokens`) is
-bound by `services.schema.bind_streaming_tables()` but does not exist in
-any real migration -- see that function's docstring for the full
-gap analysis (`hub_api/PORTING.md` Gotcha #4's pattern). Every function
-below is byte-faithful to Node's SQL regardless.
+Schema: the tables this module queries are created by alembic
+`0012_schema_drift_columns` (plus `0138` public ids and `0145` default /
+last-tested columns) and bound for pydal by
+`services.schema.bind_streaming_tables()`.
 
 Authorization: every function here is called only after
 `services.community_authz.authorize_community(..., admin=True)` --
@@ -43,19 +39,46 @@ just full `community-admin`, matching the M7 port instruction's
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
+import httpx
+from opentelemetry import metrics, trace
+from sqlalchemy.exc import IntegrityError
+
 from services.community_public_id import lookup_public_id
-from services.errors import bad_request, not_found
-from services.url_guard import validate_outbound_url
+from services.errors import ApiError, bad_request, conflict, not_found
+from services.url_guard import guarded_probe, validate_outbound_url
+
+logger = logging.getLogger(__name__)
 
 _VALID_PROVIDERS: frozenset[str] = frozenset({"spotify", "soundcloud", "youtube"})
 _STATE_TOKEN_TTL_MINUTES = 15
+
+#: Reachability probe budget: connect + first-byte, never the (endless) stream body.
+_PROBE_TIMEOUT_SECONDS = 5.0
+
+#: Provider `config` keys never echoed to a client -- credentials are write-only.
+_SECRET_CONFIG_MARKERS: tuple[str, ...] = ("token", "secret", "password", "credential", "key")
+
+_tracer = trace.get_tracer("waddles.hub_api.music")
+_meter = metrics.get_meter("waddles.hub_api.music")
+_ADMIN_ACTIONS = _meter.create_counter(
+    "waddles.music.admin_actions",
+    description="Music admin actions by action and outcome",
+)
+_PROBE_MS = _meter.create_histogram(
+    "waddles.music.radio_probe_duration_ms",
+    unit="ms",
+    description="Radio stream reachability probe latency",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,9 +100,8 @@ class MusicSettingsDTO:
 
 @dataclass(slots=True, frozen=True)
 class MusicProviderDTO:
-    """Wire DTO for one connected music provider."""
+    """Wire DTO for one music provider -- keyed by `providerName`; no numeric id, no credentials."""
 
-    id: int
     communityId: str
     providerName: str
     isConnected: bool
@@ -102,9 +124,20 @@ class RadioStationDTO:
     description: str | None
     genre: str | None
     isActive: bool
-    createdBy: int | None
+    isDefault: bool
+    lastTestedAt: str | None
     createdAt: str | None
     updatedAt: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class RadioProbeResult:
+    """Outcome of one radio stream reachability probe."""
+
+    reachable: bool
+    httpStatus: int | None
+    contentType: str | None
+    testedAt: str
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -135,14 +168,22 @@ def _parse_provider_config(raw: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
+        logger.warning("music provider config is not valid JSON; returning empty config")
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    if not isinstance(parsed, dict):
+        logger.warning("music provider config is not a JSON object; returning empty config")
+        return {}
+    # Credentials are write-only: never echo a secret-looking key back out.
+    return {
+        k: v
+        for k, v in parsed.items()
+        if not any(marker in str(k).lower() for marker in _SECRET_CONFIG_MARKERS)
+    }
 
 
 def _provider_dto(row: Any, public_community_id: str) -> MusicProviderDTO:
     """Wire DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return MusicProviderDTO(
-        id=row.id,
         communityId=public_community_id,
         providerName=row.provider_name,
         isConnected=bool(row.is_connected),
@@ -165,7 +206,8 @@ def _station_dto(row: Any, public_community_id: str) -> RadioStationDTO:
         description=row.description,
         genre=row.genre,
         isActive=bool(row.is_active),
-        createdBy=row.created_by,
+        isDefault=bool(row.is_default),
+        lastTestedAt=_iso(row.last_tested_at),
         createdAt=_iso(row.created_at),
         updatedAt=_iso(row.updated_at),
     )
@@ -403,3 +445,154 @@ async def remove_radio_station(
     deleted = await async_dal.delete_async(query)
     if not deleted:
         raise not_found("Radio station not found")
+
+
+def _record(action: str, outcome: str) -> None:
+    """Count one music admin action (bounded labels: fixed action names, fixed outcomes)."""
+    _ADMIN_ACTIONS.add(1, {"action": action, "outcome": outcome})
+
+
+async def update_provider_config(
+    async_dal: Any, dal: Any, *, community_id: int, provider: str, enabled: bool
+) -> MusicProviderDTO:
+    """Enable or disable one provider for a community; only a CONNECTED provider can be enabled.
+
+    Disabling keeps the OAuth connection (unlike `disconnect_provider`) so music requests
+    stop routing to it without forcing a reconnect later.
+    """
+    provider_key = provider.lower()
+    if provider_key not in _VALID_PROVIDERS:
+        _record("provider_config", "invalid")
+        raise bad_request(f"Unsupported provider: {provider}")
+
+    with _tracer.start_as_current_span("music.provider_config") as span:
+        span.set_attribute("music.provider", provider_key)
+        span.set_attribute("music.enabled", enabled)
+        query = (dal.community_music_providers.community_id == community_id) & (
+            dal.community_music_providers.provider_name == provider_key
+        )
+        rows = await async_dal.select_async(dal(query))
+        row = rows.first() if rows else None
+        if row is None:
+            _record("provider_config", "not_found")
+            raise not_found("Provider not found")
+        if enabled and not row.is_connected:
+            _record("provider_config", "not_connected")
+            raise conflict("Connect the provider before enabling it")
+
+        await async_dal.update_async(query, is_active=enabled, updated_at=datetime.now(UTC))
+        refreshed = (await async_dal.select_async(dal(query))).first()
+        _record("provider_config", "ok")
+        logger.info("music provider %s set enabled=%s", provider_key, enabled)
+        return _provider_dto(refreshed, await lookup_public_id(community_id))
+
+
+async def _station_row(async_dal: Any, dal: Any, *, community_id: int, station_id: int) -> Any:
+    """Load one station inside `community_id` or raise 404 (never another community's row)."""
+    query = (dal.community_radio_stations.id == station_id) & (
+        dal.community_radio_stations.community_id == community_id
+    )
+    rows = await async_dal.select_async(dal(query))
+    row = rows.first() if rows else None
+    if row is None:
+        raise not_found("Radio station not found")
+    return row
+
+
+async def probe_radio_station(
+    async_dal: Any, dal: Any, *, community_id: int, station_id: int
+) -> RadioProbeResult:
+    """Probe a station's stream URL (headers only) and stamp `last_tested_at`.
+
+    A transport failure or non-2xx status is a normal `reachable=False` result, not an
+    error. A URL that now resolves into a blocked range raises 400 (SSRF guard). The
+    stream URL itself is never logged -- it may carry a listener key in its query.
+    """
+    row = await _station_row(async_dal, dal, community_id=community_id, station_id=station_id)
+    status: int | None = None
+    content_type: str | None = None
+    with _tracer.start_as_current_span("music.radio_probe") as span:
+        span.set_attribute("music.station_id", str(row.public_id))
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False, timeout=_PROBE_TIMEOUT_SECONDS
+            ) as client:
+                response = await guarded_probe(client, row.url)
+            status = response.status_code
+            content_type = response.headers.get("content-type")
+        except httpx.HTTPError as exc:
+            logger.info(
+                "radio probe transport failure station=%s error=%s",
+                row.public_id,
+                type(exc).__name__,
+            )
+        except ApiError:
+            _record("radio_test", "blocked")
+            raise
+        finally:
+            _PROBE_MS.record((time.perf_counter() - started) * 1000.0)
+        reachable = status is not None and 200 <= status < 300
+        span.set_attribute("music.reachable", reachable)
+        if status is not None:
+            span.set_attribute("http.response.status_code", status)
+
+    now = datetime.now(UTC)
+    await async_dal.update_async(dal.community_radio_stations.id == row.id, last_tested_at=now)
+    _record("radio_test", "reachable" if reachable else "unreachable")
+    logger.info("radio probe station=%s reachable=%s status=%s", row.public_id, reachable, status)
+    return RadioProbeResult(
+        reachable=reachable,
+        httpStatus=status,
+        contentType=content_type[:255] if content_type else None,
+        testedAt=now.isoformat(),
+    )
+
+
+def _sync_set_default(dal: Any, *, community_id: int, station_id: int, now: datetime) -> None:
+    """Single executor job: clear the community's current default, set the new one, commit."""
+    table = dal.community_radio_stations
+    try:
+        others = (
+            (table.community_id == community_id)
+            & (table.is_default == True)  # noqa: E712 -- pydal query, not a Python bool test
+            & (table.id != station_id)
+        )
+        dal(others).update(is_default=False, updated_at=now)
+        dal(table.id == station_id).update(is_default=True, updated_at=now)
+        dal.commit()
+    except Exception:
+        dal.rollback()
+        raise
+
+
+async def set_default_radio_station(
+    async_dal: Any, dal: Any, *, community_id: int, station_id: int
+) -> RadioStationDTO:
+    """Make one ACTIVE station the community's default; the old default is cleared atomically."""
+    row = await _station_row(async_dal, dal, community_id=community_id, station_id=station_id)
+    if not row.is_active:
+        _record("radio_default", "inactive")
+        raise conflict("Only an active station can be the default")
+
+    with _tracer.start_as_current_span("music.radio_set_default") as span:
+        span.set_attribute("music.station_id", str(row.public_id))
+        now = datetime.now(UTC)
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                async_dal.executor,
+                lambda: _sync_set_default(
+                    dal, community_id=community_id, station_id=row.id, now=now
+                ),
+            )
+        except IntegrityError as exc:
+            # 0145's one-default-per-community index lost a concurrent race.
+            _record("radio_default", "conflict")
+            logger.warning("radio set-default race station=%s: %s", row.public_id, exc)
+            raise conflict("Another default station was set concurrently; retry") from exc
+
+    _record("radio_default", "ok")
+    logger.info("radio default set station=%s", row.public_id)
+    refreshed = await _station_row(async_dal, dal, community_id=community_id, station_id=row.id)
+    return _station_dto(refreshed, await lookup_public_id(community_id))

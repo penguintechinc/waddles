@@ -671,8 +671,11 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_MUSIC_CONFIG_CHANGED),
         (
             ("PUT", f"{_ADM}/music/settings"),
+            ("PUT", f"{_ADM}/music/providers/<provider>/config"),
             ("POST", f"{_ADM}/music/radio-stations"),
             ("DELETE", f"{_ADM}/music/radio-stations/<puuid:station_id>"),
+            ("POST", f"{_ADM}/music/radio-stations/<puuid:station_id>/test"),
+            ("PUT", f"{_ADM}/music/radio-stations/<puuid:station_id>/default"),
         ),
     ),
     (
