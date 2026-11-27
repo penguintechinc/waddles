@@ -353,14 +353,14 @@ export const adminApi = {
     api.put(`/api/v1/admin/${communityId}/music/settings`, settings),
   getMusicProviders: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/music/providers`),
-  initiateMusicProviderOAuth: (communityId, provider) =>
-    api.post(`/api/v1/admin/${communityId}/music/providers/${provider}/oauth`),
+  initiateMusicProviderOAuth: (communityId, provider, redirectUri) =>
+    api.post(`/api/v1/admin/${communityId}/music/providers/${provider}/oauth`, { redirectUri }),
   disconnectMusicProvider: (communityId, provider) =>
     api.delete(`/api/v1/admin/${communityId}/music/providers/${provider}`),
   updateMusicProviderConfig: (communityId, provider, config) =>
     api.put(`/api/v1/admin/${communityId}/music/providers/${provider}/config`, config),
-  getRadioStations: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/music/radio-stations`),
+  getRadioStations: (communityId, params) =>
+    api.get(`/api/v1/admin/${communityId}/music/radio-stations`, { params }),
   addRadioStation: (communityId, station) =>
     api.post(`/api/v1/admin/${communityId}/music/radio-stations`, station),
   deleteRadioStation: (communityId, stationId) =>

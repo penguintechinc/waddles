@@ -3458,7 +3458,8 @@ components:
       title: ModuleDTO
       type: object
     MusicProviderDTO:
-      description: Wire DTO for one connected music provider.
+      description: Wire DTO for one music provider -- keyed by `providerName`; no
+        numeric id, no credentials.
       properties:
         communityId:
           title: Communityid
@@ -3472,9 +3473,6 @@ components:
           - type: string
           - type: 'null'
           title: Createdat
-        id:
-          title: Id
-          type: integer
         isActive:
           title: Isactive
           type: boolean
@@ -3500,7 +3498,6 @@ components:
           - type: 'null'
           title: Updatedat
       required:
-      - id
       - communityId
       - providerName
       - isConnected
@@ -3590,6 +3587,28 @@ components:
       - monthly
       - ranks
       title: MyActivityStats
+      type: object
+    MyCommunityDTO:
+      description: Community summary returned by `GET /api/v1/communities/my`.
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        role:
+          title: Role
+          type: string
+      required:
+      - id
+      - name
+      - displayName
+      - role
+      title: MyCommunityDTO
       type: object
     MyJoinRequestDTO:
       description: Response sub-DTO -- snake_case, matches Node's raw SELECT shape
@@ -4260,6 +4279,32 @@ components:
       - kind
       title: QueueItemDTO
       type: object
+    RadioProbeResult:
+      description: Outcome of one radio stream reachability probe.
+      properties:
+        contentType:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Contenttype
+        httpStatus:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Httpstatus
+        reachable:
+          title: Reachable
+          type: boolean
+        testedAt:
+          title: Testedat
+          type: string
+      required:
+      - reachable
+      - httpStatus
+      - contentType
+      - testedAt
+      title: RadioProbeResult
+      type: object
     RadioStationDTO:
       description: Wire DTO for one community radio station; `id` is its public UUID.
       properties:
@@ -4271,11 +4316,6 @@ components:
           - type: string
           - type: 'null'
           title: Createdat
-        createdBy:
-          anyOf:
-          - type: integer
-          - type: 'null'
-          title: Createdby
         description:
           anyOf:
           - type: string
@@ -4292,6 +4332,14 @@ components:
         isActive:
           title: Isactive
           type: boolean
+        isDefault:
+          title: Isdefault
+          type: boolean
+        lastTestedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lasttestedat
         name:
           title: Name
           type: string
@@ -4311,7 +4359,8 @@ components:
       - description
       - genre
       - isActive
-      - createdBy
+      - isDefault
+      - lastTestedAt
       - createdAt
       - updatedAt
       title: RadioStationDTO
@@ -10300,6 +10349,55 @@ paths:
                 type: object
           description: Generic `{success, message}` response DTO.
       summary: Disconnect a music provider.
+  /api/v1/admin/{community_id}/music/providers/{provider}/config:
+    put:
+      description: ''
+      operationId: put_update_provider_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: provider
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `PUT .../music/providers/<provider>/config`
+                -- no credentials accepted.
+              properties:
+                enabled:
+                  title: Enabled
+                  type: boolean
+              required:
+              - enabled
+              title: UpdateProviderConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the provider-config endpoint.
+                properties:
+                  provider:
+                    $ref: '#/components/schemas/MusicProviderDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - provider
+                title: MusicProviderResponse
+                type: object
+          description: Response DTO for the provider-config endpoint.
+      summary: Enable or disable a connected music provider for a community.
   /api/v1/admin/{community_id}/music/providers/{provider}/oauth:
     post:
       description: ''
@@ -10475,6 +10573,82 @@ paths:
                 type: object
           description: Generic `{success, message}` response DTO.
       summary: Remove a radio station from a community.
+  /api/v1/admin/{community_id}/music/radio-stations/{station_id}/default:
+    put:
+      description: ''
+      operationId: put_set_default_radio_station
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: station_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the add-radio-station endpoint.
+                properties:
+                  station:
+                    $ref: '#/components/schemas/RadioStationDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - station
+                title: RadioStationResponse
+                type: object
+          description: Response DTO for the add-radio-station endpoint.
+      summary: Make an active radio station the community's default (previous default
+        cleared).
+  /api/v1/admin/{community_id}/music/radio-stations/{station_id}/test:
+    post:
+      description: ''
+      operationId: post_probe_radio_station
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: station_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `POST .../radio-stations/<uuid>/test`
+                  -- `success` = the probe ran.
+                properties:
+                  result:
+                    $ref: '#/components/schemas/RadioProbeResult'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: RadioProbeResponse
+                type: object
+          description: Response DTO for `POST .../radio-stations/<uuid>/test` -- `success`
+            = the probe ran.
+      summary: Probe a radio station's stream URL for reachability (headers only,
+        SSRF-guarded).
   /api/v1/admin/{community_id}/music/settings:
     get:
       description: ''
@@ -16177,10 +16351,13 @@ paths:
         The refresh token rotates on every use (the browser takes the new `Set-Cookie`);
         presenting
 
-        one that was already rotated away revokes the whole session. The response
-        body still carries
+        one that was already rotated away revokes the whole session. Non-browser desktop
+        clients
 
-        the new access `token` (the SPA ignores it -- it lives in the cookie).'
+        without a cookie jar may pass `{"refresh_token": "..."}` in the JSON body
+        and read
+
+        `token` / `access_token` + `refresh_token` from the response.'
       operationId: post_refresh
       parameters: []
       responses:
@@ -16190,6 +16367,18 @@ paths:
               schema:
                 description: Response DTO for refresh endpoints.
                 properties:
+                  access_token:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Access Token
+                  refresh_token:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Refresh Token
                   success:
                     title: Success
                     type: boolean
@@ -16202,8 +16391,8 @@ paths:
                 title: RefreshResponse
                 type: object
           description: Response DTO for refresh endpoints.
-      summary: 'Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute
-        access token out.'
+      summary: Renew the session from the HttpOnly refresh cookie or JSON `refresh_token`
+        body.
   /api/v1/auth/register:
     post:
       description: ''
@@ -16598,6 +16787,30 @@ paths:
           description: Self-hosted ALTCHA proof-of-work challenge DTO.
       summary: Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited,
         fail closed).
+  /api/v1/communities/my:
+    get:
+      description: ''
+      operationId: get_list_my_communities
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/communities/my`.
+                properties:
+                  communities:
+                    items:
+                      $ref: '#/components/schemas/MyCommunityDTO'
+                    title: Communities
+                    type: array
+                required:
+                - communities
+                title: MyCommunitiesResponse
+                type: object
+          description: Response DTO for `GET /api/v1/communities/my`.
+      summary: '`GET /api/v1/communities/my` -- communities the caller (JWT user or
+        CAT) can act on.'
   /api/v1/communities/{community_id}/calendar/event-sync:
     get:
       description: ''

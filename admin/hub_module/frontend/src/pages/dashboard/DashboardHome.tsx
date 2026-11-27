@@ -107,8 +107,8 @@ function DiscoverResults({ term, joinedIds }: DiscoverResultsProps) {
 }
 
 /**
- * Post-login landing ("My Communities"). Memberships come from `/auth/me` (hub-api has no
- * `/communities/my`), so loading, failure and "you have none yet" are real, distinct states
+ * Post-login landing ("My Communities"). Memberships come from `/auth/me` (the webui does not
+ * call `/communities/my`), so loading, failure and "you have none yet" are real, distinct states
  * rather than a silently empty page.
  */
 export default function DashboardHome() {

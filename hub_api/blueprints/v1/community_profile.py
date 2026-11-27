@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -284,6 +284,96 @@ async def delete_community_banner(
     except ApiError as exc:
         return _err(exc)
     return SimpleSuccessResponse(success=True)
+
+
+@dataclass(slots=True, frozen=True)
+class MyCommunityDTO:
+    """Community summary returned by `GET /api/v1/communities/my`."""
+
+    id: str
+    name: str
+    displayName: str
+    role: str
+
+
+@dataclass(slots=True, frozen=True)
+class MyCommunitiesResponse:
+    """Response DTO for `GET /api/v1/communities/my`."""
+
+    communities: list[MyCommunityDTO]
+
+
+@community_profile_bp.route("/communities/my", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@validate_response(MyCommunitiesResponse)
+async def list_my_communities() -> MyCommunitiesResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/communities/my` -- communities the caller (JWT user or CAT) can act on."""
+    _, dal = _dal()
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return cast(
+            tuple[dict[str, object], int],
+            error_response("Tenant context missing", 403, "FORBIDDEN"),
+        )
+
+    items: list[MyCommunityDTO] = []
+    if ctx.cat_community_id is not None:
+        row = (
+            dal(
+                (dal.communities.id == ctx.cat_community_id)
+                & (dal.communities.tenant_id == ctx.tenant_id)
+            )
+            .select()
+            .first()
+        )
+        if row is not None:
+            public_id = (await lookup_public_id(int(row.id))) or str(row.id)
+            name = str(getattr(row, "name", "") or "")
+            display_name = str(getattr(row, "display_name", None) or name)
+            items.append(
+                MyCommunityDTO(
+                    id=str(public_id),
+                    name=name,
+                    displayName=display_name,
+                    role="token",
+                )
+            )
+        return MyCommunitiesResponse(communities=items)
+
+    try:
+        user_id = get_current_user_id(request)
+    except ApiError as exc:
+        current_app.logger.warning("communities/my: user auth failed (%s)", exc.code)
+        return _err(exc)
+
+    if "community_members" in getattr(dal, "tables", ()):
+        member_rows = dal(
+            (dal.community_members.user_id == str(user_id))
+            & (dal.community_members.is_active == True)  # noqa: E712
+        ).select()
+        community_ids = [int(m.community_id) for m in member_rows]
+    else:
+        community_ids = []
+
+    if community_ids:
+        comm_rows = dal(
+            (dal.communities.id.belongs(community_ids))
+            & (dal.communities.tenant_id == ctx.tenant_id)
+        ).select()
+        for row in comm_rows:
+            public_id = (await lookup_public_id(int(row.id))) or str(row.id)
+            name = str(getattr(row, "name", "") or "")
+            display_name = str(getattr(row, "display_name", None) or name)
+            items.append(
+                MyCommunityDTO(
+                    id=str(public_id),
+                    name=name,
+                    displayName=display_name,
+                    role="member",
+                )
+            )
+
+    return MyCommunitiesResponse(communities=items)
 
 
 BLUEPRINTS: list[Blueprint] = [community_profile_bp]

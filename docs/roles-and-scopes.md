@@ -32,7 +32,7 @@ creator is linked to the system `community-owner` role. A member holds one role 
 that link: a member with no linked role row holds no scopes and no role name, whatever its legacy
 `role` string says. All membership-role writes go through
 `hub_api/services/member_roles.set_member_role` (it also keeps the legacy `role` string in sync).
-Migration `0145_community_role_backfill` repaired communities created before this.
+Migration `0146_community_role_backfill` repaired communities created before this.
 
 - **Reserved names.** The seeded names (`member`, `communicator`, `speaker`, `moderator`,
   `community-admin`, `community-owner`) are reserved: creating a custom role with one is a `400

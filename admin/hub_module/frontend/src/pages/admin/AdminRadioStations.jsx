@@ -1,48 +1,40 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { NotAvailableYet } from '../../components/ui';
-import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
   MusicalNoteIcon,
   PlusIcon,
   TrashIcon,
   CheckCircleIcon,
-  PlayIcon,
   ExclamationTriangleIcon,
   XMarkIcon,
   SignalIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
 
-const PROVIDER_TYPES = [
-  { value: 'spotify', label: 'Spotify' },
-  { value: 'soundcloud', label: 'SoundCloud' },
-  { value: 'youtube_music', label: 'YouTube Music' },
-  { value: 'apple_music', label: 'Apple Music' },
-  { value: 'tidal', label: 'Tidal' },
-  { value: 'custom', label: 'Custom Stream URL' },
-];
+const PAGE_SIZE = 25;
+const EMPTY_FORM = { name: '', url: '', genre: '', description: '' };
 
-/** hub-api has no radio-station `/test` or `/default` routes yet. */
-const RADIO_ACTIONS_FEATURE = 'radio-station-actions';
+/** Server error message from hub-api's `{error: {message}}` envelope, else `fallback`. */
+const errorText = (err, fallback) => err?.response?.data?.error?.message || fallback;
 
-const PROVIDERS_WITH_API_KEY = ['spotify', 'soundcloud', 'apple_music', 'tidal'];
-
+/**
+ * Radio station admin: list (paginated), add, delete, reachability test and default
+ * station, all served by hub-api `music/radio-stations`. Stations are stream URLs only;
+ * provider accounts are connected on the Music Providers page, never stored here.
+ */
 function AdminRadioStations() {
   const { communityId } = useParams();
   const [stations, setStations] = useState([]);
+  const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
 
   // Add station form
   const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState({
-    name: '',
-    provider: 'spotify',
-    streamUrl: '',
-    apiKey: '',
-  });
+  const [formData, setFormData] = useState(EMPTY_FORM);
   const [adding, setAdding] = useState(false);
 
   // Action states
@@ -55,61 +47,47 @@ function AdminRadioStations() {
 
   useEffect(() => {
     loadStations();
-  }, [communityId]);
+  }, [communityId, page]);
 
   const loadStations = async () => {
     try {
       setLoading(true);
-      setError(null);
-      const response = await adminApi.getRadioStations(communityId);
+      setLoadError(null);
+      const response = await adminApi.getRadioStations(communityId, { page, limit: PAGE_SIZE });
       setStations(response.data.stations || []);
+      setPagination(response.data.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to load radio stations');
+      console.error('[AdminRadioStations] Load failed', { status: err.response?.status });
+      setLoadError(errorText(err, 'Failed to load radio stations'));
     } finally {
       setLoading(false);
     }
   };
 
   const handleFormChange = (field, value) => {
-    setFormData({
-      ...formData,
-      [field]: value,
-    });
+    setFormData({ ...formData, [field]: value });
   };
 
   const handleAddStation = async (e) => {
     e.preventDefault();
-
-    if (!formData.name.trim() || !formData.provider || !formData.streamUrl.trim()) {
-      setError('Please fill in all required fields');
+    if (!formData.name.trim() || !formData.url.trim()) {
+      setError('Station name and stream URL are required');
       return;
     }
-
-    if (PROVIDERS_WITH_API_KEY.includes(formData.provider) && !formData.apiKey.trim()) {
-      setError(`API key is required for ${formData.provider}`);
-      return;
-    }
-
     try {
       setAdding(true);
       setError(null);
-      const payload = {
-        name: formData.name.trim(),
-        provider: formData.provider,
-        streamUrl: formData.streamUrl.trim(),
-      };
-
-      if (formData.apiKey.trim()) {
-        payload.apiKey = formData.apiKey.trim();
-      }
-
+      const payload = { name: formData.name.trim(), url: formData.url.trim() };
+      if (formData.genre.trim()) payload.genre = formData.genre.trim();
+      if (formData.description.trim()) payload.description = formData.description.trim();
       await adminApi.addRadioStation(communityId, payload);
       setMessage({ type: 'success', text: 'Radio station added successfully' });
-      setFormData({ name: '', provider: 'spotify', streamUrl: '', apiKey: '' });
+      setFormData(EMPTY_FORM);
       setShowForm(false);
       loadStations();
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to add radio station');
+      console.error('[AdminRadioStations] Add failed', { status: err.response?.status });
+      setError(errorText(err, 'Failed to add radio station'));
     } finally {
       setAdding(false);
     }
@@ -117,64 +95,81 @@ function AdminRadioStations() {
 
   const handleTestStream = async (stationId) => {
     try {
-      setTesting({ ...testing, [stationId]: true });
+      setTesting((t) => ({ ...t, [stationId]: true }));
       setError(null);
+      setMessage(null);
       const response = await adminApi.testRadioStreamUrl(communityId, stationId);
-      if (response.data.success) {
-        setMessage({ type: 'success', text: 'Stream test successful! URL is reachable.' });
+      const result = response.data.result || {};
+      if (result.reachable) {
+        setMessage({ type: 'success', text: `Stream reachable (HTTP ${result.httpStatus}).` });
       } else {
-        setError(response.data.message || 'Stream test failed. URL may not be reachable.');
+        setError(
+          result.httpStatus
+            ? `Stream unreachable (HTTP ${result.httpStatus}).`
+            : 'Stream unreachable: no response from the stream URL.',
+        );
       }
+      loadStations();
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to test stream');
+      console.error('[AdminRadioStations] Test failed', { status: err.response?.status });
+      setError(errorText(err, 'Failed to test stream'));
     } finally {
-      setTesting({ ...testing, [stationId]: false });
+      setTesting((t) => ({ ...t, [stationId]: false }));
     }
   };
 
   const handleSetDefault = async (stationId) => {
     try {
-      setSetting({ ...setting, [stationId]: true });
+      setSetting((s) => ({ ...s, [stationId]: true }));
       setError(null);
       await adminApi.setDefaultRadioStation(communityId, stationId);
       setMessage({ type: 'success', text: 'Default station updated successfully' });
       loadStations();
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to set default station');
+      console.error('[AdminRadioStations] Set default failed', { status: err.response?.status });
+      setError(errorText(err, 'Failed to set default station'));
     } finally {
-      setSetting({ ...setting, [stationId]: false });
+      setSetting((s) => ({ ...s, [stationId]: false }));
     }
   };
 
   const handleDelete = async (stationId) => {
     try {
-      setDeleting({ ...deleting, [stationId]: true });
+      setDeleting((d) => ({ ...d, [stationId]: true }));
       setError(null);
       await adminApi.deleteRadioStation(communityId, stationId);
       setMessage({ type: 'success', text: 'Radio station removed successfully' });
       setDeleteConfirm(null);
       loadStations();
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to remove radio station');
+      console.error('[AdminRadioStations] Delete failed', { status: err.response?.status });
+      setError(errorText(err, 'Failed to remove radio station'));
     } finally {
-      setDeleting({ ...deleting, [stationId]: false });
+      setDeleting((d) => ({ ...d, [stationId]: false }));
     }
-  };
-
-  const getProviderLabel = (provider) => {
-    const providerObj = PROVIDER_TYPES.find((p) => p.value === provider);
-    return providerObj ? providerObj.label : provider;
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
+        <div role="status" aria-label="Loading radio stations" className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
       </div>
     );
   }
 
-  const defaultStation = stations.find((s) => s.isDefault);
+  if (loadError) {
+    return (
+      <div role="alert" className="bg-red-500/10 border border-red-500/30 rounded-lg p-6 space-y-3">
+        <div className="flex items-center gap-3 text-red-300">
+          <ExclamationTriangleIcon className="w-5 h-5" />
+          <span>{loadError}</span>
+        </div>
+        <button type="button" onClick={loadStations} className="btn btn-primary text-sm">
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -182,7 +177,7 @@ function AdminRadioStations() {
         <div>
           <h1 className="text-2xl font-bold text-sky-100">Radio Stations</h1>
           <p className="text-navy-400 mt-1">
-            Manage configured music streaming stations and providers
+            Manage the stream URLs your community can play
           </p>
         </div>
         <button
@@ -194,11 +189,9 @@ function AdminRadioStations() {
         </button>
       </div>
 
-      {!isFeatureServed(RADIO_ACTIONS_FEATURE) && <NotAvailableYet feature={RADIO_ACTIONS_FEATURE} />}
-
       {/* Messages */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex items-center justify-between">
+        <div role="alert" className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
@@ -211,11 +204,8 @@ function AdminRadioStations() {
 
       {message && (
         <div
-          className={`rounded-lg p-4 flex items-center justify-between ${
-            message.type === 'success'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-              : 'bg-red-500/20 text-red-300 border border-red-500/30'
-          }`}
+          role="status"
+          className="rounded-lg p-4 flex items-center justify-between bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
         >
           <div className="flex items-center space-x-3">
             <CheckCircleIcon className="w-5 h-5" />
@@ -233,7 +223,6 @@ function AdminRadioStations() {
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Add New Radio Station</h2>
           <form onSubmit={handleAddStation} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Station Name */}
               <div>
                 <label htmlFor="admin-radio-stations-station-name" className="block text-sm font-medium text-navy-300 mb-2">
                   Station Name *
@@ -241,6 +230,7 @@ function AdminRadioStations() {
                 <input
                   id="admin-radio-stations-station-name"
                   type="text"
+                  maxLength={255}
                   value={formData.name}
                   onChange={(e) => handleFormChange('name', e.target.value)}
                   placeholder="e.g., Lofi Hip Hop"
@@ -248,26 +238,21 @@ function AdminRadioStations() {
                 />
               </div>
 
-              {/* Provider */}
               <div>
-                <label htmlFor="admin-radio-stations-provider" className="block text-sm font-medium text-navy-300 mb-2">
-                  Provider *
+                <label htmlFor="admin-radio-stations-genre" className="block text-sm font-medium text-navy-300 mb-2">
+                  Genre
                 </label>
-                <select
-                  id="admin-radio-stations-provider"
-                  value={formData.provider}
-                  onChange={(e) => handleFormChange('provider', e.target.value)}
+                <input
+                  id="admin-radio-stations-genre"
+                  type="text"
+                  maxLength={100}
+                  value={formData.genre}
+                  onChange={(e) => handleFormChange('genre', e.target.value)}
+                  placeholder="e.g., lofi"
                   className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
-                >
-                  {PROVIDER_TYPES.map((provider) => (
-                    <option key={provider.value} value={provider.value}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
 
-              {/* Stream URL */}
               <div className="md:col-span-2">
                 <label htmlFor="admin-radio-stations-stream-url" className="block text-sm font-medium text-navy-300 mb-2">
                   Stream URL *
@@ -275,38 +260,32 @@ function AdminRadioStations() {
                 <input
                   id="admin-radio-stations-stream-url"
                   type="url"
-                  value={formData.streamUrl}
-                  onChange={(e) => handleFormChange('streamUrl', e.target.value)}
-                  placeholder="https://api.example.com/stream"
+                  maxLength={2048}
+                  value={formData.url}
+                  onChange={(e) => handleFormChange('url', e.target.value)}
+                  placeholder="https://stream.example.com/live"
                   className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
                 />
                 <p className="text-xs text-navy-500 mt-1">
-                  The URL to access the stream from this provider
+                  A public http(s) Icecast/Shoutcast or similar stream URL
                 </p>
               </div>
 
-              {/* API Key (conditional) */}
-              {PROVIDERS_WITH_API_KEY.includes(formData.provider) && (
-                <div className="md:col-span-2">
-                  <label htmlFor="admin-radio-stations-api-key" className="block text-sm font-medium text-navy-300 mb-2">
-                    API Key *
-                  </label>
-                  <input
-                    id="admin-radio-stations-api-key"
-                    type="password"
-                    value={formData.apiKey}
-                    onChange={(e) => handleFormChange('apiKey', e.target.value)}
-                    placeholder="Your provider API key"
-                    className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
-                  />
-                  <p className="text-xs text-navy-500 mt-1">
-                    API key is required for {getProviderLabel(formData.provider)}
-                  </p>
-                </div>
-              )}
+              <div className="md:col-span-2">
+                <label htmlFor="admin-radio-stations-description" className="block text-sm font-medium text-navy-300 mb-2">
+                  Description
+                </label>
+                <input
+                  id="admin-radio-stations-description"
+                  type="text"
+                  maxLength={1000}
+                  value={formData.description}
+                  onChange={(e) => handleFormChange('description', e.target.value)}
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
+                />
+              </div>
             </div>
 
-            {/* Form Actions */}
             <div className="flex gap-3 pt-4">
               <button
                 type="submit"
@@ -319,7 +298,7 @@ function AdminRadioStations() {
                 type="button"
                 onClick={() => {
                   setShowForm(false);
-                  setFormData({ name: '', provider: 'spotify', streamUrl: '', apiKey: '' });
+                  setFormData(EMPTY_FORM);
                 }}
                 className="flex-1 px-4 py-2 bg-navy-700 hover:bg-navy-600 text-sky-100 font-medium rounded-lg transition-colors"
               >
@@ -332,7 +311,7 @@ function AdminRadioStations() {
 
       {/* Stations List */}
       {stations.length === 0 ? (
-        <div className="bg-navy-800 border border-navy-700 rounded-lg p-12 text-center">
+        <div data-testid="radio-stations-empty" className="bg-navy-800 border border-navy-700 rounded-lg p-12 text-center">
           <MusicalNoteIcon className="w-12 h-12 text-navy-500 mx-auto mb-4" />
           <h3 className="text-lg font-semibold text-sky-100 mb-2">No Radio Stations</h3>
           <p className="text-navy-400">
@@ -344,6 +323,7 @@ function AdminRadioStations() {
           {stations.map((station) => (
             <div
               key={station.id}
+              data-testid="radio-station"
               className={`rounded-lg p-6 border transition-colors ${
                 station.isDefault
                   ? 'bg-gold-500/5 border-gold-500/30'
@@ -365,12 +345,14 @@ function AdminRadioStations() {
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center space-x-3 mt-2 text-sm text-navy-400">
-                      <span className="inline-block px-2 py-1 rounded bg-navy-700 text-sky-300">
-                        {getProviderLabel(station.provider)}
-                      </span>
-                      <span>ID: {station.id}</span>
-                    </div>
+                    {(station.genre || station.description) && (
+                      <div className="flex items-center space-x-3 mt-2 text-sm text-navy-400">
+                        {station.genre && (
+                          <span className="inline-block px-2 py-1 rounded bg-navy-700 text-sky-300">{station.genre}</span>
+                        )}
+                        {station.description && <span>{station.description}</span>}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -379,30 +361,19 @@ function AdminRadioStations() {
               <div className="bg-navy-900 rounded-lg p-4 mb-4 space-y-2">
                 <div>
                   <span className="text-xs text-navy-400">Stream URL:</span>
-                  <p className="text-sm text-sky-300 break-all font-mono">{station.streamUrl}</p>
+                  <p className="text-sm text-sky-300 break-all font-mono">{station.url}</p>
                 </div>
-                {station.apiKeySet && (
-                  <div>
-                    <span className="text-xs text-navy-400">API Key:</span>
-                    <p className="text-sm text-green-400 flex items-center space-x-2">
-                      <CheckCircleIcon className="w-4 h-4" />
-                      <span>Configured</span>
-                    </p>
-                  </div>
-                )}
-                {station.lastTestedAt && (
-                  <div>
-                    <span className="text-xs text-navy-400">Last Tested:</span>
-                    <p className="text-sm text-sky-300">
-                      {new Date(station.lastTestedAt).toLocaleString()}
-                    </p>
-                  </div>
-                )}
+                <div>
+                  <span className="text-xs text-navy-400">Last Tested:</span>
+                  <p className="text-sm text-sky-300">
+                    {station.lastTestedAt ? new Date(station.lastTestedAt).toLocaleString() : 'Never'}
+                  </p>
+                </div>
               </div>
 
               {/* Actions */}
               <div className="flex items-center space-x-2">
-                {!station.isDefault && isFeatureServed(RADIO_ACTIONS_FEATURE) && (
+                {!station.isDefault && station.isActive && (
                   <button
                     onClick={() => handleSetDefault(station.id)}
                     disabled={setting[station.id]}
@@ -413,7 +384,6 @@ function AdminRadioStations() {
                   </button>
                 )}
 
-                {isFeatureServed(RADIO_ACTIONS_FEATURE) && (
                 <button
                   onClick={() => handleTestStream(station.id)}
                   disabled={testing[station.id]}
@@ -422,12 +392,12 @@ function AdminRadioStations() {
                   <SignalIcon className={`w-4 h-4 ${testing[station.id] ? 'animate-pulse' : ''}`} />
                   <span>{testing[station.id] ? 'Testing...' : 'Test Stream'}</span>
                 </button>
-                )}
 
                 <button
                   onClick={() => setDeleteConfirm(station)}
                   className="ml-auto p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition-colors"
                   title="Delete station"
+                  aria-label={`Delete ${station.name}`}
                 >
                   <TrashIcon className="w-5 h-5" />
                 </button>
@@ -450,6 +420,31 @@ function AdminRadioStations() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* Pagination */}
+      {pagination.pages > 1 && (
+        <nav aria-label="Radio station pages" className="flex items-center justify-between text-sm text-navy-300">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={pagination.page <= 1}
+            className="px-3 py-1 rounded bg-navy-700 disabled:opacity-50"
+          >
+            Previous
+          </button>
+          <span>
+            Page {pagination.page} of {pagination.pages} ({pagination.total} stations)
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => p + 1)}
+            disabled={pagination.page >= pagination.pages}
+            className="px-3 py-1 rounded bg-navy-700 disabled:opacity-50"
+          >
+            Next
+          </button>
+        </nav>
       )}
 
       {/* Delete Confirmation Modal */}

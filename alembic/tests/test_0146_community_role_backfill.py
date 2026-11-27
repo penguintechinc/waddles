@@ -1,4 +1,4 @@
-"""Tests for 0145_community_role_backfill: chain checks and the real-Postgres seed + link repair."""
+"""Tests for 0146_community_role_backfill: chain checks and the real-Postgres seed + link repair."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PATH = _ROOT / "alembic" / "versions" / "0145_community_role_backfill.py"
-_REV = "0145_community_role_backfill"
-_PREV = "0144_ingest_owner_public_ids"
+_PATH = _ROOT / "alembic" / "versions" / "0146_community_role_backfill.py"
+_REV = "0146_community_role_backfill"
+_PREV = "0145_radio_station_default"
 
 
 def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("migration_0145", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0146", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -39,7 +39,7 @@ def test_chain_and_id_length() -> None:
     assert module.down_revision == _PREV
 
 
-def test_single_head_and_0145_in_history() -> None:
+def test_single_head_and_0146_in_history() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
@@ -63,7 +63,7 @@ def _role_ids(cur: psycopg2.extensions.cursor, cid: int) -> dict[str, int]:
 
 @requires_docker
 def test_seeds_missing_roles_and_backfills_links_idempotently() -> None:
-    with migrated_postgres("0145-role-backfill") as db:
+    with migrated_postgres("0146-role-backfill") as db:
         alembic_cli("downgrade", _PREV, dsn=db.dsn)
         install_community_role_seeding(db.dsn)
         conn = psycopg2.connect(db.dsn)
@@ -143,7 +143,7 @@ def test_seeds_missing_roles_and_backfills_links_idempotently() -> None:
 @requires_docker
 def test_batched_backfill_links_owner_and_ignores_shadowing_custom_role() -> None:
     """Batch path (tiny batch size, many batches) + system-name rule, then a real upgrade."""
-    with migrated_postgres("0145-role-batches") as db:
+    with migrated_postgres("0146-role-batches") as db:
         alembic_cli("downgrade", _PREV, dsn=db.dsn)
         install_community_role_seeding(db.dsn)
         conn = psycopg2.connect(db.dsn)
@@ -221,7 +221,7 @@ def test_batch_size_is_bounded() -> None:
 
 @requires_docker
 def test_minimal_bootstrap_without_community_roles_is_a_noop() -> None:
-    with migrated_postgres("0145-noop") as db:
+    with migrated_postgres("0146-noop") as db:
         alembic_cli("downgrade", _PREV, dsn=db.dsn)
         alembic_cli("upgrade", _REV, dsn=db.dsn)
         conn = psycopg2.connect(db.dsn)

@@ -148,15 +148,15 @@ def _owner_ids(dal: Any, community_id: int) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _load_migration_0145() -> Any:
-    """The 0145 revision module (its `backfill_links` is the batched data-repair path)."""
+def _load_migration_0146() -> Any:
+    """The 0146 revision module (its `backfill_links` is the batched data-repair path)."""
     path = (
         Path(__file__).resolve().parents[2]
         / "alembic"
         / "versions"
-        / "0145_community_role_backfill.py"
+        / "0146_community_role_backfill.py"
     )
-    spec = importlib.util.spec_from_file_location("m0145_owner_guard", path)
+    spec = importlib.util.spec_from_file_location("m0146_owner_guard", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -285,7 +285,7 @@ class TestOwnerResolution:
         engine = sa.create_engine(pg_db.dsn)
         try:
             with engine.begin() as conn:
-                linked, batches = _load_migration_0145().backfill_links(conn)
+                linked, batches = _load_migration_0146().backfill_links(conn)
         finally:
             engine.dispose()
         assert (linked, batches) == (1, 1)

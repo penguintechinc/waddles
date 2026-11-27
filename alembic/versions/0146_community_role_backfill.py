@@ -25,8 +25,8 @@ no-op: the seeded rows and links are valid data that cannot be told apart from a
 Revision id <= 32 chars; `down_revision` is the release head at authoring time (re-point at merge
 if another revision lands first -- single-head CI gate).
 
-Revision ID: 0145_community_role_backfill
-Revises: 0144_ingest_owner_public_ids
+Revision ID: 0146_community_role_backfill
+Revises: 0145_radio_station_default
 Create Date: 2026-11-27
 """
 
@@ -36,8 +36,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0145_community_role_backfill"
-down_revision = "0144_ingest_owner_public_ids"
+revision = "0146_community_role_backfill"
+down_revision = "0145_radio_station_default"
 branch_labels = None
 depends_on = None
 
@@ -120,13 +120,13 @@ def upgrade() -> None:
         # The backfill below still links every member whose role row already exists.
         seeded = 0
         print(
-            "[0145] WARNING: seed_community_system_roles(integer) is missing; "
+            "[0146] WARNING: seed_community_system_roles(integer) is missing; "
             "system roles NOT seeded"
         )
     linked, batches = backfill_links(conn)
     unresolved = conn.execute(sa.text(_UNRESOLVED)).scalar()
     print(
-        f"[0145] seeded system roles for {seeded} communities; linked {linked} members in "
+        f"[0146] seeded system roles for {seeded} communities; linked {linked} members in "
         f"{batches} batches; "
         f"{unresolved} members still have no role row (no scopes)"
     )

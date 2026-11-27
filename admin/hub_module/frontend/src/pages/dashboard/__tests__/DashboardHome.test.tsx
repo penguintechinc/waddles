@@ -1,6 +1,6 @@
 /**
  * Post-login landing: "My Communities" must populate from the SERVED `/auth/me`
- * memberships (hub-api has no `/communities/my`), and loading / error / empty /
+ * memberships (the webui never calls `/communities/my`), and loading / error / empty /
  * contract-drift must each render a real state instead of a silently empty page.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
