@@ -53,9 +53,13 @@ STUB_PATTERN='TODO|FIXME|XXX|HACK|unimplemented!\(\)|todo!\(\)|NotImplementedErr
 # server endpoints" placeholder for UI whose hub-api route does not exist).
 # Each JSX use is a stub finding unless allowlisted with a tracking issue.
 # Scoped to the frontend src; the component definition file is excluded.
-PLACEHOLDER_PATTERN='<(NotAvailableYet|ServedFeature)([[:space:]]|$)'
+PLACEHOLDER_PATTERN='<(NotAvailableYet|ServedFeature)([[:space:]/]|$)'
 PLACEHOLDER_ROOT="admin/hub_module/frontend/src"
 PLACEHOLDER_DEFINITION="${PLACEHOLDER_ROOT}/components/ui/NotAvailableYet.tsx"
+# Import of NotAvailableYet (multi-line aware) and the literal "Missing server
+# endpoints" text are also stub findings in webui source -- found by this
+# helper (tests and the definition file are excluded upstream).
+PLACEHOLDER_SCRIPT="${REPO_ROOT}/scripts/ci/check_no_stubs_placeholder.py"
 
 if [ ! -f "${ALLOWLIST}" ]; then
     echo "check-no-stubs: FAIL -- missing ${ALLOWLIST}" >&2
@@ -130,6 +134,28 @@ while IFS= read -r rel; do
     done < <(grep -nE "${PATTERN_FOR_FILE}" "${rel}" 2>/dev/null || true)
 done < "${file_list}"
 echo "]" >> "${findings_json}"
+
+# Phase 2b: webui placeholder imports + "Missing server endpoints" text.
+placeholder_list="$(mktemp)"
+# awk (exit 0 on no match) -- an empty selection is caught by the zero check below.
+awk -v root="${PLACEHOLDER_ROOT}/" -v def="${PLACEHOLDER_DEFINITION}" \
+    'index($0, root) == 1 && $0 != def' "${file_list}" > "${placeholder_list}"
+placeholder_files_scanned="$(wc -l < "${placeholder_list}" | tr -d ' ')"
+echo "check-no-stubs: webui_placeholder_files_scanned=${placeholder_files_scanned}"
+if [ "${placeholder_files_scanned}" -eq 0 ]; then
+    echo "check-no-stubs: FAIL -- zero webui files scanned for placeholders (root ${PLACEHOLDER_ROOT} moved/missing?)" >&2
+    rm -f "${placeholder_list}"
+    exit 1
+fi
+placeholder_json="$(mktemp)"
+tr '\n' '\0' < "${placeholder_list}" | xargs -0 "${PYTHON_BIN}" "${PLACEHOLDER_SCRIPT}" > "${placeholder_json}"
+"${PYTHON_BIN}" -c '
+import json, sys
+a = json.load(open(sys.argv[1]))
+b = json.load(open(sys.argv[2]))
+json.dump(a + b, open(sys.argv[1], "w"))
+' "${findings_json}" "${placeholder_json}"
+rm -f "${placeholder_list}" "${placeholder_json}"
 
 # ---------------------------------------------------------------------------
 # Phase 3: semgrep silent-fallback scan -> JSON findings
