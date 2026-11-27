@@ -94,7 +94,7 @@ describe('backendRoutes (real hub-api blueprints)', () => {
 
   it('does not serve the legacy paths the UI used to call', () => {
     for (const [method, path] of [
-      ['GET', '/api/v1/communities/my'],
+      // GET /api/v1/communities/my is served again on purpose (penguind CAT auth parity, #1536).
       ['GET', '/api/v1/communities/<p>/dashboard'],
       ['GET', '/api/v1/communities/<p>/leaderboard/watch-time'],
       ['POST', '/api/v1/admin/<p>/join-requests/<p>/approve'],
