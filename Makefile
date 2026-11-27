@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-cert-name-constraints check-helm-hook-timeouts check-pii-egress check-bundle-hygiene check-platform-flag-authz generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-bundle-lockfiles check-cert-name-constraints check-helm-hook-timeouts check-pii-egress check-bundle-hygiene check-platform-flag-authz generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover test-smoke-pod-phase publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -182,6 +182,12 @@ check-helm-hook-timeouts:
 # seeder 409s digest_conflict. CI runs it in bundle-hygiene.yml. Zero bundles examined fails.
 check-bundle-version-bump:
 	@python3 scripts/ci/check-bundle-version-bump.py "$(or $(BASE),origin/release/v3.0.X)"
+
+# Every bundles/rust, core and sdk Cargo.lock agrees with its Cargo.toml package versions (incl.
+# local path deps), so `cargo --locked` never refuses at deploy. Self-test first; 0 examined fails.
+check-bundle-lockfiles:
+	@python3 -m pytest scripts/ci/tests/test_check_bundle_lockfiles.py -q -p no:cacheprovider
+	@bash scripts/ci/check-bundle-lockfiles.sh
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its
