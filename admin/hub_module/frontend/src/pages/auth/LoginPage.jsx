@@ -6,6 +6,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { KeyIcon } from '@heroicons/react/24/outline';
 import { passkeyApi, publicApi, ssoApi, tenantApi } from '../../services/api';
 import { resolveBranding } from './tenantBranding';
+import MfaLoginStep from '../../components/security/MfaLoginStep';
 import { useState } from 'react';
 
 // Waddlebot color overrides — match the existing navy/gold theme palette
@@ -188,6 +189,8 @@ function LoginPage() {
   const { refreshUser, isAuthenticated } = useAuth();
   const [signupEnabled, setSignupEnabled] = useState(false);
   const [tenantInfo, setTenantInfo] = useState(null);
+  // MFA-pending state from a 202 login answer ({ mfaToken, methods }); null = no second step.
+  const [mfaChallenge, setMfaChallenge] = useState(null);
 
   // Tenant branding (whitelabel). Fails soft -- any error keeps stock branding.
   useEffect(() => {
@@ -229,6 +232,12 @@ function LoginPage() {
   // POSTs to /api/v1/auth/exchange expecting a short-lived OAuth code and
   // would reject a JWT, silently leaving the user unauthenticated).
   const handleSuccess = async (response) => {
+    if (response?.mfaRequired) {
+      // Password accepted, second factor enrolled: no session yet -- show the MFA step.
+      console.debug('[LoginPage] MFA required', { methods: response.methods });
+      setMfaChallenge({ mfaToken: response.mfaToken, methods: response.methods });
+      return;
+    }
     if (response.token) {
       await refreshUser(true);
     }
@@ -241,6 +250,23 @@ function LoginPage() {
     }
     navigate('/dashboard');
   };
+
+  if (mfaChallenge) {
+    return (
+      <div className="min-h-[80vh] flex items-center justify-center py-12 px-4">
+        <div className="max-w-md w-full">
+          <MfaLoginStep
+            challenge={mfaChallenge}
+            onSuccess={async (data) => {
+              setMfaChallenge(null);
+              await handleSuccess(data);
+            }}
+            onCancel={() => setMfaChallenge(null)}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-[80vh] flex items-center justify-center py-12 px-4">

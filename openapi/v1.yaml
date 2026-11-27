@@ -3402,6 +3402,21 @@ components:
       - maxLength
       title: MetadataFieldDTO
       type: object
+    MfaMethodState:
+      description: 'One method''s state: `status` 0 none / 1 pending / 2 active; `available`
+        = usable here.'
+      properties:
+        available:
+          title: Available
+          type: boolean
+        status:
+          title: Status
+          type: integer
+      required:
+      - status
+      - available
+      title: MfaMethodState
+      type: object
     ModuleDTO:
       description: Per-community module installation DTO.
       properties:
@@ -15850,7 +15865,60 @@ paths:
                 title: AdminLoginResponse
                 type: object
           description: Response DTO for admin login endpoints.
-      summary: Admin login.
+        '202':
+          content:
+            application/json:
+              schema:
+                description: '202 body after a correct password when a second factor
+                  is enrolled (no session yet).
+
+
+                  `mfaToken` is an opaque, single-use, 10-minute MFA-pending value
+                  -- not a JWT, carries no
+
+                  scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+                  lists the usable
+
+                  factors, preferred (TOTP) first; `recovery` is always last.'
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  methods:
+                    items:
+                      type: string
+                    title: Methods
+                    type: array
+                  mfaRequired:
+                    title: Mfarequired
+                    type: boolean
+                  mfaToken:
+                    title: Mfatoken
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mfaRequired
+                - mfaToken
+                - methods
+                - expiresIn
+                title: MfaRequiredResponse
+                type: object
+          description: '202 body after a correct password when a second factor is
+            enrolled (no session yet).
+
+
+            `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not
+            a JWT, carries no
+
+            scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+            lists the usable
+
+            factors, preferred (TOTP) first; `recovery` is always last.'
+      summary: Legacy admin login; same MFA step as `/login` when a second factor
+        is enrolled.
   /api/v1/auth/exchange:
     post:
       description: '
@@ -15978,6 +16046,58 @@ paths:
                 title: LoginResponse
                 type: object
           description: Response DTO for login endpoints.
+        '202':
+          content:
+            application/json:
+              schema:
+                description: '202 body after a correct password when a second factor
+                  is enrolled (no session yet).
+
+
+                  `mfaToken` is an opaque, single-use, 10-minute MFA-pending value
+                  -- not a JWT, carries no
+
+                  scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+                  lists the usable
+
+                  factors, preferred (TOTP) first; `recovery` is always last.'
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  methods:
+                    items:
+                      type: string
+                    title: Methods
+                    type: array
+                  mfaRequired:
+                    title: Mfarequired
+                    type: boolean
+                  mfaToken:
+                    title: Mfatoken
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mfaRequired
+                - mfaToken
+                - methods
+                - expiresIn
+                title: MfaRequiredResponse
+                type: object
+          description: '202 body after a correct password when a second factor is
+            enrolled (no session yet).
+
+
+            `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not
+            a JWT, carries no
+
+            scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+            lists the usable
+
+            factors, preferred (TOTP) first; `recovery` is always last.'
         '403':
           content:
             application/json:
@@ -16000,7 +16120,8 @@ paths:
                 title: VerificationRequiredResponse
                 type: object
           description: Response DTO for verification required endpoints.
-      summary: Login.
+      summary: Password login; answers 202 + MFA-pending state when a second factor
+        is enrolled.
   /api/v1/auth/logout:
     post:
       description: ''
@@ -16071,6 +16192,407 @@ paths:
                 type: object
           description: Response DTO for me endpoints.
       summary: Me.
+  /api/v1/auth/mfa/disable:
+    post:
+      description: ''
+      operationId: post_mfa_disable
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for `POST /disable`: which method, re-auth
+                password, and a valid code.'
+              properties:
+                code:
+                  title: Code
+                  type: string
+                method:
+                  title: Method
+                  type: string
+                password:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Password
+              required:
+              - method
+              - code
+              title: DisableRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for actions with no payload.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: SimpleResponse
+                type: object
+          description: Response DTO for actions with no payload.
+      summary: 'Disable one method: re-authentication plus a valid code from an active
+        factor.'
+  /api/v1/auth/mfa/email/confirm:
+    post:
+      description: ''
+      operationId: post_email_confirm
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO carrying one verification code.
+              properties:
+                code:
+                  title: Code
+                  type: string
+              required:
+              - code
+              title: CodeRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO carrying freshly issued recovery codes (shown
+                  once; may be empty).
+                properties:
+                  recoveryCodes:
+                    items:
+                      type: string
+                    title: Recoverycodes
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - recoveryCodes
+                title: RecoveryCodesResponse
+                type: object
+          description: Response DTO carrying freshly issued recovery codes (shown
+            once; may be empty).
+      summary: Activate the email method with the emailed code.
+  /api/v1/auth/mfa/email/enroll:
+    post:
+      description: ''
+      operationId: post_email_enroll
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO after an email code was handed to the transport.
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - expiresIn
+                title: EmailSentResponse
+                type: object
+          description: Response DTO after an email code was handed to the transport.
+      summary: Start email-code enrollment (verified address required); emails a confirmation
+        code.
+  /api/v1/auth/mfa/email/send-code:
+    post:
+      description: ''
+      operationId: post_email_send_code
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO after an email code was handed to the transport.
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - expiresIn
+                title: EmailSentResponse
+                type: object
+          description: Response DTO after an email code was handed to the transport.
+      summary: Email a code the signed-in user can use to disable a method or regenerate
+        codes.
+  /api/v1/auth/mfa/login/email:
+    post:
+      description: ''
+      operationId: post_login_email
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /login/email`.
+              properties:
+                mfaToken:
+                  title: Mfatoken
+                  type: string
+              required:
+              - mfaToken
+              title: LoginEmailRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO after an email code was handed to the transport.
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - expiresIn
+                title: EmailSentResponse
+                type: object
+          description: Response DTO after an email code was handed to the transport.
+      summary: Email a sign-in code for a pending (password-verified) login.
+  /api/v1/auth/mfa/login/verify:
+    post:
+      description: ''
+      operationId: post_login_verify
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /login/verify`.
+              properties:
+                code:
+                  title: Code
+                  type: string
+                method:
+                  title: Method
+                  type: string
+                mfaToken:
+                  title: Mfatoken
+                  type: string
+              required:
+              - mfaToken
+              - method
+              - code
+              title: LoginVerifyRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for login endpoints.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                  user:
+                    $ref: '#/components/schemas/LoginUserDTO'
+                required:
+                - success
+                - token
+                - user
+                title: LoginResponse
+                type: object
+          description: Response DTO for login endpoints.
+      summary: Complete a pending login with a second factor; sets the session + refresh
+        cookies.
+  /api/v1/auth/mfa/recovery-codes/regenerate:
+    post:
+      description: ''
+      operationId: post_regenerate_recovery_codes
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /recovery-codes/regenerate`.
+              properties:
+                code:
+                  title: Code
+                  type: string
+                password:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Password
+              required:
+              - code
+              title: ReauthCodeRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO carrying freshly issued recovery codes (shown
+                  once; may be empty).
+                properties:
+                  recoveryCodes:
+                    items:
+                      type: string
+                    title: Recoverycodes
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - recoveryCodes
+                title: RecoveryCodesResponse
+                type: object
+          description: Response DTO carrying freshly issued recovery codes (shown
+            once; may be empty).
+      summary: Replace all recovery codes (re-auth + a valid code); answers the new
+        ones once.
+  /api/v1/auth/mfa/status:
+    get:
+      description: ''
+      operationId: get_mfa_status
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /status` (no secret material).
+                properties:
+                  email:
+                    $ref: '#/components/schemas/MfaMethodState'
+                  emailVerified:
+                    title: Emailverified
+                    type: boolean
+                  enabled:
+                    title: Enabled
+                    type: boolean
+                  hasPassword:
+                    title: Haspassword
+                    type: boolean
+                  preferredMethod:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Preferredmethod
+                  recoveryCodesRemaining:
+                    title: Recoverycodesremaining
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  totp:
+                    $ref: '#/components/schemas/MfaMethodState'
+                required:
+                - success
+                - enabled
+                - totp
+                - email
+                - emailVerified
+                - hasPassword
+                - recoveryCodesRemaining
+                - preferredMethod
+                title: MfaStatusResponse
+                type: object
+          description: Response DTO for `GET /status` (no secret material).
+      summary: The caller's MFA methods and their states.
+  /api/v1/auth/mfa/totp/confirm:
+    post:
+      description: ''
+      operationId: post_totp_confirm
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO carrying one verification code.
+              properties:
+                code:
+                  title: Code
+                  type: string
+              required:
+              - code
+              title: CodeRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO carrying freshly issued recovery codes (shown
+                  once; may be empty).
+                properties:
+                  recoveryCodes:
+                    items:
+                      type: string
+                    title: Recoverycodes
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - recoveryCodes
+                title: RecoveryCodesResponse
+                type: object
+          description: Response DTO carrying freshly issued recovery codes (shown
+            once; may be empty).
+      summary: Activate TOTP with a first valid code; answers the recovery codes (shown
+        once).
+  /api/v1/auth/mfa/totp/enroll:
+    post:
+      description: ''
+      operationId: post_totp_enroll
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `POST /totp/enroll` -- returned only
+                  to the enrolling user.
+                properties:
+                  otpauthUri:
+                    title: Otpauthuri
+                    type: string
+                  secret:
+                    title: Secret
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - otpauthUri
+                - secret
+                title: TotpEnrollResponse
+                type: object
+          description: Response DTO for `POST /totp/enroll` -- returned only to the
+            enrolling user.
+      summary: Start (or restart) TOTP enrollment; the secret stays PENDING until
+        confirmed.
   /api/v1/auth/oauth/{platform}:
     delete:
       description: ''
@@ -16148,7 +16670,16 @@ paths:
 
         `POST /exchange` (`exchange_oauth_code` below), delivered over the
 
-        response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.'
+        response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.
+
+
+        Account MFA: when the user has an active local factor, no session and no exchange
+        code are
+
+        minted; the redirect goes to the webui MFA step (`/auth/mfa#pending=...`)
+        with the opaque
+
+        single-use pending token in the URL fragment, completed via `/api/v1/auth/mfa/login/verify`.'
       operationId: get_oauth_callback__get_api_v1_auth_oauth_platform_callback
       parameters:
       - in: path
@@ -16498,7 +17029,12 @@ paths:
         for a tenant.'
   /api/v1/auth/sso/{public_id}/acs:
     post:
-      description: ''
+      description: '
+
+        A user with an active local MFA factor is redirected to the webui MFA step
+        with a pending
+
+        token in the URL fragment instead of a session.'
       operationId: post_sso_saml_acs
       parameters:
       - in: path
@@ -16512,7 +17048,13 @@ paths:
       summary: '`POST /<id>/acs` -- SAML Assertion Consumer Service (HTTP-POST binding).'
   /api/v1/auth/sso/{public_id}/callback:
     get:
-      description: ''
+      description: '
+
+        A user with an active local MFA factor is redirected to the webui MFA step
+        with a pending
+
+        token in the URL fragment instead of a session (unless the tenant trusts the
+        IdP''s MFA `amr`).'
       operationId: get_sso_oidc_callback
       parameters:
       - in: path
@@ -16710,7 +17252,60 @@ paths:
                 title: TempPasswordLoginResponse
                 type: object
           description: Response DTO for temp password login endpoints.
-      summary: Temp password login.
+        '202':
+          content:
+            application/json:
+              schema:
+                description: '202 body after a correct password when a second factor
+                  is enrolled (no session yet).
+
+
+                  `mfaToken` is an opaque, single-use, 10-minute MFA-pending value
+                  -- not a JWT, carries no
+
+                  scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+                  lists the usable
+
+                  factors, preferred (TOTP) first; `recovery` is always last.'
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  methods:
+                    items:
+                      type: string
+                    title: Methods
+                    type: array
+                  mfaRequired:
+                    title: Mfarequired
+                    type: boolean
+                  mfaToken:
+                    title: Mfatoken
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mfaRequired
+                - mfaToken
+                - methods
+                - expiresIn
+                title: MfaRequiredResponse
+                type: object
+          description: '202 body after a correct password when a second factor is
+            enrolled (no session yet).
+
+
+            `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not
+            a JWT, carries no
+
+            scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+            lists the usable
+
+            factors, preferred (TOTP) first; `recovery` is always last.'
+      summary: Temp password login; 202 + MFA-pending state when the named account
+        has a factor.
   /api/v1/auth/tenant/{slug}:
     get:
       description: ''
@@ -16748,7 +17343,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Verify email.
+      summary: Verify email; answers 202 + MFA-pending state (no session) when a factor
+        is enrolled.
   /api/v1/captcha/challenge:
     get:
       description: ''

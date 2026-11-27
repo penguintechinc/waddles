@@ -527,6 +527,60 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
     # tables every one of those paths already depends on (idempotent; same `migrate` flag).
     bind_erasure_reputation_tables(dal, migrate=migrate)
     bind_suppression_tables(dal, migrate=migrate)
+    bind_mfa_tables(dal, migrate=migrate)
+
+
+def bind_mfa_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the account-MFA tables (alembic `0145_hub_user_mfa`; `services/mfa_service.py`).
+
+    Bound with the identity tables because the password-login path (`auth_service.login`) asks
+    `mfa_service` whether a second factor is required before it mints a session. Idempotent.
+    """
+    if "hub_user_mfa" in dal.tables:
+        return
+    dal.define_table(
+        "hub_user_mfa",
+        Field("user_id", "integer", notnull=True, unique=True),
+        Field("totp_secret_enc", "text"),
+        Field("totp_status", "integer", notnull=True, default=0),
+        Field("totp_last_step", "bigint"),
+        Field("totp_confirmed_at", "datetime"),
+        Field("email_status", "integer", notnull=True, default=0),
+        Field("email_confirmed_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "hub_user_mfa_recovery_codes",
+        Field("user_id", "integer", notnull=True),
+        Field("code_hash", "string", length=64, notnull=True),
+        # Envelope DEK version whose derived pepper keyed `code_hash` (alembic 0146).
+        Field("key_version", "integer", notnull=True),
+        Field("used_at", "datetime"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "hub_mfa_challenges",
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("user_id", "integer", notnull=True),
+        Field("purpose", "integer", notnull=True),
+        Field("token_hash", "string", length=64, notnull=True, unique=True),
+        Field("tenant_id", "integer"),
+        Field("tenant_slug", "string", length=100),
+        Field("auth_method", "string", length=32),
+        Field("attempts", "integer", notnull=True, default=0),
+        Field("email_code_hash", "string", length=64),
+        Field("email_code_salt", "string", length=32),
+        Field("email_code_expires_at", "datetime"),
+        Field("email_sends", "integer", notnull=True, default=0),
+        Field("email_last_sent_at", "datetime"),
+        Field("expires_at", "datetime", notnull=True),
+        Field("consumed_at", "datetime"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
 
 
 def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:

@@ -179,6 +179,8 @@ class ExternalIdentity:
     email_verified: bool = False
     display_name: str | None = field(default=None, repr=False)
     hosted_domain: str | None = field(default=None, repr=False)
+    #: OIDC `amr` (RFC 8176) as the IdP asserted it; empty for SAML or when absent.
+    amr: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)

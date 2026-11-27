@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import useAuthProviders from '../../hooks/useAuthProviders';
 import api, { passkeyApi, userOAuthApi } from '../../services/api';
 import { ServedFeature } from '../../components/ui';
+import MfaSettings from '../../components/security/MfaSettings';
 import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
   UserCircleIcon,
@@ -524,6 +525,18 @@ function AccountSettings() {
             You can always sign in using any connected platform. Setting a password allows you to also sign in with your email.
           </p>
         </div>
+      </div>
+
+      {/* Two-step verification (MFA): authenticator app first (recommended), email second */}
+      <div className="card p-6 mt-6" data-testid="account-mfa-card">
+        <div className="flex items-center gap-3 mb-4">
+          <ShieldCheckIcon className="w-6 h-6 text-gold-400" />
+          <h2 className="text-xl font-semibold text-sky-100">Two-step verification</h2>
+        </div>
+        <p className="text-navy-300 mb-4">
+          Require a second step after your password. An authenticator app is the most secure option.
+        </p>
+        <MfaSettings />
       </div>
 
       {/* Passkeys */}

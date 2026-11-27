@@ -364,3 +364,58 @@ async def record_privileged_user_change(
             operation,
             outcome.value,
         )
+
+
+async def record_mfa_event(
+    *,
+    user_id: int,
+    category: AuditCategory,
+    action: AuditAction,
+    outcome: AuditOutcome,
+    method: str,
+    reason: str | None = None,
+    tenant_slug: str | None = None,
+    auth_method: str | None = None,
+) -> None:
+    """Audit one account-MFA event (challenge issued, code verified/failed, method changed).
+
+    Identifiers only: the actor's user id (stored as its UUID by the service), a closed `method`
+    (`totp` / `email` / `recovery`) and, for a failure, a closed `reason` (`invalid_code`,
+    `expired`, `locked`, ...). Never a code, secret, recovery code or email address. Never
+    raises: the MFA state change already took effect; an unrecordable event is logged at ERROR.
+    """
+    service = get_service()
+    if service is None:
+        logger.debug("mfa audit: no AuditService wired; not audited")
+        return
+    details: dict[str, Any] = {"method": method}
+    if reason is not None:
+        details["reason"] = reason
+    if auth_method is not None:
+        # Closed first-factor label (`password`, `oauth_<platform>`, `sso_<protocol>`, ...).
+        details["auth_method"] = auth_method
+    try:
+        known = (
+            await service.find_tenant(tenant_id=None, tenant_slug=tenant_slug)
+            if tenant_slug
+            else None
+        )
+        await service.record(
+            AuditEvent(
+                category=category,
+                action=action,
+                outcome=outcome,
+                actor_kind=ActorKind.USER,
+                actor_user_id=user_id,
+                tenant_id=known[0] if known is not None else None,
+                target_type="mfa",
+                details=details,
+            )
+        )
+    except AuditWriteError:
+        logger.error(
+            "mfa audit event NOT recorded: action=%s outcome=%s method=%s",
+            action.value,
+            outcome.value,
+            method,
+        )

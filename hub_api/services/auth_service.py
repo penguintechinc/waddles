@@ -33,7 +33,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Final, cast
 from urllib.parse import urlencode
 
 import bcrypt
@@ -50,7 +50,7 @@ from opentelemetry import metrics
 from quart import has_request_context
 
 from config import HubAPIConfig
-from services import session_service
+from services import mfa_service, session_service
 from services.audit_http import record_session_issued, record_session_revoked
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
@@ -613,6 +613,15 @@ async def verify_email(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: st
         email_verification_expires=None,
     )
 
+    # The address is now verified either way; a SESSION still needs every enrolled factor.
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=row.id,
+        tenant_id=None,
+        tenant_slug=DEFAULT_TENANT_SLUG,
+        auth_method="email_verification",
+    )
     user = SessionUser(id=row.id, email=row.email, username=row.username)
     session_token = await create_session_token(
         async_dal, dal, cfg, user=user, auth_method="email_verification"
@@ -653,6 +662,28 @@ class RequiresVerificationError(Exception):
     """Sentinel for login()'s 403 requiresVerification branch (distinct JSON shape)."""
 
 
+async def _resolve_login_tenant(async_dal: Any, dal: Any, tenant_slug: str) -> int | None:
+    """`tenants.id` for a login's requested tenant; unknown or inactive slugs are rejected.
+
+    Runs before the password and any MFA decision, so a request can never steer login (or a
+    tenant-scoped flag lookup) with a tenant that does not exist. The reserved catch-all
+    ``default`` tenant is the one exception when it has no row at all (fresh installs, tests):
+    the session is then minted untenanted-to-default as before; an INACTIVE ``default`` row is
+    still refused.
+    """
+    rows = await async_dal.select_async(dal(dal.tenants.slug == tenant_slug))
+    row = rows.first() if rows else None
+    if row is None:
+        if tenant_slug == DEFAULT_TENANT_SLUG:
+            return None
+        logger.info("login refused: unknown tenant slug")
+        raise unauthorized("Invalid credentials")
+    if not row.is_active:
+        logger.info("login refused: inactive tenant tenant_id=%s", row.id)
+        raise unauthorized("Invalid credentials")
+    return int(row.id)
+
+
 async def login(
     async_dal: Any,
     dal: Any,
@@ -666,10 +697,7 @@ async def login(
     if not email or not password:
         raise bad_request("Email and password required")
 
-    tenant_rows = await async_dal.select_async(
-        dal((dal.tenants.slug == tenant_slug) & (dal.tenants.is_active == True))  # noqa: E712
-    )
-    tenant_id = tenant_rows.first().id if tenant_rows else None
+    tenant_id = await _resolve_login_tenant(async_dal, dal, tenant_slug)
 
     rows = await async_dal.select_async(dal(dal.hub_users.email == email.lower()))
     if not rows:
@@ -684,6 +712,102 @@ async def login(
     if not row.password_hash or not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
 
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=row.id,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
+    )
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=row,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
+        amr=["pwd"],
+    )
+
+
+class MfaRequiredError(Exception):
+    """Primary auth succeeded but a second factor is enrolled: answer with the MFA-pending state."""
+
+    def __init__(self, challenge: mfa_service.LoginChallenge) -> None:
+        """Carry the opaque challenge (token + methods) to the route."""
+        super().__init__("mfa required")
+        self.challenge = challenge
+
+
+#: Webui route that finishes a federated (OAuth / SSO) sign-in held at the MFA step.
+MFA_STEP_PATH: Final = "/auth/mfa"
+
+
+def mfa_pending_redirect_url(frontend_origin: str, challenge: mfa_service.LoginChallenge) -> str:
+    """Webui MFA-step URL for a federated sign-in, the pending token in the URL FRAGMENT.
+
+    A fragment is never sent to a server, so the token stays out of access/proxy logs and the
+    `Referer` header (a query string would leak into both). `methods` is non-secret UI state
+    (which factor tabs to offer); `expiresIn` lets the page show the expiry without a round trip.
+    """
+    fragment = urlencode(
+        {
+            "pending": challenge.token,
+            "methods": ",".join(challenge.methods),
+            "expiresIn": str(challenge.expires_in),
+        }
+    )
+    return f"{frontend_origin.rstrip('/')}{MFA_STEP_PATH}#{fragment}"
+
+
+async def _require_mfa_if_enrolled(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    tenant_id: int | None,
+    tenant_slug: str,
+    auth_method: str,
+) -> None:
+    """Raise :class:`MfaRequiredError` (no session minted) when the user has an active factor.
+
+    The MFA decision itself takes no tenant input (kill switches are global); `tenant_slug` /
+    `tenant_id` are only carried on the challenge so the post-MFA session gets the tenant the
+    first factor already validated (:func:`_resolve_login_tenant`).
+    """
+    methods = await mfa_service.login_methods(async_dal, dal, user_id=user_id)
+    if not methods:
+        return
+    challenge = await mfa_service.start_login_challenge(
+        async_dal,
+        dal,
+        user_id=user_id,
+        methods=methods,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method=auth_method,
+    )
+    raise MfaRequiredError(challenge)
+
+
+async def _finish_login(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    *,
+    row: Any,
+    tenant_id: int | None,
+    tenant_slug: str | None,
+    auth_method: str,
+    amr: list[str] | None,
+) -> LoginResult:
+    """Mint the session for a fully authenticated `hub_users` row (shared by every password path).
+
+    Runs only once every required factor passed: directly after the password when no MFA is
+    enrolled, or from :func:`complete_mfa_login` after the second factor.
+    """
     await async_dal.update_async(dal.hub_users.id == row.id, last_login=datetime.now(UTC))
 
     linked_rows = await async_dal.select_async(
@@ -709,8 +833,8 @@ async def login(
         user=user,
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
-        auth_method="password",
-        amr=["pwd"],
+        auth_method=auth_method,
+        amr=amr,
     )
     return LoginResult(
         token=token,
@@ -722,6 +846,63 @@ async def login(
         is_vendor=user.is_vendor,
         is_analytics_consumer=user.is_analytics_consumer,
         linked_platforms=linked_platforms,
+    )
+
+
+async def complete_mfa_login(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    envelope_runtime: Any | None,
+    *,
+    token: str,
+    method: str,
+    code: str,
+) -> LoginResult:
+    """Second step of an MFA login: verify the factor, then mint the real session.
+
+    The session carries the same tenant the password step resolved, and `amr` records both
+    factors (`pwd` + `otp`/`mfa`) with `auth_time` = now.
+    """
+    done = await mfa_service.complete_login(
+        async_dal, dal, envelope_runtime, token=token, method=method, code=code
+    )
+    rows = await async_dal.select_async(dal(dal.hub_users.id == done.user_id))
+    if not rows or not rows.first().is_active:
+        raise unauthorized("Account is inactive")
+    if done.auth_method in (TEMP_PASSWORD, TEMP_PASSWORD_LINK):
+        # Same pending-link session the temp password alone would have opened (no `sub`, no
+        # refresh token) -- MFA never upgrades a temp password into the user's full session.
+        ident = _temp_identifier(rows.first())
+        temp_token = await create_session_token(
+            async_dal,
+            dal,
+            cfg,
+            user=None,
+            username_override=ident,
+            requires_oauth_link=done.auth_method == TEMP_PASSWORD_LINK,
+            auth_method="temp_password_mfa",
+            amr=done.amr,
+        )
+        return LoginResult(
+            token=temp_token,
+            user_id=0,
+            email=None,
+            username=ident,
+            avatar_url=None,
+            is_super_admin=False,
+            is_vendor=False,
+            is_analytics_consumer=False,
+        )
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=rows.first(),
+        tenant_id=done.tenant_id,
+        tenant_slug=done.tenant_slug,
+        auth_method=f"{done.auth_method}_mfa",
+        amr=done.amr,
     )
 
 
@@ -745,27 +926,23 @@ async def admin_login(
     if not row.password_hash or not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
 
-    await async_dal.update_async(dal.hub_users.id == row.id, last_login=datetime.now(UTC))
-
-    user = SessionUser(
-        id=row.id,
-        email=row.email,
-        username=row.username,
-        avatar_url=row.avatar_url,
-        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
-        is_vendor=bool(row.is_vendor),
-        is_analytics_consumer=bool(row.is_analytics_consumer),
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=row.id,
+        tenant_id=None,
+        tenant_slug=DEFAULT_TENANT_SLUG,
+        auth_method="admin_password",
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="admin_password")
-    return LoginResult(
-        token=token,
-        user_id=user.id,
-        email=user.email,
-        username=user.username,
-        avatar_url=user.avatar_url,
-        is_super_admin=user.is_super_admin,
-        is_vendor=user.is_vendor,
-        is_analytics_consumer=user.is_analytics_consumer,
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=row,
+        tenant_id=None,
+        tenant_slug=None,
+        auth_method="admin_password",
+        amr=None,
     )
 
 
@@ -802,6 +979,18 @@ async def temp_password_login(
         dal.hub_temp_passwords.id == row.id, is_used=True, used_at=datetime.now(UTC)
     )
 
+    account = await _temp_password_account(async_dal, dal, identifier)
+    if account is not None:
+        # A temp password must not bypass the account's own second factor.
+        await _require_mfa_if_enrolled(
+            async_dal,
+            dal,
+            user_id=int(account.id),
+            tenant_id=None,
+            tenant_slug=DEFAULT_TENANT_SLUG,
+            auth_method=TEMP_PASSWORD_LINK if row.force_oauth_link else TEMP_PASSWORD,
+        )
+
     token = await create_session_token(
         async_dal,
         dal,
@@ -812,6 +1001,25 @@ async def temp_password_login(
         auth_method="temp_password",
     )
     return TempLoginResult(token=token, requires_oauth_link=bool(row.force_oauth_link))
+
+
+#: `hub_mfa_challenges.auth_method` for an MFA-gated temp-password login (pending-link variant).
+TEMP_PASSWORD: Final = "temp_password"  # noqa: S105 -- an auth-method identifier
+TEMP_PASSWORD_LINK: Final = "temp_password_link"  # noqa: S105 -- an auth-method identifier
+
+
+async def _temp_password_account(async_dal: Any, dal: Any, identifier: str) -> Any | None:
+    """The `hub_users` row a temp-password identifier names (email or username), if any."""
+    t = dal.hub_users
+    rows = await async_dal.select_async(
+        dal((t.email == identifier.lower()) | (t.username == identifier))
+    )
+    return rows.first() if rows else None
+
+
+def _temp_identifier(user_row: Any) -> str:
+    """Display identifier re-minted into a post-MFA temp session (email, else username)."""
+    return str(user_row.email or user_row.username or "")
 
 
 @dataclass(slots=True, frozen=True)

@@ -30,7 +30,7 @@ from flask_core.api_utils import error_response
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
 from flask_core.authz import parse_scope_claim
 from pydantic import Field as PydanticField
-from quart import Blueprint, after_this_request, current_app, redirect, request
+from quart import Blueprint, Response, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
@@ -127,6 +127,37 @@ class LoginResponse:
     success: bool
     token: str
     user: LoginUserDTO
+
+
+@dataclass(slots=True, frozen=True)
+class MfaRequiredResponse:
+    """202 body after a correct password when a second factor is enrolled (no session yet).
+
+    `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not a JWT, carries no
+    scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods` lists the usable
+    factors, preferred (TOTP) first; `recovery` is always last.
+    """
+
+    success: bool
+    mfaRequired: bool
+    mfaToken: str
+    methods: list[str]
+    expiresIn: int
+
+
+def _mfa_required(exc: auth_service.MfaRequiredError) -> tuple[MfaRequiredResponse, int]:
+    """Render the MFA-pending state (no Set-Cookie: no session exists yet)."""
+    challenge = exc.challenge
+    return (
+        MfaRequiredResponse(
+            success=True,
+            mfaRequired=True,
+            mfaToken=challenge.token,
+            methods=challenge.methods,
+            expiresIn=challenge.expires_in,
+        ),
+        202,
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -490,11 +521,15 @@ async def register(data: RegisterRequest) -> tuple[Any, int]:
 # route also inserts nothing itself, but auth_service.verify_email()'s own
 # update_async + hub_sessions insert_async chain hits the same pattern).
 async def verify_email() -> tuple[Any, int]:
-    """Verify email."""
+    """Verify email; answers 202 + MFA-pending state (no session) when a factor is enrolled."""
     async_dal, dal = _dal()
     token = request.args.get("token", "")
     try:
         result = await auth_service.verify_email(async_dal, dal, _cfg(), token=token)
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("verify-email: address verified, second factor required for a session")
+        body, status = _mfa_required(mfa)
+        return jsonify_dto(body, status)
     except ApiError as exc:
         return _err(exc)
     response, status = jsonify_dto(
@@ -533,11 +568,17 @@ async def resend_verification(
 @auth_bp.route("/login", methods=["POST"])
 @validate_request(LoginRequest)
 @validate_response(LoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 @validate_response(VerificationRequiredResponse, 403)
 async def login(
     data: LoginRequest,
-) -> LoginResponse | tuple[VerificationRequiredResponse, int] | tuple[dict[str, object], int]:
-    """Login."""
+) -> (
+    LoginResponse
+    | tuple[MfaRequiredResponse, int]
+    | tuple[VerificationRequiredResponse, int]
+    | tuple[dict[str, object], int]
+):
+    """Password login; answers 202 + MFA-pending state when a second factor is enrolled."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.login(
@@ -548,6 +589,9 @@ async def login(
             password=data.password,
             tenant_slug=data.tenantSlug or DEFAULT_TENANT_SLUG,
         )
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("login: password accepted, second factor required")
+        return _mfa_required(mfa)
     except auth_service.RequiresVerificationError:
         logger.info("login blocked: email verification required")
         return (
@@ -567,16 +611,19 @@ async def login(
 
 @auth_bp.route("/admin", methods=["POST"])
 @validate_request(AdminLoginRequest)
-@validate_response(AdminLoginResponse)
+@validate_response(AdminLoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 async def admin_login(
     data: AdminLoginRequest,
-) -> AdminLoginResponse | tuple[dict[str, object], int]:
-    """Admin login."""
+) -> AdminLoginResponse | tuple[MfaRequiredResponse, int] | tuple[dict[str, object], int]:
+    """Legacy admin login; same MFA step as `/login` when a second factor is enrolled."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.admin_login(
             async_dal, dal, _cfg(), username=data.username, password=data.password
         )
+    except auth_service.MfaRequiredError as mfa:
+        return _mfa_required(mfa)
     except ApiError as exc:
         return _err(exc)
     issue_session_cookie(result.token)
@@ -596,16 +643,20 @@ async def admin_login(
 
 @auth_bp.route("/temp-password", methods=["POST"])
 @validate_request(TempPasswordLoginRequest)
-@validate_response(TempPasswordLoginResponse)
+@validate_response(TempPasswordLoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 async def temp_password_login(
     data: TempPasswordLoginRequest,
-) -> TempPasswordLoginResponse | tuple[dict[str, object], int]:
-    """Temp password login."""
+) -> TempPasswordLoginResponse | tuple[MfaRequiredResponse, int] | tuple[dict[str, object], int]:
+    """Temp password login; 202 + MFA-pending state when the named account has a factor."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.temp_password_login(
             async_dal, dal, _cfg(), identifier=data.identifier, password=data.password
         )
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("temp-password: accepted, second factor required")
+        return _mfa_required(mfa)
     except ApiError as exc:
         return _err(exc)
     issue_session_cookie(result.token)
@@ -932,6 +983,10 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
     the URL; the frontend immediately redeems it for the real JWT via
     `POST /exchange` (`exchange_oauth_code` below), delivered over the
     response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.
+
+    Account MFA: when the user has an active local factor, no session and no exchange code are
+    minted; the redirect goes to the webui MFA step (`/auth/mfa#pending=...`) with the opaque
+    single-use pending token in the URL fragment, completed via `/api/v1/auth/mfa/login/verify`.
     """
     async_dal, dal = _dal()
     code = request.args.get("code")
@@ -963,6 +1018,10 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             else "oauth_failed"
         )
         return redirect(f"{frontend_origin}/login?error={error}")
+    except auth_service.MfaRequiredError as mfa:
+        # Enrolled account: no session, no exchange code -- hand off to the webui MFA step.
+        logger.info("auth.oauth_callback.mfa_required platform=%s", platform)
+        return _mfa_pending_redirect(frontend_origin, mfa, LOGIN_BINDING_COOKIE)
 
     exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(
         async_dal,
@@ -982,6 +1041,24 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         exchange_nonce,
         oauth_service.EXCHANGE_CODE_TTL_SECONDS,
     )
+    return page
+
+
+def _mfa_pending_redirect(
+    frontend_origin: str, mfa: auth_service.MfaRequiredError, binding_cookie: str
+) -> Response:
+    """302 to the webui MFA step for a federated sign-in held at the second factor.
+
+    The pending token rides in the URL fragment only (`auth_service.mfa_pending_redirect_url`);
+    `no-store` + `no-referrer` keep the redirect out of caches and outbound `Referer` headers.
+    The SSO callbacks do the same with their path-scoped binder cookie (`blueprints/v1/sso.py`).
+    """
+    page = cast(
+        Response, redirect(auth_service.mfa_pending_redirect_url(frontend_origin, mfa.challenge))
+    )
+    binding.clear_binding_cookie(page, binding_cookie)
+    page.headers["Cache-Control"] = "no-store"
+    page.headers["Referrer-Policy"] = "no-referrer"
     return page
 
 

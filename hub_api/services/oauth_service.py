@@ -28,10 +28,15 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from flask_core.auth import DEFAULT_TENANT_SLUG
 
 from config import HubAPIConfig
 from services import ban_suppression, identity_audit, login_providers, session_service
-from services.auth_service import SessionUser, create_session_token
+from services.auth_service import (
+    SessionUser,
+    _require_mfa_if_enrolled,
+    create_session_token,
+)
 from services.errors import ApiError, bad_request, conflict, not_found
 from services.global_identity import is_global_admin
 from services.install_state_binding import (
@@ -443,6 +448,10 @@ async def oauth_callback(
 ) -> str:
     """Complete an OAuth login. Returns a minted session JWT.
 
+    An account with an active local MFA factor gets NO session here: the shared password-path
+    gate raises `auth_service.MfaRequiredError` (opaque single-use pending token, auth method
+    `oauth_<platform>`), and the route redirects to the webui MFA step instead.
+
     A browser that cannot present the nonce the state was bound to is refused (typed `ApiError`
     code `state_binding_mismatch`) BEFORE the state is consumed; absent/expired/replayed state
     raises code `invalid_or_expired_state`.
@@ -481,10 +490,16 @@ async def oauth_callback(
     user = await _find_or_create_user_from_oauth(
         async_dal, dal, platform=platform, user_data=user_data
     )
-
-    return await create_session_token(
-        async_dal, dal, cfg, user=user, auth_method=f"oauth_{platform}"
+    auth_method = f"oauth_{platform}"
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=int(user.id),
+        tenant_id=None,
+        tenant_slug=DEFAULT_TENANT_SLUG,
+        auth_method=auth_method,
     )
+    return await create_session_token(async_dal, dal, cfg, user=user, auth_method=auth_method)
 
 
 async def create_oauth_exchange_code(

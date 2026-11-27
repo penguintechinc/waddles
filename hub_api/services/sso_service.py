@@ -42,8 +42,16 @@ import httpx
 from flask_core.feature_flags import feature_enabled
 
 from config import HubAPIConfig
-from services import sso_crypto, sso_saml, sso_state
-from services.auth_service import SessionUser, add_user_to_global_community, create_session_token
+from services import mfa_service, sso_crypto, sso_saml, sso_state
+from services.audit_events import AuditAction, AuditCategory, AuditOutcome
+from services.audit_http import record_mfa_event
+from services.auth_service import (
+    MfaRequiredError,
+    SessionUser,
+    _require_mfa_if_enrolled,
+    add_user_to_global_community,
+    create_session_token,
+)
 from services.errors import ApiError, bad_request, not_found, payment_required, unprocessable
 from services.global_identity import is_global_admin
 from services.sso_http import SsoHttp, check_outbound_url
@@ -181,11 +189,31 @@ class BeginResult:
 
 @dataclass(slots=True, frozen=True)
 class TenantRef:
-    """The three tenant facts the SSO flows need."""
+    """The tenant facts the SSO flows need."""
 
     id: int
     slug: str
     is_active: bool
+    #: `tenants.config.ssoTrustIdpMfa` -- accept an OIDC IdP's MFA `amr` as the second factor.
+    trust_idp_mfa: bool = False
+
+
+#: `tenants.config` key of the "trust IdP MFA" opt-in (default off: always challenge locally).
+TRUST_IDP_MFA_KEY: Final = "ssoTrustIdpMfa"
+
+#: RFC 8176 `amr` values that assert a multi-factor / possession-factor sign-in at the IdP.
+IDP_MFA_AMR_VALUES: Final = frozenset({"mfa", "otp", "hwk", "swk"})
+
+
+def _tenant_ref(row: Any) -> TenantRef:
+    """Build a :class:`TenantRef` from a `tenants` row (`config` may be NULL or non-dict)."""
+    config = row.config if isinstance(row.config, dict) else {}
+    return TenantRef(
+        id=int(row.id),
+        slug=str(row.slug),
+        is_active=bool(row.is_active),
+        trust_idp_mfa=config.get(TRUST_IDP_MFA_KEY) is True,
+    )
 
 
 def sp_urls(cfg: HubAPIConfig, public_id: str) -> SpUrls:
@@ -309,16 +337,14 @@ async def _tenant_by_id(ctx: SsoContext, tenant_id: int) -> TenantRef | None:
     rows = await ctx.async_dal.select_async(ctx.dal(ctx.dal.tenants.id == tenant_id))
     if not rows:
         return None
-    row = rows.first()
-    return TenantRef(id=int(row.id), slug=str(row.slug), is_active=bool(row.is_active))
+    return _tenant_ref(rows.first())
 
 
 async def _tenant_by_slug(ctx: SsoContext, slug: str) -> TenantRef | None:
     rows = await ctx.async_dal.select_async(ctx.dal(ctx.dal.tenants.slug == slug))
     if not rows:
         return None
-    row = rows.first()
-    return TenantRef(id=int(row.id), slug=str(row.slug), is_active=bool(row.is_active))
+    return _tenant_ref(rows.first())
 
 
 async def load_connection(ctx: SsoContext, public_id: str) -> SsoConnection | None:
@@ -1068,6 +1094,9 @@ async def complete_oidc(
         if conn.protocol == PROTOCOL_GOOGLE:
             _enforce_google_policy(conn, identity)
         outcome = await _finish_login(ctx, conn, tenant, identity)
+    except MfaRequiredError:
+        _record(protocol, started, outcome="mfa_required")
+        raise
     except SsoError as exc:
         _record(protocol, started, outcome="failure", reason=exc.code)
         log_sso_error(logger, "sso.login.failed", exc, connection=public_id)
@@ -1115,6 +1144,9 @@ async def complete_saml(
         if not fresh:
             raise SsoProtocolError("saml_replay", "assertion has already been used")
         outcome = await _finish_login(ctx, conn, tenant, validated.identity)
+    except MfaRequiredError:
+        _record(PROTOCOL_SAML, started, outcome="mfa_required")
+        raise
     except SsoError as exc:
         _record(PROTOCOL_SAML, started, outcome="failure", reason=exc.code)
         log_sso_error(logger, "sso.login.failed", exc, connection=public_id)
@@ -1164,10 +1196,31 @@ def _enforce_domain_policy(conn: SsoConnection, identity: ExternalIdentity) -> N
 async def _finish_login(
     ctx: SsoContext, conn: SsoConnection, tenant: TenantRef, identity: ExternalIdentity
 ) -> LoginOutcome:
-    """Resolve or provision the hub user for `identity`, then mint the tenant session."""
+    """Resolve or provision the hub user for `identity`, then mint the tenant session.
+
+    A user with an active local MFA factor gets NO session: the shared password-path gate raises
+    `MfaRequiredError` (pending token, auth method `sso_<protocol>`, this tenant), unless the
+    tenant opted in to trusting an OIDC IdP's own MFA `amr` (:func:`_idp_mfa_trusted`).
+    """
     with sso_span("sso.login.provision", **{"sso.protocol": conn.protocol}):
         _enforce_domain_policy(conn, identity)
         user_row, created = await _resolve_user(ctx, conn, identity)
+
+    user_id = int(user_row.id)
+    auth_method = f"sso_{conn.protocol}"
+    amr: list[str] | None = None
+    if await _idp_mfa_trusted(ctx, conn, tenant, identity, user_id=user_id):
+        amr = sorted((set(identity.amr) & IDP_MFA_AMR_VALUES) | {"mfa"})
+        auth_method = f"sso_{conn.protocol}_idp_mfa"
+    else:
+        await _require_mfa_if_enrolled(
+            ctx.async_dal,
+            ctx.dal,
+            user_id=user_id,
+            tenant_id=tenant.id,
+            tenant_slug=tenant.slug,
+            auth_method=auth_method,
+        )
 
     user = SessionUser(
         id=int(user_row.id),
@@ -1186,6 +1239,8 @@ async def _finish_login(
         user=user,
         tenant_id=tenant.id,
         tenant_slug=tenant.slug,
+        auth_method=auth_method,
+        amr=amr,
     )
     user_uuid = str(user_row.uuid)
     logger.info(
@@ -1202,6 +1257,45 @@ async def _finish_login(
         protocol=conn.protocol,
         created_user=created,
     )
+
+
+async def _idp_mfa_trusted(
+    ctx: SsoContext,
+    conn: SsoConnection,
+    tenant: TenantRef,
+    identity: ExternalIdentity,
+    *,
+    user_id: int,
+) -> bool:
+    """True when an OIDC IdP's asserted MFA may stand in for the user's local factor.
+
+    Needs ALL of: the tenant opt-in (`tenants.config.ssoTrustIdpMfa`, default off), an OIDC /
+    Google connection (SAML carries no `amr`), an `amr` naming an MFA value, and a user who has a
+    local factor at all (otherwise there is nothing to stand in for). The skip is audited like a
+    verified factor (method `idp_amr`) so it is never silent.
+    """
+    if not tenant.trust_idp_mfa or conn.protocol == PROTOCOL_SAML:
+        return False
+    if not set(identity.amr) & IDP_MFA_AMR_VALUES:
+        return False
+    if not await mfa_service.login_methods(ctx.async_dal, ctx.dal, user_id=user_id):
+        return False
+    await record_mfa_event(
+        user_id=user_id,
+        category=AuditCategory.AUTHN,
+        action=AuditAction.MFA_VERIFIED,
+        outcome=AuditOutcome.SUCCESS,
+        method="idp_amr",
+        tenant_slug=tenant.slug,
+        auth_method=f"sso_{conn.protocol}",
+    )
+    logger.info(
+        "sso.login.idp_mfa_trusted connection=%s protocol=%s user_id=%d",
+        conn.public_id,
+        conn.protocol,
+        user_id,
+    )
+    return True
 
 
 async def _find_identity_link(ctx: SsoContext, conn_id: int, subject: str) -> Any | None:

@@ -53,6 +53,7 @@ from werkzeug.wrappers import Response as WerkzeugResponse
 from config import HubAPIConfig
 from services import install_state_binding as binding
 from services import oauth_service
+from services.auth_service import MfaRequiredError, mfa_pending_redirect_url
 from services.current_user import get_current_user_id
 from services.errors import ApiError, not_found
 from services.sso_saml import build_sp_metadata
@@ -492,6 +493,21 @@ async def _finish_redirect(public_id: str, outcome_token: str, protocol: str) ->
     return response
 
 
+def _mfa_step_redirect(public_id: str, mfa: MfaRequiredError) -> Response:
+    """303 to the webui MFA step; the pending token rides only in the URL fragment.
+
+    Same pending-token + `/auth/mfa/login/verify` flow as a password login; `no-store` and
+    `no-referrer` keep the redirect out of caches and outbound `Referer` headers.
+    """
+    url = mfa_pending_redirect_url(_cfg().frontend_origin, mfa.challenge)
+    response = cast(Response, redirect(url, code=303))
+    _clear_binder_cookie(response, public_id)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    logger.info("sso.login.mfa_required connection=%s", public_id)
+    return response
+
+
 async def _complete_and_redirect(
     public_id: str, start_completion: Callable[[], Awaitable[LoginOutcome]]
 ) -> Response:
@@ -506,6 +522,9 @@ async def _complete_and_redirect(
     try:
         outcome = await start_completion()
         return await _finish_redirect(public_id, outcome.token, outcome.protocol)
+    except MfaRequiredError as mfa:
+        # Enrolled account: no session, no exchange code -- hand off to the webui MFA step.
+        return _mfa_step_redirect(public_id, mfa)
     except SsoError as exc:
         # Already logged (type, code, frames) and counted by services.sso_service.complete_*.
         reason = exc.reason  # a fixed REASON_* constant, never attacker-controlled text
@@ -520,7 +539,11 @@ async def _complete_and_redirect(
 
 @sso_public_bp.route("/<public_id>/callback", methods=["GET"])
 async def sso_oidc_callback(public_id: str) -> Response:
-    """`GET /<id>/callback` -- OIDC / Google redirect URI."""
+    """`GET /<id>/callback` -- OIDC / Google redirect URI.
+
+    A user with an active local MFA factor is redirected to the webui MFA step with a pending
+    token in the URL fragment instead of a session (unless the tenant trusts the IdP's MFA `amr`).
+    """
     if request.args.get("error"):
         logger.info("sso.callback.idp_denied connection=%s", public_id)
         return _login_error_redirect(REASON_DENIED)
@@ -539,7 +562,11 @@ async def sso_oidc_callback(public_id: str) -> Response:
 
 @sso_public_bp.route("/<public_id>/acs", methods=["POST"])
 async def sso_saml_acs(public_id: str) -> Response:
-    """`POST /<id>/acs` -- SAML Assertion Consumer Service (HTTP-POST binding)."""
+    """`POST /<id>/acs` -- SAML Assertion Consumer Service (HTTP-POST binding).
+
+    A user with an active local MFA factor is redirected to the webui MFA step with a pending
+    token in the URL fragment instead of a session.
+    """
     form = await request.form
     saml_response = form.get("SAMLResponse", "")
     relay_state = form.get("RelayState", "")
