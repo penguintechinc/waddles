@@ -86,6 +86,10 @@ jobs:
             core/bundle_executor/**
             core/svc_process/**
             core/svc_action/**
+            core/**/Cargo.toml
+            core/**/Cargo.lock
+            sdk/**/Cargo.toml
+            sdk/**/Cargo.lock
 
   bundle-hygiene:
     needs: changes
@@ -186,6 +190,12 @@ jobs:
           set -euo pipefail
           git fetch --no-tags --deepen=500 origin "$BASE_REF" HEAD
           python3 scripts/ci/check-bundle-version-bump.py "origin/$BASE_REF"
+
+      # Cargo.toml [package].version (and every local path dep) must match its Cargo.lock entry, or
+      # `cargo ... --locked` refuses to build at deploy time (alpha "Build seeder" after 9e2f8eba3).
+      # Covers every bundles/rust, core and sdk lockfile; prints the denominator, 0 examined fails.
+      - name: Bundle and core Cargo.lock files agree with their Cargo.toml versions
+        run: bash scripts/ci/check-bundle-lockfiles.sh
 
       - name: No two bundles answer the same command trigger
         run: python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -v -p no:cacheprovider
