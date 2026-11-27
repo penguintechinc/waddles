@@ -153,6 +153,10 @@ PATs use optional scope ceilings (restrict what the user can do via API). CATs r
 
 Auth middleware detects token type by prefix: `wdl_u_` → load user from `user_access_tokens`, `wdl_c_` → load community from `community_access_tokens`.
 
+**CATs fail closed (security hotfix, 2026-11-27):** a CAT is never a user — `get_current_user_id` always 401s for one. `tenant_middleware` refuses CATs (401) on every route except those explicitly opted in with `flask_core.cat_auth.allow_cat(scopes=[...], community_from=...)` placed below it. An opted-in route enforces the declared scopes (or the explicit `CAT_SELF_ONLY` for token-introspection routes) and requires the route's target community — extracted by its declared `from_view_arg(name)` / `from_json_body(field)` / `cat_bound_community` (default: reject) — to equal the CAT's bound community. Handlers read `request.cat_principal` (community id, token id, scopes; no user id). Opted-in routes are pinned by `hub_api/tests/test_cat_fail_closed.py::CAT_ROUTE_ALLOWLIST`. Today: `GET /api/v1/communities/my` only.
+
+**Desktop OAuth (`redirect_uri=waddles://oauth/callback`) requires PKCE S256:** the client sends `code_challenge` (+ `code_challenge_method=S256`) on `GET /api/v1/auth/oauth/<platform>` and `code_verifier` on `POST /api/v1/auth/exchange`. Exchange codes are single-use with a 60 s TTL.
+
 **Admin route:** `/admin/:communityId/tokens` | **User route:** `/account/tokens`
 
 ## Signup Controls & Authentication

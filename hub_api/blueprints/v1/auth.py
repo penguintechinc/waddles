@@ -363,6 +363,8 @@ class ExchangeCodeRequest:
     """Request DTO for the OAuth exchange-code handoff endpoint."""
 
     code: str
+    #: PKCE (RFC 7636) verifier -- REQUIRED for desktop (`desktop_`) codes, ignored otherwise.
+    code_verifier: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -881,7 +883,12 @@ async def list_auth_providers() -> AuthProvidersResponse:
 @auth_bp.route("/oauth/<platform>", methods=["GET"])
 @validate_response(OAuthStartResponse)
 async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, object], int]:
-    """Oauth start."""
+    """Start an OAuth login. `redirect_uri=waddles://oauth/callback` selects the desktop flow.
+
+    The desktop flow has no browser-binding cookie, so it REQUIRES PKCE: the client sends
+    `code_challenge` (base64url SHA-256 of its verifier) + `code_challenge_method=S256` and later
+    proves possession with `code_verifier` on `POST /exchange`.
+    """
     async_dal, dal = _dal()
     mode = request.args.get("mode", "login")
     redirect_uri = request.args.get("redirect_uri")
@@ -893,6 +900,14 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
                 error_response("Invalid redirect_uri", 400, "INVALID_REDIRECT_URI"),
             )
         is_desktop = True
+        try:
+            oauth_service.validate_pkce_challenge(
+                request.args.get("code_challenge"),
+                request.args.get("code_challenge_method"),
+            )
+        except ApiError as exc:
+            logger.warning("auth.oauth_start.refused code=%s", exc.code)
+            return _err(exc)
 
     try:
         nonce = binding.new_nonce()
@@ -904,6 +919,7 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
             callback_base_url=_callback_base_url(),
             binding_nonce=nonce,
             desktop=is_desktop,
+            code_challenge=request.args.get("code_challenge") if is_desktop else None,
         )
     except ApiError as exc:
         logger.warning("auth.oauth_start.refused type=%s code=%s", type(exc).__name__, exc.code)
@@ -944,7 +960,14 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
     if not code or not state:
         return redirect(f"{frontend_origin}/login?error=oauth_failed")
 
+    is_desktop = state.startswith(oauth_service.DESKTOP_STATE_PREFIX)
+    code_challenge: str | None = None
     try:
+        if is_desktop:
+            # Read the PKCE challenge before `oauth_callback` consumes the state row.
+            code_challenge = await oauth_service.desktop_code_challenge(
+                async_dal, dal, state=state, platform=platform
+            )
         token = await oauth_service.oauth_callback(
             async_dal,
             dal,
@@ -969,9 +992,10 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         dal,
         token=token,
         platform=platform,
-        desktop=state.startswith(oauth_service.DESKTOP_STATE_PREFIX),
+        desktop=is_desktop,
+        code_challenge=code_challenge,
     )
-    if state.startswith(oauth_service.DESKTOP_STATE_PREFIX):
+    if is_desktop:
         return redirect(f"waddles://oauth/callback?code={exchange_code}&state={state}")
 
     page = redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
@@ -1005,6 +1029,7 @@ async def exchange_oauth_code(
             dal,
             code=data.code,
             binding_nonce=request.cookies.get(oauth_service.EXCHANGE_BINDING_COOKIE),
+            code_verifier=data.code_verifier,
         )
     except ApiError as exc:
         logger.warning("auth.exchange.refused type=%s code=%s", type(exc).__name__, exc.code)

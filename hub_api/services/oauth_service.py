@@ -19,6 +19,9 @@ Core dependency introduced.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -151,6 +154,53 @@ async def exchange_code(
 DESKTOP_STATE_PREFIX = "desktop_"
 DESKTOP_MODE_LOGIN = "desktop_login"
 
+#: RFC 7636 S256 challenge: base64url(SHA-256(verifier)) without padding = exactly 43 chars.
+_PKCE_CHALLENGE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+#: RFC 7636 §4.1 verifier: 43-128 chars from the unreserved set.
+_PKCE_VERIFIER_RE = re.compile(r"[A-Za-z0-9._~-]{43,128}")
+ERR_PKCE_REQUIRED = "pkce_required"
+ERR_PKCE_MISMATCH = "pkce_verifier_mismatch"
+
+
+def validate_pkce_challenge(code_challenge: str | None, method: str | None) -> str:
+    """Return a well-formed S256 `code_challenge` or raise 400 (`pkce_required`).
+
+    Only S256 is supported -- `plain` (and any other method) is refused, so an omitted method is
+    treated as S256 rather than RFC 7636's `plain` default.
+    """
+    if method is not None and method != "S256":
+        raise ApiError("code_challenge_method must be S256", 400, ERR_PKCE_REQUIRED)
+    if not code_challenge or not _PKCE_CHALLENGE_RE.fullmatch(code_challenge):
+        raise ApiError("A valid S256 code_challenge is required", 400, ERR_PKCE_REQUIRED)
+    return code_challenge
+
+
+def pkce_s256(code_verifier: str) -> str:
+    """RFC 7636 S256 transform: base64url(SHA-256(ascii(verifier))) without padding."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+async def desktop_code_challenge(async_dal: Any, dal: Any, *, state: str, platform: str) -> str:
+    """Return the PKCE challenge stored on a live desktop OAuth state, or raise 400.
+
+    Read BEFORE `oauth_callback` consumes the state row so the challenge can be carried onto the
+    exchange-code row. A desktop state without a challenge is refused (fail closed).
+    """
+    rows = await async_dal.select_async(
+        dal(
+            (dal.hub_oauth_states.state == state)
+            & (dal.hub_oauth_states.platform == platform)
+            & (dal.hub_oauth_states.mode == DESKTOP_MODE_LOGIN)
+            & (dal.hub_oauth_states.expires_at > datetime.now(UTC))
+        )
+    )
+    row = rows.first() if rows else None
+    challenge = getattr(row, "code_challenge", None) if row is not None else None
+    if not challenge:
+        raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
+    return str(challenge)
+
 
 async def start_oauth(
     async_dal: Any,
@@ -161,12 +211,16 @@ async def start_oauth(
     callback_base_url: str,
     binding_nonce: str,
     desktop: bool = False,
+    code_challenge: str | None = None,
 ) -> tuple[str, str]:
     """Start an OAuth login/link flow. Returns `(authorize_url, state)`.
 
     The state embeds the SHA-256 of `binding_nonce` (the initiating browser's cookie),
     unless `desktop=True` (in which case the desktop client holds `state` directly
     across the system-browser hop and `mode="desktop_login"` is recorded server-side).
+    A desktop flow has no browser binding, so it REQUIRES a PKCE S256 `code_challenge`
+    (stored on the state row and carried onto the exchange code; see
+    `redeem_oauth_exchange_code`).
 
     `hub_oauth_states` has no `metadata` column (see `schema.py`'s module
     docstring gap 2) -- the tenant-scoped `metadata` insert Node performs
@@ -178,9 +232,11 @@ async def start_oauth(
     _require_valid_platform(platform)
     await login_providers.require_enabled(platform)
     if desktop:
+        code_challenge = validate_pkce_challenge(code_challenge, "S256")
         state = f"{DESKTOP_STATE_PREFIX}{secrets.token_hex(24)}"
         stored_mode = DESKTOP_MODE_LOGIN
     else:
+        code_challenge = None
         state = bound_state(secrets.token_hex(16), binding_nonce)
         stored_mode = mode or "login"
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
@@ -190,6 +246,7 @@ async def start_oauth(
         state=state,
         mode=stored_mode,
         platform=platform,
+        code_challenge=code_challenge,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         created_at=datetime.now(UTC),
     )
@@ -488,7 +545,13 @@ async def oauth_callback(
 
 
 async def create_oauth_exchange_code(
-    async_dal: Any, dal: Any, *, token: str, platform: str, desktop: bool = False
+    async_dal: Any,
+    dal: Any,
+    *,
+    token: str,
+    platform: str,
+    desktop: bool = False,
+    code_challenge: str | None = None,
 ) -> tuple[str, str]:
     """Mint a short-lived, single-use opaque code standing in for a just-issued session JWT.
 
@@ -505,6 +568,8 @@ async def create_oauth_exchange_code(
     """
     nonce = new_nonce()
     if desktop:
+        # No browser binding on the desktop hop: the PKCE challenge IS the binding.
+        code_challenge = validate_pkce_challenge(code_challenge, "S256")
         code = f"{DESKTOP_STATE_PREFIX}{secrets.token_urlsafe(32)}"
     else:
         code = bound_state(secrets.token_urlsafe(32), nonce)
@@ -514,14 +579,42 @@ async def create_oauth_exchange_code(
         token=token,
         platform=platform,
         used=False,
+        code_challenge=code_challenge if desktop else None,
         expires_at=datetime.now(UTC) + timedelta(seconds=EXCHANGE_CODE_TTL_SECONDS),
         created_at=datetime.now(UTC),
     )
     return code, nonce
 
 
+async def _verify_desktop_pkce(
+    async_dal: Any, dal: Any, *, code: str, code_verifier: str | None
+) -> None:
+    """Raise 400 unless `code_verifier` S256-matches the desktop exchange code's challenge."""
+    if not code_verifier or not _PKCE_VERIFIER_RE.fullmatch(code_verifier):
+        raise ApiError("code_verifier is required for desktop exchange", 400, ERR_PKCE_REQUIRED)
+    rows = await async_dal.select_async(
+        dal(
+            (dal.hub_oauth_exchange_codes.code == code)
+            & (dal.hub_oauth_exchange_codes.used == False)  # noqa: E712 - pydal Field comparison
+            & (dal.hub_oauth_exchange_codes.expires_at > datetime.now(UTC))
+        )
+    )
+    row = rows.first() if rows else None
+    if row is None:
+        raise ApiError("Invalid or expired exchange code", 400, ERR_STATE)
+    stored = getattr(row, "code_challenge", None)
+    if not stored or not hmac.compare_digest(str(stored), pkce_s256(code_verifier)):
+        logger.warning("auth.exchange.pkce_mismatch")
+        raise ApiError("code_verifier does not match", 400, ERR_PKCE_MISMATCH)
+
+
 async def redeem_oauth_exchange_code(
-    async_dal: Any, dal: Any, *, code: str, binding_nonce: str | None
+    async_dal: Any,
+    dal: Any,
+    *,
+    code: str,
+    binding_nonce: str | None,
+    code_verifier: str | None = None,
 ) -> str:
     """Redeem a single-use OAuth exchange code for the session JWT it stands in for.
 
@@ -532,9 +625,15 @@ async def redeem_oauth_exchange_code(
     (migration 068). A second redemption attempt against the same code
     updates zero rows and is rejected, same as an unknown or expired one. The browser binding is
     verified in constant time BEFORE the claim, so a foreign browser cannot burn the code
-    (typed `ApiError`: `state_binding_mismatch` / `invalid_or_expired_state`).
+    (typed `ApiError`: `state_binding_mismatch` / `invalid_or_expired_state`). A desktop
+    (`desktop_`) code has no browser binding; it instead requires the PKCE `code_verifier`
+    whose S256 matches the challenge the client sent on `/oauth/<platform>` -- also checked
+    BEFORE the claim (`pkce_required` / `pkce_verifier_mismatch`), so an intercepted code is
+    useless and cannot be burned by a party without the verifier.
     """
-    if not code.startswith(DESKTOP_STATE_PREFIX):
+    if code.startswith(DESKTOP_STATE_PREFIX):
+        await _verify_desktop_pkce(async_dal, dal, code=code, code_verifier=code_verifier)
+    else:
         try:
             verify_state_binding(code, binding_nonce)
         except InstallStateError as exc:

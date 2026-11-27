@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.cat_auth import CAT_SELF_ONLY, allow_cat, cat_bound_community, get_cat_principal
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
@@ -305,9 +306,14 @@ class MyCommunitiesResponse:
 
 @community_profile_bp.route("/communities/my", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
+@allow_cat(scopes=CAT_SELF_ONLY, community_from=cat_bound_community)  # type: ignore[misc]
 @validate_response(MyCommunitiesResponse)
 async def list_my_communities() -> MyCommunitiesResponse | tuple[dict[str, object], int]:
-    """`GET /api/v1/communities/my` -- communities the caller (JWT user or CAT) can act on."""
+    """`GET /api/v1/communities/my` -- communities the caller (JWT user or CAT) can act on.
+
+    A CAT (opted in as `CAT_SELF_ONLY`: token introspection, no capability scope) sees ONLY its
+    own bound community; it never resolves to the human who minted it.
+    """
     _, dal = _dal()
     ctx = get_tenant_context(request)
     if ctx is None:
@@ -317,10 +323,11 @@ async def list_my_communities() -> MyCommunitiesResponse | tuple[dict[str, objec
         )
 
     items: list[MyCommunityDTO] = []
-    if ctx.cat_community_id is not None:
+    cat = get_cat_principal(request)
+    if cat is not None:
         row = (
             dal(
-                (dal.communities.id == ctx.cat_community_id)
+                (dal.communities.id == cat.community_id)
                 & (dal.communities.tenant_id == ctx.tenant_id)
             )
             .select()
