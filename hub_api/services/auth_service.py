@@ -54,6 +54,7 @@ from services import session_service
 from services.audit_http import record_session_issued, record_session_revoked
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
+from services.member_roles import COMMUNITY_MEMBER_ROLE, set_member_role_async
 from services.session_cookie import issue_refresh_cookie
 
 logger = logging.getLogger(__name__)
@@ -471,11 +472,15 @@ async def add_user_to_global_community(async_dal: Any, dal: Any, *, user_id: int
         if not rows:
             return
         community_id = rows[0][0]
-        await async_dal.executesql_async(
-            "INSERT INTO community_members (community_id, user_id, role, is_active, joined_at) "
-            "VALUES (%s, %s, 'member', true, NOW()) "
-            "ON CONFLICT (community_id, user_id) DO NOTHING",
-            [community_id, str(user_id)],
+        # Linked to the seeded `member` role (scopes resolve through `community_role_id`); an
+        # existing membership is left as is (joining never demotes).
+        await set_member_role_async(
+            async_dal,
+            dal,
+            community_id=community_id,
+            role=COMMUNITY_MEMBER_ROLE,
+            user_id=user_id,
+            add=True,
         )
         await async_dal.executesql_async(
             "UPDATE communities SET member_count = ("

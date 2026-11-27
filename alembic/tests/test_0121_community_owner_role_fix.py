@@ -19,6 +19,8 @@ requires_docker = pytest.mark.skipif(
 _ROOT = Path(__file__).resolve().parents[2]
 _PATH = _ROOT / "alembic" / "versions" / "0121_community_owner_role_fix.py"
 _PREV = "0118_room_scopes_moderator"
+#: Upgrade only through 0121 itself: later data fixes (0145 role backfill) would relink rows.
+_REV = "0121_community_owner_role_fix"
 
 
 def _load() -> ModuleType:
@@ -84,7 +86,7 @@ def test_only_exact_owner_is_rewritten_and_role_id_repaired() -> None:
                         "VALUES (%s, 'discord', %s, %s)",
                         (cid, f"u{i}", role),
                     )
-            alembic_cli("upgrade", "head", dsn=db.dsn)
+            alembic_cli("upgrade", _REV, dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT platform_user_id, role, community_role_id "
@@ -104,7 +106,7 @@ def test_only_exact_owner_is_rewritten_and_role_id_repaired() -> None:
             assert all(r[2] is None for r in rows[1:]), rows
             # idempotent: re-running changes nothing and never raises
             alembic_cli("downgrade", _PREV, dsn=db.dsn)
-            alembic_cli("upgrade", "head", dsn=db.dsn)
+            alembic_cli("upgrade", _REV, dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM community_members WHERE role = 'owner'"

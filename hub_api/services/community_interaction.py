@@ -19,6 +19,7 @@ from .community_common import ensure_community_tables, sql_bool
 from .community_public_id import lookup_public_ids_sync
 from .community_relay import relay_message
 from .errors import ApiError
+from .member_roles import COMMUNITY_MEMBER_ROLE, set_member_role
 from .public_ids import Scope, lookup_public_ids, parse_public_id, resolve_public_id_sync
 from .scope_registry import (
     KIND_CUSTOM,
@@ -741,19 +742,16 @@ def delete_community_role(
         editor_scopes, effective_scopes(kind, (existing.base_claims or {}).get("scopes", []))
     )
 
-    member_role = (
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.name == "member")
-        )
-        .select()
-        .first()
+    # Holders fall back to the baseline role; with no `member` row they keep no role (no scopes,
+    # fail closed) rather than a dangling link to the deleted id.
+    set_member_role(
+        dal,
+        community_id=community_id,
+        role=COMMUNITY_MEMBER_ROLE,
+        members=(dal.community_members.community_id == community_id)
+        & (dal.community_members.community_role_id == role_id),
+        strict=False,
     )
-    if member_role:
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.community_role_id == role_id)
-        ).update(community_role_id=member_role.id, claims_cache=None)
     dal(dal.community_roles.id == role_id).delete()
     dal.commit()
     _log_role_change("deleted", community_id, role_id, None)
