@@ -83,7 +83,7 @@ class TestIsCommunityAdmin:
         assert svc.is_community_admin(dal, community_id, user_id) is False
 
     def test_unlinked_member_grants_nothing(self, seeded: Any) -> None:
-        """A `moderator` role NAME with no scope-bearing role row is not admin (scopes only)."""
+        """A member linked to no role row holds no scopes, so is never admin (scopes only)."""
         dal, _tenant_id, community_id = seeded
         user_id = int(dal.hub_users.insert(username="nm", email="nm@x.com"))
         dal.community_members.insert(

@@ -9,13 +9,6 @@ expose tools instead). Each column needs its own approved, never-auto-granted
     row = await platform_table.read("community_members", user, ["role"])
     await platform_table.write("community_members", user, {"role": "vip"})
 
-``role`` is a virtual column over the member's LINKED community role
-(``community_members.community_role_id`` -> ``community_roles``; the legacy ``role``
-string column no longer exists). A read returns the linked role's name; a write resolves
-the name to the community's role row (reserved system names match only the system row),
-relinks the member and clears the cached claims. An unknown name raises
-:class:`InvalidArgError`.
-
 The guest names only the table, the target ``user`` community UUID (from
 ``waddle_sdk.identity``) and the columns/values. The tenant/community scope is
 ALWAYS host-injected: a row of another community or tenant is

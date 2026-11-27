@@ -238,9 +238,9 @@ class TestCommunityAtomicity:
         owner_role = dal(dal.community_roles.name == member_roles.COMMUNITY_OWNER_ROLE).select()
         assert len(owner_role) == 1
         members = dal(dal.community_members.id > 0).select()
-        assert [(m.user_id, m.role, m.community_role_id) for m in members] == [
-            ("1", member_roles.COMMUNITY_OWNER_ROLE, owner_role[0].id)
-        ]
+        # the creator is LINKED to the system owner role row (owner_role is filtered by that name)
+        assert [(m.user_id, m.community_role_id) for m in members] == [("1", owner_role[0].id)]
+        assert member_roles.is_owner_role(owner_role[0])
 
     async def test_unseeded_owner_role_fails_loudly_and_nothing_stored(
         self, admin_db: Any, gates: Any, monkeypatch: pytest.MonkeyPatch

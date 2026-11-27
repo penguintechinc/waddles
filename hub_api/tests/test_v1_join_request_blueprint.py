@@ -552,7 +552,8 @@ class TestApproveReject:
         )
         request = auth_db.dal(auth_db.dal.community_join_requests.id == request_id).select().first()
         auth_db.dal.commit()
-        assert (member.role, member.is_active) == ("banned", False)  # restriction re-applied
+        # restriction re-applied: the ban is the membership STATE (2 = BANNED), not a role name
+        assert (member.membership_state, member.is_active) == (2, False)
         assert (request.status, request.reviewed_by) == ("rejected", admin_id)
 
     async def test_approve_ignores_a_suppression_from_another_tenant(
@@ -586,7 +587,10 @@ class TestApproveReject:
             .first()
         )
         auth_db.dal.commit()
-        assert (member.role, member.is_active) == ("member", True)
+        linked = auth_db.dal(auth_db.dal.community_roles.id == member.community_role_id).select()
+        auth_db.dal.commit()
+        assert [(r.name, bool(r.is_system)) for r in linked] == [("member", True)]
+        assert member.is_active is True
 
     async def test_approve_fails_closed_when_rows_exist_but_the_key_is_missing(
         self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch

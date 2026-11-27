@@ -129,12 +129,15 @@ async function seedViaKubectl() {
     `INSERT INTO communities (name, display_name, description, is_public, is_active, is_global, platform, member_count, tenant_id, created_at)`,
     `VALUES ('waddlebot-global', 'Waddles Global', 'Global community for all users.', true, true, true, 'global', 1, (SELECT id FROM tenants WHERE is_global = TRUE), NOW())`,
     `ON CONFLICT (name) DO UPDATE SET is_global = true, is_active = true, tenant_id = COALESCE(communities.tenant_id, (SELECT id FROM tenants WHERE is_global = TRUE));`,
-    // Add admin to global community
-    `INSERT INTO community_members (community_id, user_id, role, is_active, joined_at)`,
-    `SELECT c.id, u.id, 'admin', true, NOW()`,
+    // Add admin to global community, linked to the seeded system admin ROLE ROW (authority is
+    // community_members.community_role_id -> community_roles; there is no role string column).
+    `SELECT seed_community_system_roles(id) FROM communities WHERE name = 'waddlebot-global';`,
+    `INSERT INTO community_members (community_id, user_id, community_role_id, is_active, joined_at)`,
+    `SELECT c.id, u.id, r.id, true, NOW()`,
     `FROM hub_users u CROSS JOIN communities c`,
+    `JOIN community_roles r ON r.community_id = c.id AND r.name = 'community-admin' AND r.is_system`,
     `WHERE u.email = ${sqlLiteral(TEST_EMAIL)} AND c.name = 'waddlebot-global'`,
-    `ON CONFLICT (community_id, user_id) DO UPDATE SET role = 'admin', is_active = true;`,
+    `ON CONFLICT (community_id, user_id) DO UPDATE SET community_role_id = EXCLUDED.community_role_id, claims_cache = NULL, is_active = true;`,
   ].join(' ');
 
   try {

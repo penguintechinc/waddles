@@ -159,18 +159,21 @@ class _World:
         )
         pg.q(
             self.dal,
-            "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
-            "is_active) VALUES (%s, %s, %s, (SELECT id FROM community_roles "
+            "INSERT INTO community_members (community_id, user_id, community_role_id, "
+            "is_active) VALUES (%s, %s, (SELECT id FROM community_roles "
             "WHERE community_id = %s AND name = %s), true)",
-            [self.cid, str(hub_id), role, self.cid, role],
+            [self.cid, str(hub_id), self.cid, role],
         )
         return hub_id
 
     def role_of(self, hub_id: int) -> str:
+        """The name of the role row the member LINKS (its authority), never a string column."""
         return str(
             pg.scalar(
                 self.dal,
-                "SELECT role FROM community_members WHERE community_id = %s AND user_id = %s",
+                "SELECT r.name FROM community_members m "
+                "JOIN community_roles r ON r.id = m.community_role_id "
+                "WHERE m.community_id = %s AND m.user_id = %s",
                 [self.cid, str(hub_id)],
             )
         )
@@ -370,7 +373,7 @@ async def test_revoke_skips_grant_an_admin_changed_since(
     await _platform_pass(world, pairing, {"800010": {VIP_DISCORD_ROLE}, "800099": set()})
     pg.q(
         world.dal,
-        "UPDATE community_members SET role = 'moderator', community_role_id = "
+        "UPDATE community_members SET community_role_id = "
         "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'moderator') "
         "WHERE user_id = %s",
         [world.cid, str(uid)],
@@ -727,8 +730,8 @@ def test_remediation_queues_by_default_and_demotes_with_apply(world: _World) -> 
     )
     pg.q(
         world.dal,
-        "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
-        "is_active) VALUES (%s, %s, 'community-admin', "
+        "INSERT INTO community_members (community_id, user_id, community_role_id, "
+        "is_active) VALUES (%s, %s, "
         "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'community-admin'), "
         "true)",
         [world.cid, str(unlinked), world.cid],

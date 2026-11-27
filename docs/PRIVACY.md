@@ -140,7 +140,7 @@ Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of 
 | `activity_stats_daily` | `platform_user_id`, `platform_username` | Hub-linked rows are deleted; rows keyed only by a platform id (no `platform` column) cannot be matched without risking a cross-platform collision. |
 | `hub_admins` | `email`, `username` | Legacy admin table with its own credentials, not keyed to `hub_users`. |
 | `loyalty_giveaway_keys` | `claimed_by_user_id` | `varchar` id with no `platform` column (the winner row, which has one, *is* deleted). |
-| `communities` | `created_by`, `deleted_by`, `owner_id`, `owner_name` | Free-form `varchar` set by a superadmin, not a `hub_users` reference. |
+| `communities` | `created_by`, `deleted_by` | Free-form `varchar` set by a superadmin, not a `hub_users` reference. |
 | `command_aliases` | `deleted_by` | `varchar` of unknown shape (hub id, username or `system`). |
 | `clip_bookmarks`, `clip_highlight_reels` | `bookmarked_by`, `created_by` | `varchar` of unknown shape (platform handle or id) with no `platform` column. |
 | `module_scopes`, `revoked_tokens` | `granted_by_user_id`, `revoked_by_user_id` | `varchar` of unknown shape; module-scope changes are audited by trigger into `module_scope_audit`. |
