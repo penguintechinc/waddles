@@ -121,6 +121,9 @@ class AuditAction(StrEnum):
     AUTHZ_DENIED = "authz.denied"
     SESSION_ISSUED = "authn.session_issued"
     SESSION_REVOKED = "authn.session_revoked"
+    MFA_CHALLENGE_ISSUED = "authn.mfa_challenge_issued"
+    MFA_VERIFIED = "authn.mfa_verified"
+    MFA_FAILED = "authn.mfa_failed"
     TENANT_CREATED = "tenant.created"
     TENANT_UPDATED = "tenant.updated"
     TENANT_DELETED = "tenant.deleted"
@@ -159,6 +162,9 @@ class AuditAction(StrEnum):
     CREDENTIAL_PASSWORD_CHANGED = "credential.password_changed"  # noqa: S105 - action name  # nosec B105
     CREDENTIAL_PASSKEY_REGISTERED = "credential.passkey_registered"
     CREDENTIAL_PASSKEY_REMOVED = "credential.passkey_removed"
+    CREDENTIAL_MFA_ENROLLED = "credential.mfa_enrolled"
+    CREDENTIAL_MFA_DISABLED = "credential.mfa_disabled"
+    CREDENTIAL_MFA_RECOVERY_REGENERATED = "credential.mfa_recovery_regenerated"
     CREDENTIAL_CONNECTION_CHANGED = "credential.connection_changed"
     CREDENTIAL_WEBHOOK_CHANGED = "credential.webhook_changed"
     # --- identity linking ---
@@ -742,6 +748,11 @@ _R_DSAR: Final[str] = (
     "append-only dsar_request_events table (a per-request audit trail with its own actor kinds), "
     "and public callers have no identity to attribute in the chain"
 )
+_R_MFA: Final[str] = (
+    "account MFA: services/mfa_service.py records each security event explicitly "
+    "(authn.mfa_* / credential.mfa_*, PII- and secret-free), including pre-auth attempts the "
+    "request hook cannot attribute"
+)
 _R_PUBLIC: Final[str] = (
     "unauthenticated public/inbound endpoint: no actor, pre-identity noise an attacker could use "
     "to bloat the chain"
@@ -779,6 +790,15 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/auth/resend-verification"): _R_SESSION,
     ("POST", "/api/v1/auth/sso/<public_id>/acs"): _R_SESSION,
     ("POST", "/api/v1/auth/temp-password"): _R_SESSION,
+    ("POST", "/api/v1/auth/mfa/login/verify"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/login/email"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/totp/enroll"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/totp/confirm"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/email/enroll"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/email/confirm"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/email/send-code"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/disable"): _R_MFA,
+    ("POST", "/api/v1/auth/mfa/recovery-codes/regenerate"): _R_MFA,
     ("POST", "/api/v1/user/passkey/register/start"): _R_SESSION,
     ("POST", "/api/v1/cookie"): _R_PUBLIC,
     ("POST", "/api/v1/user/me/privacy-requests"): _R_DSAR,

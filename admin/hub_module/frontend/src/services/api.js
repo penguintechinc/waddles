@@ -759,6 +759,28 @@ export const passkeyApi = {
   finishLogin: (data) => api.post('/api/v1/auth/passkey/login/finish', data),
 };
 
+/**
+ * Account MFA (hub_api/blueprints/v1/mfa.py). TOTP is the preferred method; the
+ * otpauth URI returned by `enrollTotp` is rendered as a QR code in the browser
+ * only (never sent to a third-party QR service). Login-step calls carry the
+ * opaque `mfaToken` from a 202 `/auth/login` answer.
+ */
+export const mfaApi = {
+  status: () => api.get('/api/v1/auth/mfa/status'),
+  enrollTotp: () => api.post('/api/v1/auth/mfa/totp/enroll'),
+  confirmTotp: (code) => api.post('/api/v1/auth/mfa/totp/confirm', { code }),
+  enrollEmail: () => api.post('/api/v1/auth/mfa/email/enroll'),
+  confirmEmail: (code) => api.post('/api/v1/auth/mfa/email/confirm', { code }),
+  sendEmailCode: () => api.post('/api/v1/auth/mfa/email/send-code'),
+  disable: ({ method, code, password }) =>
+    api.post('/api/v1/auth/mfa/disable', { method, code, password: password || undefined }),
+  regenerateRecoveryCodes: ({ code, password }) =>
+    api.post('/api/v1/auth/mfa/recovery-codes/regenerate', { code, password: password || undefined }),
+  loginSendEmail: (mfaToken) => api.post('/api/v1/auth/mfa/login/email', { mfaToken }),
+  loginVerify: ({ mfaToken, method, code }) =>
+    api.post('/api/v1/auth/mfa/login/verify', { mfaToken, method, code }),
+};
+
 // ─── Interaction (Hub Channels, Forums, Voice) API ──────────────────────────
 export const interactionApi = {
   // Admin — channel CRUD

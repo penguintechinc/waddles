@@ -51,8 +51,15 @@ export function isPublicRoute(pathname: string): boolean {
   );
 }
 
-/** Skip `/auth/refresh` for optional background flag checks on public/auth routes. */
+/** Pre-auth MFA login calls: a 401 there is a wrong code, never an expired session. */
+const MFA_LOGIN_PREFIX = '/api/v1/auth/mfa/login/';
+
+/**
+ * Skip `/auth/refresh` for optional background flag checks on public/auth routes, and for the
+ * pre-auth MFA login step (there is no session to refresh; the caller needs the real 401).
+ */
 export function shouldSkipAuthRefresh(url: string | undefined): boolean {
+  if (typeof url === 'string' && url.startsWith(MFA_LOGIN_PREFIX)) return true;
   return url === '/api/v1/flags' && isPublicRoute(getCurrentPathname());
 }
 

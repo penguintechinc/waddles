@@ -50,7 +50,7 @@ from opentelemetry import metrics
 from quart import has_request_context
 
 from config import HubAPIConfig
-from services import session_service
+from services import mfa_service, session_service
 from services.audit_http import record_session_issued, record_session_revoked
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
@@ -684,6 +684,78 @@ async def login(
     if not row.password_hash or not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
 
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=row.id,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
+    )
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=row,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
+        amr=["pwd"],
+    )
+
+
+class MfaRequiredError(Exception):
+    """Primary auth succeeded but a second factor is enrolled: answer with the MFA-pending state."""
+
+    def __init__(self, challenge: mfa_service.LoginChallenge) -> None:
+        """Carry the opaque challenge (token + methods) to the route."""
+        super().__init__("mfa required")
+        self.challenge = challenge
+
+
+async def _require_mfa_if_enrolled(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    tenant_id: int | None,
+    tenant_slug: str,
+    auth_method: str,
+) -> None:
+    """Raise :class:`MfaRequiredError` (no session minted) when the user has an active factor."""
+    methods = await mfa_service.login_methods(
+        async_dal, dal, user_id=user_id, tenant_slug=tenant_slug
+    )
+    if not methods:
+        return
+    challenge = await mfa_service.start_login_challenge(
+        async_dal,
+        dal,
+        user_id=user_id,
+        methods=methods,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method=auth_method,
+    )
+    raise MfaRequiredError(challenge)
+
+
+async def _finish_login(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    *,
+    row: Any,
+    tenant_id: int | None,
+    tenant_slug: str | None,
+    auth_method: str,
+    amr: list[str] | None,
+) -> LoginResult:
+    """Mint the session for a fully authenticated `hub_users` row (shared by every password path).
+
+    Runs only once every required factor passed: directly after the password when no MFA is
+    enrolled, or from :func:`complete_mfa_login` after the second factor.
+    """
     await async_dal.update_async(dal.hub_users.id == row.id, last_login=datetime.now(UTC))
 
     linked_rows = await async_dal.select_async(
@@ -709,8 +781,8 @@ async def login(
         user=user,
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
-        auth_method="password",
-        amr=["pwd"],
+        auth_method=auth_method,
+        amr=amr,
     )
     return LoginResult(
         token=token,
@@ -722,6 +794,39 @@ async def login(
         is_vendor=user.is_vendor,
         is_analytics_consumer=user.is_analytics_consumer,
         linked_platforms=linked_platforms,
+    )
+
+
+async def complete_mfa_login(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    envelope_runtime: Any | None,
+    *,
+    token: str,
+    method: str,
+    code: str,
+) -> LoginResult:
+    """Second step of an MFA login: verify the factor, then mint the real session.
+
+    The session carries the same tenant the password step resolved, and `amr` records both
+    factors (`pwd` + `otp`/`mfa`) with `auth_time` = now.
+    """
+    done = await mfa_service.complete_login(
+        async_dal, dal, envelope_runtime, token=token, method=method, code=code
+    )
+    rows = await async_dal.select_async(dal(dal.hub_users.id == done.user_id))
+    if not rows or not rows.first().is_active:
+        raise unauthorized("Account is inactive")
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=rows.first(),
+        tenant_id=done.tenant_id,
+        tenant_slug=done.tenant_slug,
+        auth_method=f"{done.auth_method}_mfa",
+        amr=done.amr,
     )
 
 
@@ -745,27 +850,23 @@ async def admin_login(
     if not row.password_hash or not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
 
-    await async_dal.update_async(dal.hub_users.id == row.id, last_login=datetime.now(UTC))
-
-    user = SessionUser(
-        id=row.id,
-        email=row.email,
-        username=row.username,
-        avatar_url=row.avatar_url,
-        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
-        is_vendor=bool(row.is_vendor),
-        is_analytics_consumer=bool(row.is_analytics_consumer),
+    await _require_mfa_if_enrolled(
+        async_dal,
+        dal,
+        user_id=row.id,
+        tenant_id=None,
+        tenant_slug=DEFAULT_TENANT_SLUG,
+        auth_method="admin_password",
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="admin_password")
-    return LoginResult(
-        token=token,
-        user_id=user.id,
-        email=user.email,
-        username=user.username,
-        avatar_url=user.avatar_url,
-        is_super_admin=user.is_super_admin,
-        is_vendor=user.is_vendor,
-        is_analytics_consumer=user.is_analytics_consumer,
+    return await _finish_login(
+        async_dal,
+        dal,
+        cfg,
+        row=row,
+        tenant_id=None,
+        tenant_slug=None,
+        auth_method="admin_password",
+        amr=None,
     )
 
 

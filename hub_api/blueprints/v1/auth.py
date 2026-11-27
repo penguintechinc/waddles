@@ -130,6 +130,37 @@ class LoginResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class MfaRequiredResponse:
+    """202 body after a correct password when a second factor is enrolled (no session yet).
+
+    `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not a JWT, carries no
+    scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods` lists the usable
+    factors, preferred (TOTP) first; `recovery` is always last.
+    """
+
+    success: bool
+    mfaRequired: bool
+    mfaToken: str
+    methods: list[str]
+    expiresIn: int
+
+
+def _mfa_required(exc: auth_service.MfaRequiredError) -> tuple[MfaRequiredResponse, int]:
+    """Render the MFA-pending state (no Set-Cookie: no session exists yet)."""
+    challenge = exc.challenge
+    return (
+        MfaRequiredResponse(
+            success=True,
+            mfaRequired=True,
+            mfaToken=challenge.token,
+            methods=challenge.methods,
+            expiresIn=challenge.expires_in,
+        ),
+        202,
+    )
+
+
+@dataclass(slots=True, frozen=True)
 class VerificationRequiredResponse:
     """Response DTO for verification required endpoints."""
 
@@ -528,11 +559,17 @@ async def resend_verification(
 @auth_bp.route("/login", methods=["POST"])
 @validate_request(LoginRequest)
 @validate_response(LoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 @validate_response(VerificationRequiredResponse, 403)
 async def login(
     data: LoginRequest,
-) -> LoginResponse | tuple[VerificationRequiredResponse, int] | tuple[dict[str, object], int]:
-    """Login."""
+) -> (
+    LoginResponse
+    | tuple[MfaRequiredResponse, int]
+    | tuple[VerificationRequiredResponse, int]
+    | tuple[dict[str, object], int]
+):
+    """Password login; answers 202 + MFA-pending state when a second factor is enrolled."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.login(
@@ -543,6 +580,9 @@ async def login(
             password=data.password,
             tenant_slug=data.tenantSlug or DEFAULT_TENANT_SLUG,
         )
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("login: password accepted, second factor required")
+        return _mfa_required(mfa)
     except auth_service.RequiresVerificationError:
         logger.info("login blocked: email verification required")
         return (
@@ -562,16 +602,19 @@ async def login(
 
 @auth_bp.route("/admin", methods=["POST"])
 @validate_request(AdminLoginRequest)
-@validate_response(AdminLoginResponse)
+@validate_response(AdminLoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 async def admin_login(
     data: AdminLoginRequest,
-) -> AdminLoginResponse | tuple[dict[str, object], int]:
-    """Admin login."""
+) -> AdminLoginResponse | tuple[MfaRequiredResponse, int] | tuple[dict[str, object], int]:
+    """Legacy admin login; same MFA step as `/login` when a second factor is enrolled."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.admin_login(
             async_dal, dal, _cfg(), username=data.username, password=data.password
         )
+    except auth_service.MfaRequiredError as mfa:
+        return _mfa_required(mfa)
     except ApiError as exc:
         return _err(exc)
     issue_session_cookie(result.token)

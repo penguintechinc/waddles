@@ -23,6 +23,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 from quart import current_app
@@ -54,10 +55,11 @@ def reset_local() -> None:
     _LOCAL_ONCE.clear()
 
 
-def _shared_client() -> Any | None:
+def _shared_client(on_unavailable: Callable[[], ApiError] = unavailable) -> Any | None:
     """The shared Valkey client, or `None` when no shared store is configured.
 
-    Raises the fail-closed error when a limiter IS configured but its connection is not usable.
+    Raises the fail-closed error (`on_unavailable()`) when a limiter IS configured but its
+    connection is not usable.
     """
     injected = current_app.config.get(_REDIS_CONFIG_KEY)
     if injected is not None:
@@ -68,7 +70,7 @@ def _shared_client() -> Any | None:
     client = getattr(limiter, "_redis", None)
     if client is None or not getattr(limiter, "_connected", False):
         logger.error("dsar.limiter_backend_not_connected")
-        raise unavailable()
+        raise on_unavailable()
     return client
 
 
@@ -111,15 +113,25 @@ def _local_once(key: str, ttl: int, now: float) -> bool:
     return True
 
 
-async def allow(key: str, limit: int, window_seconds: int) -> bool:
+async def allow(
+    key: str,
+    limit: int,
+    window_seconds: int,
+    *,
+    prefix: str = _PREFIX,
+    on_unavailable: Callable[[], ApiError] = unavailable,
+) -> bool:
     """True when `key` is within `limit` hits per `window_seconds` (and records the hit).
 
-    Raises `ApiError(503)` when the configured shared store cannot answer (fail closed).
+    Shared by other fail-closed limiters (account MFA): `prefix` namespaces the Valkey key and
+    the local bucket, `on_unavailable` builds the caller's own 503 when the configured shared
+    store cannot answer (fail closed).
     """
-    client = _shared_client()
+    client = _shared_client(on_unavailable)
     if client is None:
-        return _local_allow(key, limit, window_seconds, time.time())
-    redis_key = f"{_PREFIX}rl:{key}"
+        local_key = key if prefix == _PREFIX else f"{prefix}{key}"
+        return _local_allow(local_key, limit, window_seconds, time.time())
+    redis_key = f"{prefix}rl:{key}"
     try:
         async with asyncio.timeout(_BACKEND_TIMEOUT_SECONDS):
             pipe = client.pipeline(transaction=True)
@@ -128,7 +140,7 @@ async def allow(key: str, limit: int, window_seconds: int) -> bool:
             count = int((await pipe.execute())[0])
     except Exception as exc:
         logger.error("dsar.limiter_backend_error", extra={"err": type(exc).__name__})
-        raise unavailable() from exc
+        raise on_unavailable() from exc
     return count <= limit
 
 

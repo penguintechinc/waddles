@@ -217,6 +217,10 @@ RULES: tuple[Rule, ...] = (
     core("hub_sessions"),
     core("hub_temp_passwords"),
     core("user_passkeys"),
+    # --- account MFA (alembic 0145): the subject's own factors, codes and pending challenges ---
+    delete("hub_user_mfa", hub("user_id")),
+    delete("hub_user_mfa_recovery_codes", hub("user_id")),
+    delete("hub_mfa_challenges", hub("user_id")),
     core("hub_chat_messages"),
     core("activity_message_events"),
     core("activity_watch_sessions"),
