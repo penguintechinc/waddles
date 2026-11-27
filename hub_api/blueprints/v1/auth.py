@@ -48,6 +48,12 @@ from services.current_user import (
     get_optional_current_user_id,
 )
 from services.dto_response import jsonify_dto
+from services.email_verification import (
+    ERR_DOMAIN,
+    ERR_NOT_CONFIGURED,
+    ERR_REQUIRED,
+    ERR_SEND_FAILED,
+)
 from services.errors import ApiError
 from services.login_providers import ERR_PROVIDER_DISABLED
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY, _client_ip
@@ -86,12 +92,25 @@ def _callback_base_url() -> str:
     return _cfg().identity_callback_base_url
 
 
+#: Typed OAuth-login failures the webui login page renders specifically (bounded codes only).
+_LOGIN_REDIRECT_ERRORS = (
+    binding.ERR_BINDING,
+    binding.ERR_STATE,
+    ERR_PROVIDER_DISABLED,
+    ERR_REQUIRED,
+    ERR_DOMAIN,
+    ERR_SEND_FAILED,
+    ERR_NOT_CONFIGURED,
+)
+
+
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     """Convert an `ApiError` into the flask_core `error_response()` JSON envelope."""
     # flask_core is `follow_imports = "skip"` (pyproject.toml) -- error_response()
     # is typed Any from mypy's perspective, cast to the real, stable shape.
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -140,7 +159,7 @@ class VerificationRequiredResponse:
 
 @dataclass(slots=True, frozen=True)
 class RegisterSuccessResponse:
-    """Response DTO for `POST /register` and `GET /verify-email`'s full-success branch."""
+    """Response DTO for `POST /register` and `POST /verify-email`'s full-success branch."""
 
     success: bool
     token: str
@@ -485,27 +504,52 @@ async def register(data: RegisterRequest) -> tuple[Any, int]:
     return set_session_cookie(response, result.token), status
 
 
-@auth_bp.route("/verify-email", methods=["GET"])
-# NOT @validate_response -- same crash class as register() above (this
-# route also inserts nothing itself, but auth_service.verify_email()'s own
-# update_async + hub_sessions insert_async chain hits the same pattern).
-async def verify_email() -> tuple[Any, int]:
-    """Verify email."""
+@dataclass(slots=True, frozen=True)
+class VerifyEmailRequest:
+    """Request DTO for `POST /verify-email` and `POST /cancel-signup` (token in the body only)."""
+
+    token: str
+
+
+#: Fixed answers: verification never signs anyone in; resend never reveals the account.
+VERIFIED_MESSAGE = "Email verified. You can now sign in."
+CANCELLED_MESSAGE = "The sign-up request was cancelled and the pending account deleted."
+RESEND_MESSAGE = (
+    "If an account with that address is waiting for verification, a new link is on its way."
+)
+
+
+@auth_bp.route("/verify-email", methods=["POST"])
+@validate_request(VerifyEmailRequest)
+# NOT @validate_response -- auth_service.verify_email()'s update_async chain hits the crash
+# documented in services/dto_response.py; jsonify_dto() is the equivalent-safety workaround.
+async def verify_email(data: VerifyEmailRequest) -> tuple[Any, int]:
+    """Confirm the address behind the emailed single-use token. Mints NO session.
+
+    The user signs in normally afterwards (password, OAuth or SSO), so a victim tricked into
+    clicking someone else's link is never logged into that account.
+    """
     async_dal, dal = _dal()
-    token = request.args.get("token", "")
     try:
-        result = await auth_service.verify_email(async_dal, dal, _cfg(), token=token)
+        await auth_service.verify_email(
+            async_dal, dal, token=data.token, install_dal=current_app.config.get("install_dal")
+        )
     except ApiError as exc:
         return _err(exc)
-    response, status = jsonify_dto(
-        RegisterSuccessResponse(
-            success=True,
-            message="Email verified successfully",
-            token=result.token,
-            user=_login_user_dto(result),
-        )
-    )
-    return set_session_cookie(response, result.token), status
+    return jsonify_dto(MessageResponse(success=True, message=VERIFIED_MESSAGE))
+
+
+@auth_bp.route("/cancel-signup", methods=["POST"])
+@validate_request(VerifyEmailRequest)
+# NOT @validate_response -- delete_async chain, same crash class as verify_email above.
+async def cancel_signup(data: VerifyEmailRequest) -> tuple[Any, int]:
+    """The emailed "this wasn't me" link: cancel and delete the still-unverified account."""
+    async_dal, dal = _dal()
+    try:
+        await auth_service.cancel_signup(async_dal, dal, token=data.token)
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(MessageResponse(success=True, message=CANCELLED_MESSAGE))
 
 
 @dataclass(slots=True, frozen=True)
@@ -521,13 +565,13 @@ class ResendVerificationRequest:
 async def resend_verification(
     data: ResendVerificationRequest,
 ) -> MessageResponse | tuple[dict[str, object], int]:
-    """Resend verification."""
+    """Queue a fresh link; one fixed 200 answer for known, unknown and cooled-down addresses."""
     async_dal, dal = _dal()
     try:
-        await auth_service.resend_verification(async_dal, dal, email=data.email)
+        await auth_service.resend_verification(async_dal, dal, _cfg(), email=data.email)
     except ApiError as exc:
         return _err(exc)
-    return MessageResponse(success=True, message="Verification email sent")
+    return MessageResponse(success=True, message=RESEND_MESSAGE)
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -957,11 +1001,7 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         )
     except ApiError as exc:
         logger.warning("auth.oauth_callback.refused type=%s code=%s", type(exc).__name__, exc.code)
-        error = (
-            exc.code
-            if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)
-            else "oauth_failed"
-        )
+        error = exc.code if exc.code in _LOGIN_REDIRECT_ERRORS else "oauth_failed"
         return redirect(f"{frontend_origin}/login?error={error}")
 
     exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(

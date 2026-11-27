@@ -48,7 +48,7 @@ from blueprints.v1.auth import auth_bp
 from blueprints.v1.sso import SETTINGS_CONFIG_KEY, TRANSPORT_CONFIG_KEY, sso_admin_bp, sso_public_bp
 from config import HubAPIConfig
 from services import sso_oidc, sso_state
-from services.schema import bind_auth_tables
+from services.schema import bind_auth_tables, bind_tenant_tables
 from services.sso_settings import SsoSettings
 from tests.conftest import TENANT_SLUG
 from tests.sso.idp_fakes import FakeOidcIdp, FakeSamlIdp
@@ -262,6 +262,9 @@ async def sso_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
+    # tenant_settings (+ the tenant columns its routes read): the signup-domain resolver
+    # (services/email_verification.py) reads a tenant's allowlist on every signup path.
+    bind_tenant_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:

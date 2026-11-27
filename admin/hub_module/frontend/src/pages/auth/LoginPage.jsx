@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LoginPageBuilder } from '@penguintechinc/react-libs';
 import SocialLoginButtons from './SocialLoginButtons';
 import { useAuth } from '../../contexts/AuthContext';
@@ -182,6 +182,34 @@ function SsoOptions({ tenantSlug }) {
   );
 }
 
+/** Messages for the typed `?error=` codes hub-api's OAuth callback redirects with. */
+const LOGIN_NOTICES = {
+  email_verification_required:
+    'Check your inbox: verify your email address to finish signing up, then sign in again.',
+  email_domain_not_allowed:
+    'Sign-up is restricted to specific email domains. Use an account whose email is in an allowed domain.',
+  verification_email_failed:
+    "We couldn't send your verification email. Request a new link below and try again.",
+  email_not_configured:
+    'Email delivery is not configured on this server, so sign-ups that need email verification are unavailable.',
+};
+
+/** Banner for a typed OAuth-login error plus the verify/resend link (no raw codes shown). */
+function LoginNotice() {
+  const [searchParams] = useSearchParams();
+  const notice = LOGIN_NOTICES[searchParams.get('error')];
+  if (!notice) return null;
+  return (
+    <div
+      className="mb-4 p-3 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-200 text-sm"
+      role="alert"
+      data-testid="login-notice"
+    >
+      {notice}
+    </div>
+  );
+}
+
 function LoginPage() {
   const navigate = useNavigate();
   const { tenantSlug } = useParams();
@@ -245,6 +273,7 @@ function LoginPage() {
   return (
     <div className="min-h-[80vh] flex items-center justify-center py-12 px-4">
       <div className="max-w-md w-full">
+        <LoginNotice />
         {/* Passkey login — shown above the OAuth/email sections */}
         <div className="bg-navy-800 border border-navy-600 border-b-0 rounded-t-xl px-6 pt-6 pb-4">
           <PasskeyButton onLogin={handlePasskeyLogin} />
@@ -292,6 +321,12 @@ function LoginPage() {
           colors={WADDLEBOT_COLORS}
         />
         <SsoOptions tenantSlug={tenantSlug} />
+        <p className="mt-4 text-center text-sm text-navy-400">
+          Need to verify your email?{' '}
+          <Link to="/verify-email" className="text-sky-400 hover:text-sky-300" data-testid="verify-email-link">
+            Resend the link
+          </Link>
+        </p>
         {signupEnabled && (
           <p className="mt-4 text-center text-navy-400">
             Don&apos;t have an account?{' '}

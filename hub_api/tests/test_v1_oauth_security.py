@@ -184,6 +184,8 @@ class TestOAuthLoginDoesNotAdoptExistingUserByEmail:
                     "id": "attacker-discord-id-999",
                     "username": "attacker",
                     "email": "victim@example.com",
+                    # Worst case: the provider even vouches for the address.
+                    "email_verified": True,
                     "avatar_url": None,
                 },
             )
@@ -195,6 +197,27 @@ class TestOAuthLoginDoesNotAdoptExistingUserByEmail:
             (auth_db.dal.hub_user_identities.hub_user_id == victim_id)
             & (auth_db.dal.hub_user_identities.platform == "discord")
         ).select()
+        assert not linked
+
+    async def test_unverified_claim_of_existing_email_is_never_linked_to_it(
+        self, auth_db: Any
+    ) -> None:
+        """A provider that did not verify the address gets a placeholder, never the victim's row."""
+        victim_id = _seed_user(auth_db, email="victim@example.com")
+        user = await oauth_service._find_or_create_user_from_oauth(  # noqa: SLF001
+            auth_db,
+            auth_db.dal,
+            platform="discord",
+            user_data={
+                "id": "attacker-discord-id-998",
+                "username": "attacker",
+                "email": "victim@example.com",
+                "email_verified": False,
+                "avatar_url": None,
+            },
+        )
+        assert user.id != victim_id and user.email == "attacker@discord.local"
+        linked = auth_db.dal(auth_db.dal.hub_user_identities.hub_user_id == victim_id).select()
         assert not linked
 
     async def test_oauth_login_with_new_identity_and_no_email_conflict_creates_new_user(
@@ -209,6 +232,7 @@ class TestOAuthLoginDoesNotAdoptExistingUserByEmail:
                 "id": "fresh-discord-id-123",
                 "username": "newperson",
                 "email": "newperson@example.com",
+                "email_verified": True,
                 "avatar_url": None,
             },
         )

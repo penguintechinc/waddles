@@ -74,6 +74,14 @@ export const oauthApi = {
   startLink: (platform) => api.get(`/api/v1/auth/oauth/${platform}/link`),
 };
 
+// Account email verification (hub-api services/email_verification.py). The emailed link lands on
+// the webui /verify-email page with the token in the URL fragment; it is POSTed in the body only.
+export const emailVerificationApi = {
+  verify: (token) => api.post('/api/v1/auth/verify-email', { token }),
+  cancelSignup: (token) => api.post('/api/v1/auth/cancel-signup', { token }),
+  resend: (email) => api.post('/api/v1/auth/resend-verification', { email }),
+};
+
 // API helper functions
 export const publicApi = {
   getStats: () => api.get('/api/v1/public/stats'),
@@ -854,6 +862,9 @@ export const tenantApi = {
   updateTenant: (slug, data) => api.put(`/api/v1/tenant/${slug}`, data),
   getSettings: (slug) => api.get(`/api/v1/tenant/${slug}/settings`),
   updateSettings: (slug, settings) => api.put(`/api/v1/tenant/${slug}/settings`, { settings }),
+  // Signup email-domain restriction (PUT needs the per-action tenant.signup_domains:write scope).
+  getSignupDomains: (slug) => api.get(`/api/v1/tenant/${slug}/signup-domains`),
+  updateSignupDomains: (slug, domains) => api.put(`/api/v1/tenant/${slug}/signup-domains`, { domains }),
   getCommunities: (slug, params) => api.get(`/api/v1/tenant/${slug}/communities`, { params }),
   getAdmins: (slug) => api.get(`/api/v1/tenant/${slug}/admins`),
   addAdmin: (slug, userId, role) => api.post(`/api/v1/tenant/${slug}/admins`, { userId, role }),

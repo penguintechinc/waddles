@@ -116,7 +116,10 @@ export function AuthProvider({ children }) {
     } catch (err) {
       const message = err.response?.data?.error?.message || err.response?.data?.error || err.response?.data?.message || 'Registration failed';
       setError(message);
-      throw new Error(message);
+      const wrapped = new Error(message);
+      // Typed code (e.g. verification_email_failed) so the page can offer "resend" instead of a dead end.
+      wrapped.code = err.response?.data?.error?.code;
+      throw wrapped;
     }
   }, []);
 

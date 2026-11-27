@@ -32,7 +32,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import urlencode
 
@@ -50,16 +50,16 @@ from opentelemetry import metrics
 from quart import has_request_context
 
 from config import HubAPIConfig
-from services import session_service
+from services import email_service, session_service
+from services import email_verification as ev
 from services.audit_http import record_session_issued, record_session_revoked
-from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
+from services.errors import ApiError, bad_request, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
 from services.session_cookie import issue_refresh_cookie
 
 logger = logging.getLogger(__name__)
 
 SALT_ROUNDS = 12  # matches authController.js's SALT_ROUNDS
-_VERIFICATION_TTL = timedelta(hours=24)
 
 
 @dataclass(slots=True, frozen=True)
@@ -491,6 +491,41 @@ async def add_user_to_global_community(async_dal: Any, dal: Any, *, user_id: int
         )
 
 
+async def _register_pending_job(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    *,
+    email: str,
+    password_hash: str,
+    username: str | None,
+) -> None:
+    """Background half of a verification-required signup (everything that depends on existence).
+
+    Existing address: mail its owner a "someone tried to register" notice, create nothing.
+    New address: create the pending account and mail the verification + "not me" links.
+    """
+    existing = await async_dal.select_async(dal(dal.hub_users.email == email))
+    if existing:
+        ev.verification_events.add(1, {"event": "register", "outcome": "existing_notified"})
+        await ev.send_existing_account_notice(cfg, to_email=email)
+        return
+    user_id = await async_dal.insert_async(
+        dal.hub_users,
+        email=email,
+        password_hash=password_hash,
+        username=username or email,
+        is_active=True,
+        email_verified=False,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    # add_user_to_global_community() never raises -- it logs internally and returns.
+    await add_user_to_global_community(async_dal, dal, user_id=int(user_id))
+    ev.verification_events.add(1, {"event": "register", "outcome": "pending_created"})
+    await ev.issue_and_send(async_dal, dal, cfg, user_id=int(user_id), email=email)
+
+
 async def register(
     async_dal: Any,
     dal: Any,
@@ -503,7 +538,12 @@ async def register(
     remote_ip: str | None,
     altcha_store: Any = None,
 ) -> tuple[bool, LoginResult | None]:
-    """Register a local user. Returns `(requires_verification, result)`."""
+    """Register a local user. Returns `(requires_verification, result)`.
+
+    With verification enforced the answer is ALWAYS `(True, None)` (the route's fixed 202) for
+    new and already-registered addresses alike: the existence-dependent work (lookup, insert,
+    mail) runs in a background job so neither the body nor the latency reveals the account.
+    """
     if not email or not password:
         raise bad_request("Email and password required")
 
@@ -527,54 +567,58 @@ async def register(
         ):
             raise bad_request("CAPTCHA verification failed")
 
-    allowed_domains = [
-        d.strip().lower()
-        for d in settings.get("signup_allowed_domains", "").split(",")
-        if d.strip()
-    ]
-    email_lower = email.lower()
-    domain = email_lower.rsplit("@", 1)[-1] if "@" in email_lower else ""
-    if allowed_domains and domain not in allowed_domains:
-        raise forbidden("Registration is restricted to specific email domains")
+    email_lower = ev.normalize_email(email)
+    if not email_lower or "@" not in email_lower:
+        raise bad_request("A valid email address is required")
+    policy = await ev.resolve_signup_policy(async_dal, dal)  # platform ∩ default tenant
+    if not policy.allows(email_lower):
+        raise ApiError("Registration is restricted to specific email domains", 403, ev.ERR_DOMAIN)
 
+    # Local signups are always pending until verified (services/email_verification.py); only
+    # the platform-wide `waddles.disable-email-verification` kill switch restores the legacy
+    # opt-in setting.
+    require_verification = (
+        await ev.enforced() or settings.get("signup_require_email_verification") == "true"
+    )
+    if require_verification:
+        ev.require_configured()  # global config, not account-dependent: fail loud up front
+        # Hashed for EVERY request so the expensive step costs the same for known addresses.
+        password_hash = await _hash_password(password)
+        if await ev.charge_send_budget(cfg):
+            ev.schedule(
+                _register_pending_job(
+                    async_dal,
+                    dal,
+                    cfg,
+                    email=email_lower,
+                    password_hash=password_hash,
+                    username=username,
+                ),
+                name="register",
+            )
+        return True, None
+
+    # Legacy path (kill switch ON and opt-in setting OFF): an immediate session for a new
+    # account. An existing address still gets the uniform 202 and its owner a notice.
     existing = await async_dal.select_async(dal(dal.hub_users.email == email_lower))
     if existing:
-        raise conflict("Email already registered")
-
+        if email_service.is_configured() and await ev.charge_send_budget(cfg):
+            ev.schedule(
+                ev.send_existing_account_notice(cfg, to_email=email_lower), name="register_notice"
+            )
+        return True, None
     password_hash = await _hash_password(password)
-    require_verification = settings.get("signup_require_email_verification") == "true"
-
-    verification_token: str | None = None
-    verification_expires: datetime | None = None
-    if require_verification:
-        verification_token = secrets.token_urlsafe(32)
-        verification_expires = datetime.now(UTC) + _VERIFICATION_TTL
-
     user_id = await async_dal.insert_async(
         dal.hub_users,
         email=email_lower,
         password_hash=password_hash,
         username=username or email_lower,
         is_active=True,
-        email_verified=not require_verification,
-        email_verification_token=verification_token,
-        email_verification_expires=verification_expires,
+        email_verified=True,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
-
-    # add_user_to_global_community() never raises -- it logs internally and
-    # returns, matching Node's "don't fail registration, but log loudly" path.
     await add_user_to_global_community(async_dal, dal, user_id=user_id)
-
-    if require_verification:
-        # Email delivery (Node's sendVerificationEmail()) is out of scope --
-        # hub-api has no SMTP/email client wired in yet; that's a dependency
-        # M1 doesn't own (not in this PR's service list). The token is
-        # generated and stored regardless, so verify_email() below is fully
-        # functional the moment a caller has the token (email delivery is
-        # the only missing leg, tracked in hub_api/PORTING.md).
-        return True, None
 
     user = SessionUser(id=user_id, email=email_lower, username=username or email_lower)
     token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="register")
@@ -590,63 +634,141 @@ async def register(
     )
 
 
-async def verify_email(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: str) -> LoginResult:
-    """Verify email."""
+async def _row_for_token(async_dal: Any, dal: Any, token: str) -> Any:
+    """Resolve a live (unexpired, constant-time-matched) verification token to its user row.
+
+    Tampered, reused and oversize tokens all raise the same 400; expiry has its own message.
+    """
     if not token:
         raise bad_request("Verification token required")
-
-    rows = await async_dal.select_async(dal(dal.hub_users.email_verification_token == token))
-    if not rows:
-        raise bad_request("Invalid or expired verification token")
-    row = rows.first()
-
+    invalid = bad_request("Invalid or expired verification token")
+    if len(token) > 256:
+        raise invalid
+    rows = await async_dal.select_async(
+        dal(dal.hub_users.email_verification_token == ev.hash_token(token))
+    )
+    row = rows.first() if rows else None
+    if row is None or not ev.token_matches(token, row.email_verification_token):
+        ev.verification_events.add(1, {"event": "verify", "outcome": "invalid"})
+        raise invalid
     expires = row.email_verification_expires
     if expires is not None:
         expires_utc = expires if expires.tzinfo else expires.replace(tzinfo=UTC)
         if datetime.now(UTC) > expires_utc:
+            ev.verification_events.add(1, {"event": "verify", "outcome": "expired"})
             raise bad_request("Verification token has expired")
+    return row
+
+
+async def verify_email(
+    async_dal: Any,
+    dal: Any,
+    *,
+    token: str,
+    install_dal: Any = None,
+) -> None:
+    """Consume a single-use verification token. Confirms the address only -- NO session.
+
+    The token is looked up by its SHA-256 digest (never stored raw) and re-checked in constant
+    time; expired, reused or tampered tokens fail, and so does an inactive account (same 400).
+    The address must still satisfy the effective signup policy (platform ∩ tenant) of the
+    tenant the account signed up into: the SSO connection's tenant for an SSO-provisioned
+    account (resolved through `install_dal`), else the default tenant. The user then logs in.
+    """
+    row = await _row_for_token(async_dal, dal, token)
+    if not row.is_active:
+        ev.verification_events.add(1, {"event": "verify", "outcome": "inactive"})
+        raise bad_request("Invalid or expired verification token")
+
+    tenant_slug = DEFAULT_TENANT_SLUG
+    if install_dal is not None:
+        from services.sso_service import signup_tenant_slug  # lazy: sso_service imports us
+
+        tenant_slug = (
+            await signup_tenant_slug(install_dal, async_dal, dal, user_id=int(row.id))
+            or DEFAULT_TENANT_SLUG
+        )
+    policy = await ev.resolve_signup_policy(async_dal, dal, tenant_slug=tenant_slug)
+    if not policy.allows(row.email):
+        ev.verification_events.add(1, {"event": "verify", "outcome": "domain_refused"})
+        raise ApiError("This email domain is not allowed to sign up", 403, ev.ERR_DOMAIN)
 
     await async_dal.update_async(
         dal.hub_users.id == row.id,
         email_verified=True,
         email_verification_token=None,
         email_verification_expires=None,
+        updated_at=datetime.now(UTC),
     )
-
-    user = SessionUser(id=row.id, email=row.email, username=row.username)
-    session_token = await create_session_token(
-        async_dal, dal, cfg, user=user, auth_method="email_verification"
-    )
-    return LoginResult(
-        token=session_token,
-        user_id=user.id,
-        email=user.email,
-        username=user.username,
-        avatar_url=None,
-        is_super_admin=False,
-        is_vendor=False,
-        is_analytics_consumer=False,
-    )
+    ev.verification_events.add(1, {"event": "verify", "outcome": "verified"})
 
 
-async def resend_verification(async_dal: Any, dal: Any, *, email: str) -> None:
-    """Resend verification."""
+async def cancel_signup(async_dal: Any, dal: Any, *, token: str) -> None:
+    """The "this wasn't me" link: cancel and DELETE a still-unverified pending account.
+
+    Same token rules as `verify_email`. A verified account is never deleted here (its token was
+    cleared on verification, so the link reads as invalid).
+    """
+    row = await _row_for_token(async_dal, dal, token)
+    if bool(row.email_verified):
+        raise bad_request("Invalid or expired verification token")
+    await delete_pending_account(async_dal, dal, user_id=int(row.id))
+    ev.verification_events.add(1, {"event": "cancel", "outcome": "deleted"})
+    logger.info("email_verification.pending_account_cancelled")
+
+
+async def delete_pending_account(async_dal: Any, dal: Any, *, user_id: int) -> None:
+    """Remove an unverified pending account and every row its signup created.
+
+    Postgres also cascades `sso_identities`/`hub_user_identities` on the FK; the explicit deletes
+    keep the guarantee on every backend. Affected communities get their member count recomputed.
+    """
+    member_rows = await async_dal.select_async(
+        dal(dal.community_members.user_id == str(user_id)), dal.community_members.community_id
+    )
+    community_ids = {int(r.community_id) for r in member_rows if r.community_id is not None}
+    await async_dal.delete_async(dal.community_members.user_id == str(user_id))
+    await async_dal.delete_async(dal.hub_user_identities.hub_user_id == user_id)
+    await async_dal.delete_async(dal.hub_sessions.user_id == user_id)
+    await async_dal.delete_async(dal.tenant_members.user_id == user_id)
+    await async_dal.delete_async(dal.hub_user_profiles.hub_user_id == user_id)
+    await async_dal.delete_async(dal.hub_users.id == user_id)
+    if "communities" in dal.tables:
+        for community_id in community_ids:
+            count = await async_dal.count_async(
+                (dal.community_members.community_id == community_id)
+                & (dal.community_members.is_active == True)  # noqa: E712
+            )
+            await async_dal.update_async(dal.communities.id == community_id, member_count=count)
+
+
+async def _resend_job(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, email: str) -> None:
+    """Background half of resend: lookup, silent cooldown, rotate + mail."""
+    rows = await async_dal.select_async(dal(dal.hub_users.email == email))
+    row = rows.first() if rows else None
+    if row is None or row.email_verified or not row.is_active:
+        ev.verification_events.add(1, {"event": "resend", "outcome": "no_pending_account"})
+        return
+    if ev.resend_wait_seconds(row.email_verification_expires) > 0:
+        ev.verification_events.add(1, {"event": "resend", "outcome": "cooldown"})
+        return
+    await ev.issue_and_send(async_dal, dal, cfg, user_id=int(row.id), email=str(row.email))
+
+
+async def resend_verification(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, email: str) -> None:
+    """Queue a fresh verification link (old one invalidated) for a pending account.
+
+    Returns normally with the same answer for known, unknown, verified and cooled-down
+    addresses: the per-user cooldown is enforced silently inside the background job, and the
+    mail goes out off the request path. SMTP unset fails loud (`email_not_configured`).
+    """
     if not email:
         raise bad_request("Email required")
-
-    rows = await async_dal.select_async(dal(dal.hub_users.email == email.lower()))
-    if not rows:
-        return  # don't reveal whether the account exists
-    row = rows.first()
-    if row.email_verified:
-        raise bad_request("Email is already verified")
-
-    await async_dal.update_async(
-        dal.hub_users.id == row.id,
-        email_verification_token=secrets.token_urlsafe(32),
-        email_verification_expires=datetime.now(UTC) + _VERIFICATION_TTL,
-    )
-    # Email delivery is out of scope here too -- same gap noted in register() above.
+    ev.require_configured()
+    normalized = ev.normalize_email(email)
+    if not normalized or not await ev.charge_send_budget(cfg):
+        return
+    ev.schedule(_resend_job(async_dal, dal, cfg, email=normalized), name="resend")
 
 
 class RequiresVerificationError(Exception):
@@ -671,18 +793,21 @@ async def login(
     )
     tenant_id = tenant_rows.first().id if tenant_rows else None
 
-    rows = await async_dal.select_async(dal(dal.hub_users.email == email.lower()))
+    rows = await async_dal.select_async(
+        dal(dal.hub_users.email == (ev.normalize_email(email) or email.lower()))
+    )
     if not rows:
         raise unauthorized("Invalid credentials")
     row = rows.first()
 
     if not row.is_active:
         raise unauthorized("Account is inactive")
-    if row.email_verified is False:
-        raise RequiresVerificationError()
 
     if not row.password_hash or not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
+    # After the password check, so verification state never leaks to a wrong-password caller.
+    if row.email_verified is False:
+        raise RequiresVerificationError()
 
     await async_dal.update_async(dal.hub_users.id == row.id, last_login=datetime.now(UTC))
 

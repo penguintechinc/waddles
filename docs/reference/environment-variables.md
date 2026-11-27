@@ -11,6 +11,7 @@ This document provides a comprehensive reference for environment variables used 
 - [AI Interaction Module](#ai-interaction-module)
 - [Router Module](#router-module)
 - [Hub Module](#hub-module)
+- [hub-api Outbound Email](#hub-api-outbound-email)
 - [Labels Core Module](#labels-core-module)
 - [Inventory Interaction Module](#inventory-interaction-module)
 - [Memories Interaction Module](#memories-interaction-module)
@@ -587,6 +588,25 @@ SYSLOG_FACILITY=LOCAL0
 ENABLE_EMAIL_VERIFICATION=false
 ENABLE_TWO_FACTOR=false
 ENABLE_OAUTH_PROVIDERS=false
+```
+
+---
+
+## hub-api Outbound Email
+
+Full policy and Helm mapping: [docs/email-verification.md](../email-verification.md).
+
+```bash
+SMTP_HOST=smtp-relay.gmail.com        # blank = email off (flows needing it fail loud)
+SMTP_PORT=587
+SMTP_TLS=starttls                      # starttls (mandatory) | tls
+SMTP_EHLO_NAME=waddles-alpha.penguintech.cloud   # required FQDN; hub-api refuses to start otherwise
+SMTP_FROM=no-reply@penguintech.io
+SMTP_FROM_NAME=Waddles
+SMTP_TOTAL_TIMEOUT=30
+SMTP_USERNAME= / SMTP_PASSWORD=        # optional AUTH, from a Secret only
+EMAIL_VERIFICATION_TTL_HOURS=24
+EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS=60
 ```
 
 ---

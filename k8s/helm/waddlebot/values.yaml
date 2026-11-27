@@ -2755,6 +2755,34 @@ ingress:
 #
 # Non-secret companion config for the same platforms (URLs, tenant/project
 # IDs, IRC nick/channels) stays below -- it isn't a credential.
+# Outbound email (hub-api `services/email_service.py`): account email verification today, email
+# one-time codes next; the DSAR mailer falls back to this relay when config.dsarSmtp.host is blank.
+# host blank => email OFF: every flow that needs email fails loud (signups requiring verification
+# get a clear 503), nothing is ever auto-verified. Non-secret settings live here; the chart never
+# renders credentials. Optional SMTP AUTH comes from an operator-created Secret:
+#   kubectl -n <ns> create secret generic <name> \
+#     --from-literal=username=<user> --from-literal=password=<password>
+# (keys exactly `username` / `password`). existingSecret blank => no AUTH (IP-allowlisted relays,
+# e.g. Gmail's smtp-relay). TLS: certificate verification always ON, TLS 1.2+; starttls is
+# mandatory in starttls mode (a relay that does not offer it fails loud -- never plaintext).
+smtp:
+  host: ""
+  port: 587
+  tls: "starttls"            # starttls | tls (implicit). Plaintext is not renderable by the chart.
+  ehloName: ""               # REQUIRED with host: an FQDN (never localhost/IP/pod name); hub-api refuses to start otherwise
+  from: ""                   # REQUIRED with host: envelope + header sender address
+  fromName: "Waddles"
+  replyTo: ""
+  caFile: ""                 # extra trust anchor path (private relay CA mounted in the pod)
+  existingSecret: ""         # optional AUTH: Secret NAME (keys `username`, `password`); blank = no AUTH
+  timeoutSeconds: 30         # total budget across retries
+  connectTimeoutSeconds: 5
+  sendTimeoutSeconds: 10
+  maxRetries: 2              # transient (4xx / connection) only; 5xx is never retried
+  backoffSeconds: 0.5        # exponential with full jitter, capped at 8 s
+  egress:
+    enabled: true            # host set => hub-api CNP allows toFQDNs <host>:<port> (nothing wider)
+
 platformCredentials:
   # Name of a pre-existing Secret holding externally-issued platform
   # credentials. Leave blank to use the default name

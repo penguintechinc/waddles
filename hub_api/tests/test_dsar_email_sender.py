@@ -118,6 +118,7 @@ class _Handler:
         self.messages: list[Any] = []
         self.ehlo = 0
         self.data_attempts = 0
+        self.ehlo_names: list[str] = []
         self.script: list[str] = []
         self.rcpt_script: list[str] = []
 
@@ -125,6 +126,7 @@ class _Handler:
         self, server: Any, session: Any, envelope: Any, hostname: str, responses: list[str]
     ) -> list[str]:  # noqa: E501,N802
         self.ehlo += 1
+        self.ehlo_names.append(hostname)
         session.host_name = hostname  # aiosmtpd's new-style hook owns this
         return responses
 
@@ -213,6 +215,7 @@ def smtp_env(monkeypatch: pytest.MonkeyPatch, pki: dict[str, Path], app: Any) ->
             "DSAR_SMTP_TLS_CA_FILE": str(pki["ca"]),
             "DSAR_SMTP_FROM_ADDRESS": "privacy@waddles.example",
             "DSAR_SMTP_FROM_NAME": "Waddles Privacy",
+            "DSAR_SMTP_EHLO_NAME": "hub-api.waddles.example",
             "DSAR_SMTP_BACKOFF_SECONDS": "0.01",
             "DSAR_SMTP_CONNECT_TIMEOUT": "2",
             "DSAR_SMTP_SEND_TIMEOUT": "5",
@@ -394,6 +397,7 @@ class TestTlsAndAuth:
                     "DSAR_SMTP_HOST": "h", "DSAR_SMTP_TLS": "none", "DSAR_SMTP_ALLOW_PLAINTEXT": "true",
                     "DSAR_SMTP_USERNAME": "u", "DSAR_SMTP_PASSWORD": "p",
                     "DSAR_SMTP_FROM_ADDRESS": "a@b.example",
+                    "DSAR_SMTP_EHLO_NAME": "hub-api.waddles.example",
                 }
             )  # fmt: skip
 
@@ -538,7 +542,11 @@ class TestFailLoud:
     def test_invalid_settings_name_the_variable_only(
         self, env: dict[str, str], needle: str
     ) -> None:
-        base = {"DSAR_SMTP_HOST": "h.example", "DSAR_SMTP_FROM_ADDRESS": "a@b.example"}
+        base = {
+            "DSAR_SMTP_HOST": "h.example",
+            "DSAR_SMTP_FROM_ADDRESS": "a@b.example",
+            "DSAR_SMTP_EHLO_NAME": "hub-api.waddles.example",
+        }
         with pytest.raises(sender.SmtpConfigError) as err:
             sender.settings_from_env({**base, **env})
         assert needle in str(err.value)
@@ -593,6 +601,7 @@ class TestMessage:
         env = {
             "DSAR_SMTP_HOST": "h.example",
             "DSAR_SMTP_FROM_ADDRESS": "privacy@waddles.example",
+            "DSAR_SMTP_EHLO_NAME": "hub-api.waddles.example",
             "DSAR_SMTP_FROM_NAME": "Evil\r\nBcc: victim@example.org",
         }
         settings = sender.settings_from_env(env)

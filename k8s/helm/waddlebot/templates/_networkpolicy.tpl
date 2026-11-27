@@ -25,7 +25,8 @@ Call with:
         "selector" (dict ...)                 # optional, pod matchLabels (default instance+component)
         "name" "x"                            # optional, policy-name suffix (default component)
         "tetragon" false                      # optional, skip the exec allowlist (third-party images)
-        "cnp" false)                          # optional, skip the CNP (workload has its own dedicated one)
+        "cnp" false                           # optional, skip the CNP (workload has its own dedicated one)
+        "extraFqdns" (list (dict "fqdn" "smtp.example.com" "port" 587)))  # optional, extra FQDN:port egress
 */}}
 
 {{/* CNP toPorts entries from "N", "N/PROTO" or "LO-HI/PROTO" specs. */}}
@@ -101,6 +102,7 @@ separate entries (mixing `::1/128` under `0.0.0.0/0` is invalid). Call with the 
 {{- end -}}
 {{- $ingressOn := $np.enabled -}}
 {{- $egressOn := and $ep.enabled $ep.workloadEgress.enabled (ne $profile "managed") -}}
+{{- $extraFqdns := .extraFqdns | default list -}}
 {{- $exclude := list -}}
 {{- range (.excludePorts | default list) -}}{{- $exclude = append $exclude (toString .) -}}{{- end -}}
 {{- $ports := list -}}
@@ -170,7 +172,7 @@ spec:
               protocol: UDP
             - port: {{ $ep.inCluster.dnsPort | quote }}
               protocol: TCP
-          {{- if and (eq $profile "https") $ep.httpsFqdns }}
+          {{- if or (and (eq $profile "https") $ep.httpsFqdns) $extraFqdns }}
           rules:
             dns:
               - matchPattern: "*"
@@ -205,6 +207,15 @@ spec:
     # Documented exception: arbitrary outbound media/relay ports — still never private ranges.
     - toCIDRSet:
         {{- include "waddlebot.worldCidrSet" $root | nindent 8 }}
+    {{- end }}
+    {{- range $extraFqdns }}
+    # Named external service (e.g. the SMTP relay): this FQDN on this port only.
+    - toFQDNs:
+        - matchName: {{ .fqdn | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .port | quote }}
+              protocol: TCP
     {{- end }}
   {{- end }}
 {{- end }}

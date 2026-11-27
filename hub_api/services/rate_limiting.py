@@ -113,6 +113,16 @@ def _client_ip(trusted_proxy_hops: int) -> str:
     return candidate
 
 
+def auth_ip_bucket_key(trusted_proxy_hops: int) -> str:
+    """Return the auth-tier, per-IP limiter key.
+
+    Exactly what `_enforce_rate_limit` uses for an unauthenticated auth-tier request.
+    Verification-mail sends charge this same bucket
+    (`services/email_verification.charge_send_budget`) so every signup path shares one budget.
+    """
+    return f"auth:ip:{_client_ip(trusted_proxy_hops)}"
+
+
 def _rate_limit_identifier(trusted_proxy_hops: int) -> str:
     """Per-user identifier when authenticated, else per-IP.
 

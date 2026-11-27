@@ -15699,6 +15699,30 @@ paths:
                 type: object
           description: Response DTO for admin login endpoints.
       summary: Admin login.
+  /api/v1/auth/cancel-signup:
+    post:
+      description: ''
+      operationId: post_cancel_signup
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /verify-email` and `POST /cancel-signup`
+                (token in the body only).
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyEmailRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: 'The emailed "this wasn''t me" link: cancel and delete the still-unverified
+        account.'
   /api/v1/auth/exchange:
     post:
       description: '
@@ -16316,7 +16340,8 @@ paths:
                 title: MessageResponse
                 type: object
           description: Response DTO for `{success, message}` endpoints (resend-verification).
-      summary: Resend verification.
+      summary: Queue a fresh link; one fixed 200 answer for known, unknown and cooled-down
+        addresses.
   /api/v1/auth/sso/options:
     get:
       description: ''
@@ -16589,14 +16614,33 @@ paths:
           description: Response DTO for tenant login info endpoints.
       summary: Tenant login info.
   /api/v1/auth/verify-email:
-    get:
-      description: ''
-      operationId: get_verify_email
+    post:
+      description: '
+
+        The user signs in normally afterwards (password, OAuth or SSO), so a victim
+        tricked into
+
+        clicking someone else''s link is never logged into that account.'
+      operationId: post_verify_email
       parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /verify-email` and `POST /cancel-signup`
+                (token in the body only).
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyEmailRequest
+              type: object
       responses:
         default:
           description: Undocumented response
-      summary: Verify email.
+      summary: Confirm the address behind the emailed single-use token. Mints NO session.
   /api/v1/captcha/challenge:
     get:
       description: ''
@@ -27173,6 +27217,122 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Update tenant settings.
+  /api/v1/tenant/{tenant_slug}/signup-domains:
+    get:
+      description: ''
+      operationId: get_get_signup_domains
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The tenant's own list, the platform list and the effective
+                  (intersected) policy.
+                properties:
+                  domains:
+                    items:
+                      type: string
+                    title: Domains
+                    type: array
+                  effectiveDomains:
+                    items:
+                      type: string
+                    title: Effectivedomains
+                    type: array
+                  platformDomains:
+                    items:
+                      type: string
+                    title: Platformdomains
+                    type: array
+                  restricted:
+                    title: Restricted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - domains
+                - platformDomains
+                - restricted
+                - effectiveDomains
+                title: SignupDomainsResponse
+                type: object
+          description: The tenant's own list, the platform list and the effective
+            (intersected) policy.
+      summary: Read the tenant's signup email-domain allowlist and the effective policy.
+    put:
+      description: ''
+      operationId: put_put_signup_domains
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for PUT /<slug>/signup-domains (empty list
+                removes the restriction).
+              properties:
+                domains:
+                  items:
+                    type: string
+                  title: Domains
+                  type: array
+              required:
+              - domains
+              title: SignupDomainsRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The tenant's own list, the platform list and the effective
+                  (intersected) policy.
+                properties:
+                  domains:
+                    items:
+                      type: string
+                    title: Domains
+                    type: array
+                  effectiveDomains:
+                    items:
+                      type: string
+                    title: Effectivedomains
+                    type: array
+                  platformDomains:
+                    items:
+                      type: string
+                    title: Platformdomains
+                    type: array
+                  restricted:
+                    title: Restricted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - domains
+                - platformDomains
+                - restricted
+                - effectiveDomains
+                title: SignupDomainsResponse
+                type: object
+          description: The tenant's own list, the platform list and the effective
+            (intersected) policy.
+      summary: Replace the tenant's signup allowlist; non-empty = every signup must
+        verify its email.
   /api/v1/tenant/{tenant_slug}/usage:
     get:
       description: ''

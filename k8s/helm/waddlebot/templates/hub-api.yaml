@@ -373,6 +373,22 @@ spec:
               name: {{ .Values.config.dsarSmtp.existingSecret | default "waddlebot-dsar-smtp" }}
               key: DSAR_SMTP_PASSWORD
               optional: true
+        # Outbound email (hub_api/services/email_service.py): optional SMTP AUTH from the
+        # operator-created Secret named by smtp.existingSecret (keys `username`, `password`).
+        # Blank => no AUTH (IP-allowlisted relays). Never rendered from values; not optional
+        # once named, so a missing Secret blocks the pod instead of silently sending unauthenticated.
+        {{- if .Values.smtp.existingSecret }}
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.smtp.existingSecret | quote }}
+              key: username
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.smtp.existingSecret | quote }}
+              key: password
+        {{- end }}
         # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
         # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
         {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
@@ -498,5 +514,9 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
+{{- $smtpEgress := list -}}
+{{- if and .Values.smtp.host .Values.smtp.egress.enabled -}}
+{{- $smtpEgress = list (dict "fqdn" .Values.smtp.host "port" (.Values.smtp.port | default 587)) -}}
+{{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort) "extraFqdns" $smtpEgress) }}
 {{- end }}

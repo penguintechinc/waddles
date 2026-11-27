@@ -4,7 +4,12 @@ import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../services/api', () => ({
-  tenantApi: { getSettings: vi.fn(), updateSettings: vi.fn() },
+  tenantApi: {
+    getSettings: vi.fn(),
+    updateSettings: vi.fn(),
+    getSignupDomains: vi.fn().mockResolvedValue({ data: { domains: [], platformDomains: [], effectiveDomains: [] } }),
+    updateSignupDomains: vi.fn(),
+  },
 }));
 import { tenantApi } from '../../../services/api';
 import TenantSettings from '../TenantSettings';

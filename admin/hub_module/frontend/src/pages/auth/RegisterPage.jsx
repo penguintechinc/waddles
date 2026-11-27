@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { publicApi } from '../../services/api';
+import ResendVerification from './ResendVerification';
 
 function RegisterPage() {
   const navigate = useNavigate();
@@ -16,6 +17,8 @@ function RegisterPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // Account created but pending email verification (or the mail could not be sent yet).
+  const [pending, setPending] = useState(null);
 
   useEffect(() => {
     publicApi.getSignupSettings()
@@ -51,10 +54,16 @@ function RegisterPage() {
       const result = await register(form.email, form.password, form.username);
       if (result?.requiresVerification) {
         setMessage(result.message || 'Check your email to verify your account.');
+        setPending({ email: form.email, error: '' });
       } else {
         navigate('/dashboard');
       }
     } catch (err) {
+      if (err.code === 'verification_email_failed') {
+        // Account exists but the mail did not go out: never a dead end, offer a resend.
+        setPending({ email: form.email, error: err.message });
+        return;
+      }
       setError(err.message || 'Registration failed.');
     } finally {
       setSubmitting(false);
@@ -104,7 +113,11 @@ function RegisterPage() {
           </div>
         )}
 
-        {!message && (
+        {pending && (
+          <ResendVerification initialEmail={pending.email} initialError={pending.error} />
+        )}
+
+        {!message && !pending && (
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <label className="block text-sky-200">
               Username
