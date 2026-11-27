@@ -796,7 +796,13 @@ class TestTetragonEnforced:
                 d["spec"]["kprobes"][0]["selectors"][0]["matchArgs"][0]["values"]
             )
             seen += 1
-            if comp not in shell_ok:
+            # Documented exception: a policy scoped (containerSelector In) to the bucket-init
+            # initContainer only (templates/_seaweedfs_bucket_init.tpl) -- the workload's own
+            # policy for its main container never gains the shell.
+            init_scoped = d["spec"].get("containerSelector", {}).get("matchExpressions") == [
+                {"key": "name", "operator": "In", "values": ["seaweedfs-bucket-init"]}
+            ]
+            if comp not in shell_ok and not init_scoped:
                 assert not (vals & shells), (
                     f"{comp}: shell allowed without a documented reason"
                 )

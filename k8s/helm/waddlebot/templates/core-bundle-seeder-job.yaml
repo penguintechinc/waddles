@@ -4,7 +4,7 @@
 # that both are post-install hooks (2026-10-01 user decision: the schema always comes from
 # that Job, fresh install included) -- ordering between them is by hook-weight within the
 # SAME post-install phase (migrate's SA/Secret at -10, migrate itself at -5,
-# seaweedfs-bucket-init at 1, this Job at 5), not by phase separation: Helm runs a phase's
+# this Job at 5; bucket init is now hub-api's initContainer), not by phase separation: Helm runs a phase's
 # hooks strictly by ascending weight, waiting for each to complete before the next starts,
 # so 0020-0026's tables are guaranteed to exist here. This Job ALSO waits on hub-api's own
 # `/ready` (initContainer below) even though it talks to Postgres/SeaweedFS/Valkey directly,

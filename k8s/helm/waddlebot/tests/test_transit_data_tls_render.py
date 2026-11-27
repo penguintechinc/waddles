@@ -304,10 +304,12 @@ def test_seaweedfs_serves_s3_over_tls_and_probes_verify(values):
         cmd = " ".join(c[probe]["exec"]["command"])
         assert "https://" in cmd and "--cacert /etc/waddles/transit-ca/ca.crt" in cmd and "http://" not in cmd
         assert " -k" not in cmd and "--insecure" not in cmd
-    job = next(d for d in docs if d["kind"] == "Job" and d["metadata"]["name"] == "seaweedfs-bucket-init")
-    jc = job["spec"]["template"]["spec"]["containers"][0]
+    # Bucket init is hub-api's initContainer (fix/escrow-bucket-init-ordering), not a hook Job.
+    hub = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("hub-api-v3"))
+    hub_pod = hub["spec"]["template"]["spec"]
+    jc = next(c for c in hub_pod["initContainers"] if c["name"] == "seaweedfs-bucket-init")
     assert 'ENDPOINT="https://' in jc["command"][-1]
-    assert _mounts_ca(jc, job["spec"]["template"]["spec"])
+    assert _mounts_ca(jc, hub_pod)
 
 
 def _certs(docs):

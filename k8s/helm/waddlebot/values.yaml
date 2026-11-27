@@ -1028,7 +1028,20 @@ infrastructure:
       callTimeoutSeconds: 30      # per aws call, readiness probe included (aws-cli v2 python cold start is slow on a small CPU limit)
       waitMaxSeconds: 180         # wall-clock retry window for the S3 readiness probe
       totalBudgetSeconds: 480     # whole-script budget; script exits itself before the Job deadline
-      activeDeadlineSeconds: 600  # Job-wide deadline (scheduling + pull + script + termination)
+      activeDeadlineSeconds: 600  # Job-wide deadline (only when rendered as the hub-api-disabled hook Job)
+      # Tetragon execve allowlist for the bucket-init container when it runs as hub-api's
+      # initContainer (default). Scoped by containerSelector to THAT container only -- hub-api's
+      # own allowlist never gains a shell. Paths as resolved in bucketInitImage (Amazon Linux,
+      # /bin -> usr/bin; the script calls aws by absolute path). Re-verify on an image bump.
+      execBinaries:
+        - /bin/sh
+        - /usr/bin/sh
+        - /usr/bin/date
+        - /usr/bin/timeout
+        - /usr/bin/grep
+        - /usr/bin/tail
+        - /usr/bin/sleep
+        - /usr/local/bin/aws
       resources:
         requests:
           memory: "128Mi"
@@ -1077,10 +1090,10 @@ infrastructure:
       dataPlane:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
-      # templates/infrastructure/seaweedfs.yaml's seaweedfs-bucket-init Job
-      # ONLY -- Admin (bucket create/head + PutBucketEncryption), unscoped
-      # since it must be able to create buckets that don't exist yet. Never
-      # mounted by a long-running Deployment.
+      # The seaweedfs-bucket-init container ONLY (templates/_seaweedfs_bucket_init.tpl:
+      # hub-api initContainer, or the hook Job when hub-api is disabled) -- Admin (bucket
+      # create/head + PutBucketEncryption), unscoped since it must be able to create buckets
+      # that don't exist yet. Never in a long-running container's env (env is per-container).
       bucketInit:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"

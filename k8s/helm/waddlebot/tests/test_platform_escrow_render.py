@@ -246,21 +246,24 @@ def test_bucket_init_creates_and_versions_the_escrow_bucket(
     helm_available: None,
 ) -> None:
     docs = _render()
+    # Bucket init is hub-api's initContainer (fix/escrow-bucket-init-ordering), not a hook Job.
     scripts = [
         c["command"][-1]
         for d in docs
-        if d.get("kind") == "Job" and "bucket-init" in d["metadata"]["name"]
-        for c in d["spec"]["template"]["spec"]["containers"]
+        if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("hub-api-v3")
+        for c in d["spec"]["template"]["spec"].get("initContainers", [])
+        if c["name"] == "seaweedfs-bucket-init"
     ]
-    assert len(scripts) == 1, "expected exactly one bucket-init Job"
+    assert len(scripts) == 1, "expected exactly one bucket-init initContainer on hub-api"
     assert f'"{_BUCKET}"' in scripts[0]
     assert "put-bucket-versioning" in scripts[0] and "Status=Enabled" in scripts[0]
     off = _render("infrastructure.seaweedfs.escrow.versioning=false")
     assert "put-bucket-versioning" not in next(
         c["command"][-1]
         for d in off
-        if d.get("kind") == "Job" and "bucket-init" in d["metadata"]["name"]
-        for c in d["spec"]["template"]["spec"]["containers"]
+        if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("hub-api-v3")
+        for c in d["spec"]["template"]["spec"].get("initContainers", [])
+        if c["name"] == "seaweedfs-bucket-init"
     )
 
 
