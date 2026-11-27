@@ -1,32 +1,60 @@
 import { useState } from 'react';
 import { mfaApi } from '../../services/api';
 import CodeInput from './CodeInput';
+import MfaChangeForm from './MfaChangeForm';
 import { mfaError } from './mfaErrors';
 
 /**
  * Email one-time-code enrollment: sends a code to the account's verified
- * address, then activates the method with it. Calls `onEnrolled(recoveryCodes)`
+ * address, then activates the method with it. When another method is already on
+ * (`reauth`), the first send needs re-authentication (password when the account
+ * has one + a code from the existing factor). Calls `onEnrolled(recoveryCodes)`
  * (an empty list when the user already holds recovery codes).
  */
-export default function EmailSetup({ onEnrolled, onCancel }) {
+export default function EmailSetup({ onEnrolled, onCancel, reauth = false, hasPassword = true }) {
   const [sent, setSent] = useState(false);
+  const [reauthBody, setReauthBody] = useState(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const begin = async (body) => {
+    await mfaApi.enrollEmail(body);
+    setReauthBody(body || null);
+    setSent(true);
+    console.debug('[EmailSetup] Code sent');
+  };
 
   const send = async () => {
     setBusy(true);
     setError('');
     try {
-      await mfaApi.enrollEmail();
-      setSent(true);
-      console.debug('[EmailSetup] Code sent');
+      // A resend restarts enrollment: with a factor active it needs a fresh re-auth.
+      if (reauth && sent) {
+        setSent(false);
+        setReauthBody(null);
+        return;
+      }
+      await begin(reauthBody || undefined);
     } catch (err) {
       setError(mfaError(err, 'Could not send the code.').message);
     } finally {
       setBusy(false);
     }
   };
+
+  if (!sent && reauth) {
+    return (
+      <MfaChangeForm
+        title="Confirm it's you to add email codes"
+        submitLabel="Continue"
+        hasPassword={hasPassword}
+        canEmail={false}
+        submit={begin}
+        onCancel={onCancel}
+      />
+    );
+  }
 
   const confirm = async (e) => {
     e.preventDefault();

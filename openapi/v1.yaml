@@ -17043,7 +17043,60 @@ paths:
                 title: TempPasswordLoginResponse
                 type: object
           description: Response DTO for temp password login endpoints.
-      summary: Temp password login.
+        '202':
+          content:
+            application/json:
+              schema:
+                description: '202 body after a correct password when a second factor
+                  is enrolled (no session yet).
+
+
+                  `mfaToken` is an opaque, single-use, 10-minute MFA-pending value
+                  -- not a JWT, carries no
+
+                  scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+                  lists the usable
+
+                  factors, preferred (TOTP) first; `recovery` is always last.'
+                properties:
+                  expiresIn:
+                    title: Expiresin
+                    type: integer
+                  methods:
+                    items:
+                      type: string
+                    title: Methods
+                    type: array
+                  mfaRequired:
+                    title: Mfarequired
+                    type: boolean
+                  mfaToken:
+                    title: Mfatoken
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - mfaRequired
+                - mfaToken
+                - methods
+                - expiresIn
+                title: MfaRequiredResponse
+                type: object
+          description: '202 body after a correct password when a second factor is
+            enrolled (no session yet).
+
+
+            `mfaToken` is an opaque, single-use, 10-minute MFA-pending value -- not
+            a JWT, carries no
+
+            scope and is accepted only by `POST /api/v1/auth/mfa/login/*`. `methods`
+            lists the usable
+
+            factors, preferred (TOTP) first; `recovery` is always last.'
+      summary: Temp password login; 202 + MFA-pending state when the named account
+        has a factor.
   /api/v1/auth/tenant/{slug}:
     get:
       description: ''
@@ -17081,7 +17134,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Verify email.
+      summary: Verify email; answers 202 + MFA-pending state (no session) when a factor
+        is enrolled.
   /api/v1/captcha/challenge:
     get:
       description: ''

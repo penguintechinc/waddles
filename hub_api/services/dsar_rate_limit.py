@@ -113,6 +113,24 @@ def _local_once(key: str, ttl: int, now: float) -> bool:
     return True
 
 
+def _local_hit(key: str, window: int, now: float) -> int:
+    """Record one hit in a bounded in-process sliding window; return the hits now in it."""
+    hits = [t for t in _LOCAL.get(key, []) if t > now - window]
+    if key not in _LOCAL and not _evict_for_room(
+        _LOCAL, now, lambda v, n: bool(v) and v[-1] > n - 3600
+    ):
+        _LOCAL.popitem(last=False)  # least recently used rate bucket
+    hits.append(now)
+    _LOCAL[key] = hits
+    _LOCAL.move_to_end(key)
+    return len(hits)
+
+
+def _local_key(key: str, prefix: str) -> str:
+    """Local-table key: DSAR keys stay bare (unchanged layout), other limiters are namespaced."""
+    return key if prefix == _PREFIX else f"{prefix}{key}"
+
+
 async def allow(
     key: str,
     limit: int,
@@ -129,34 +147,83 @@ async def allow(
     """
     client = _shared_client(on_unavailable)
     if client is None:
-        local_key = key if prefix == _PREFIX else f"{prefix}{key}"
-        return _local_allow(local_key, limit, window_seconds, time.time())
-    redis_key = f"{prefix}rl:{key}"
+        return _local_allow(_local_key(key, prefix), limit, window_seconds, time.time())
+    return await _redis_hit(client, f"{prefix}rl:{key}", window_seconds, on_unavailable) <= limit
+
+
+async def _redis_hit(
+    client: Any, redis_key: str, window_seconds: int, on_unavailable: Callable[[], ApiError]
+) -> int:
+    """Atomic fixed-window `INCR` + `EXPIRE NX`; the count after this hit (fails closed)."""
     try:
         async with asyncio.timeout(_BACKEND_TIMEOUT_SECONDS):
             pipe = client.pipeline(transaction=True)
             pipe.incr(redis_key)
             pipe.expire(redis_key, window_seconds, nx=True)
-            count = int((await pipe.execute())[0])
+            return int((await pipe.execute())[0])
     except Exception as exc:
         logger.error("dsar.limiter_backend_error", extra={"err": type(exc).__name__})
         raise on_unavailable() from exc
-    return count <= limit
 
 
-async def once(key: str, ttl_seconds: int) -> bool:
+async def hit(
+    key: str,
+    window_seconds: int,
+    *,
+    prefix: str = _PREFIX,
+    on_unavailable: Callable[[], ApiError] = unavailable,
+) -> int:
+    """Record one hit on `key` and return how many hits the current window holds.
+
+    Same backends and fail-closed policy as :func:`allow`; callers that need the count itself
+    (exponential backoff after N failures) use this instead of a yes/no budget.
+    """
+    client = _shared_client(on_unavailable)
+    if client is None:
+        return _local_hit(_local_key(key, prefix), window_seconds, time.time())
+    return await _redis_hit(client, f"{prefix}rl:{key}", window_seconds, on_unavailable)
+
+
+async def once(
+    key: str,
+    ttl_seconds: int,
+    *,
+    prefix: str = _PREFIX,
+    on_unavailable: Callable[[], ApiError] = unavailable,
+) -> bool:
     """Atomically claim `key` for `ttl_seconds`; False when it was already claimed (a replay).
 
-    Raises `ApiError(503)` when the configured shared store cannot answer (fail closed).
+    Raises the caller's 503 (`on_unavailable`, default `DSAR_UNAVAILABLE`) when the configured
+    shared store cannot answer (fail closed).
     """
     ttl = max(1, int(ttl_seconds))
-    client = _shared_client()
+    client = _shared_client(on_unavailable)
     if client is None:
-        return _local_once(key, ttl, time.time())
+        return _local_once(_local_key(key, prefix), ttl, time.time())
     try:
         async with asyncio.timeout(_BACKEND_TIMEOUT_SECONDS):
-            stored = await client.set(f"{_PREFIX}once:{key}", "1", nx=True, ex=ttl)
+            stored = await client.set(f"{prefix}once:{key}", "1", nx=True, ex=ttl)
     except Exception as exc:
         logger.error("dsar.replay_backend_error", extra={"err": type(exc).__name__})
-        raise unavailable() from exc
+        raise on_unavailable() from exc
     return bool(stored)
+
+
+async def is_claimed(
+    key: str,
+    *,
+    prefix: str = _PREFIX,
+    on_unavailable: Callable[[], ApiError] = unavailable,
+) -> bool:
+    """True while a :func:`once` marker for `key` is live (read only; never claims it)."""
+    client = _shared_client(on_unavailable)
+    if client is None:
+        expiry = _LOCAL_ONCE.get(_local_key(key, prefix))
+        return expiry is not None and expiry > time.time()
+    try:
+        async with asyncio.timeout(_BACKEND_TIMEOUT_SECONDS):
+            present = await client.exists(f"{prefix}once:{key}")
+    except Exception as exc:
+        logger.error("dsar.replay_backend_error", extra={"err": type(exc).__name__})
+        raise on_unavailable() from exc
+    return bool(present)

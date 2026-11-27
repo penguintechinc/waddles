@@ -516,11 +516,15 @@ async def register(data: RegisterRequest) -> tuple[Any, int]:
 # route also inserts nothing itself, but auth_service.verify_email()'s own
 # update_async + hub_sessions insert_async chain hits the same pattern).
 async def verify_email() -> tuple[Any, int]:
-    """Verify email."""
+    """Verify email; answers 202 + MFA-pending state (no session) when a factor is enrolled."""
     async_dal, dal = _dal()
     token = request.args.get("token", "")
     try:
         result = await auth_service.verify_email(async_dal, dal, _cfg(), token=token)
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("verify-email: address verified, second factor required for a session")
+        body, status = _mfa_required(mfa)
+        return jsonify_dto(body, status)
     except ApiError as exc:
         return _err(exc)
     response, status = jsonify_dto(
@@ -634,16 +638,20 @@ async def admin_login(
 
 @auth_bp.route("/temp-password", methods=["POST"])
 @validate_request(TempPasswordLoginRequest)
-@validate_response(TempPasswordLoginResponse)
+@validate_response(TempPasswordLoginResponse, 200)
+@validate_response(MfaRequiredResponse, 202)
 async def temp_password_login(
     data: TempPasswordLoginRequest,
-) -> TempPasswordLoginResponse | tuple[dict[str, object], int]:
-    """Temp password login."""
+) -> TempPasswordLoginResponse | tuple[MfaRequiredResponse, int] | tuple[dict[str, object], int]:
+    """Temp password login; 202 + MFA-pending state when the named account has a factor."""
     async_dal, dal = _dal()
     try:
         result = await auth_service.temp_password_login(
             async_dal, dal, _cfg(), identifier=data.identifier, password=data.password
         )
+    except auth_service.MfaRequiredError as mfa:
+        logger.info("temp-password: accepted, second factor required")
+        return _mfa_required(mfa)
     except ApiError as exc:
         return _err(exc)
     issue_session_cookie(result.token)

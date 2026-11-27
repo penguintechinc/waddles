@@ -6,9 +6,10 @@ security properties); these handlers only translate HTTP <-> service calls.
 Signed-in (tenant_middleware, the caller's own account only):
 
   GET  /status                     methods + states, email availability, recovery codes left
-  POST /totp/enroll                new PENDING secret -> otpauth URI (QR rendered client-side)
+  POST /totp/enroll                new PENDING secret -> otpauth URI (QR rendered client-side);
+                                   with a factor already ACTIVE: body {password?, code} re-auth
   POST /totp/confirm               first valid code activates TOTP -> 10 recovery codes (once)
-  POST /email/enroll               verified address required -> emails a code
+  POST /email/enroll               verified address required -> emails a code (same gate)
   POST /email/confirm              code activates the email method (-> recovery codes if none)
   POST /email/send-code            email a code for disable / regenerate
   POST /disable                    re-auth (password or fresh sign-in) + valid code
@@ -18,6 +19,12 @@ Pre-auth (the opaque MFA-pending token from a 202 `/auth/login` answer; no JWT e
 
   POST /login/email                email a sign-in code for the pending login
   POST /login/verify               TOTP / email / recovery code -> the real session (cookies)
+
+Both pre-auth routes are limited per client IP (fail closed, shared limiter) on top of the
+service's per-account budgets.
+
+Tenant: the caller's session tenant (`tenant_middleware`) is passed to the service for the audit
+trail only. MFA decisions and the core kill switches never take a request-chosen tenant.
 """
 
 from __future__ import annotations
@@ -34,14 +41,21 @@ from quart_schema import validate_request, validate_response
 
 from blueprints.v1.auth import LoginResponse, _login_user_dto
 from config import HubAPIConfig
-from services import auth_service, mfa_service, mfa_stepup
+from services import auth_service, dsar_rate_limit, mfa_service, mfa_stepup
 from services.current_user import get_current_user_id
-from services.errors import ApiError
+from services.errors import ApiError, bad_request
+from services.rate_limiting import _client_ip
 from services.session_cookie import issue_session_cookie
 
 logger = logging.getLogger(__name__)
 
 mfa_bp = Blueprint("v1_mfa", __name__, url_prefix="/api/v1/auth/mfa")
+
+#: Per-client-IP budgets for the pre-auth routes: (hits, window seconds).
+IP_VERIFY_LIMIT: tuple[int, int] = (30, 900)
+IP_EMAIL_LIMIT: tuple[int, int] = (10, 900)
+_IP_PREFIX = "mfa-ip:"
+_MAX_FIELD = 256
 
 
 @dataclass(slots=True, frozen=True)
@@ -157,9 +171,45 @@ def _envelope() -> Any | None:
 
 
 def _tenant_slug() -> str:
-    """The caller's tenant (set by `tenant_middleware`)."""
+    """The caller's session tenant (`tenant_middleware`) -- audit trail only, never a gate."""
     ctx = get_tenant_context(request)
     return str(ctx.tenant_slug) if ctx is not None else DEFAULT_TENANT_SLUG
+
+
+async def _limit_ip(route: str, limit: tuple[int, int]) -> None:
+    """Spend one unit of this client IP's budget for a pre-auth route (429 / fail-closed 503)."""
+    cfg = cast(HubAPIConfig, current_app.config["HUB_API_CONFIG"])
+    ip = _client_ip(cfg.trusted_proxy_hops)
+    allowed = await dsar_rate_limit.allow(
+        f"{route}:{ip}",
+        limit[0],
+        limit[1],
+        prefix=_IP_PREFIX,
+        on_unavailable=mfa_service.unavailable_error,
+    )
+    if not allowed:
+        logger.warning("mfa %s refused: per-IP limit", route)
+        raise mfa_service.rate_limited_error()
+
+
+async def _reauth_fields() -> tuple[str | None, str | None]:
+    """Optional `{password, code}` body for enrollment while another factor is ACTIVE.
+
+    The first factor is enrolled with no body; later ones need re-auth + a code (the service
+    decides). Validated here: absent or strings of bounded length only.
+    """
+    body = await request.get_json(silent=True)
+    if body is None:
+        return None, None
+    if not isinstance(body, dict):
+        raise bad_request("Request body must be a JSON object")
+    out: list[str | None] = []
+    for key in ("password", "code"):
+        value = body.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > _MAX_FIELD):
+            raise bad_request(f"Invalid {key}")
+        out.append(value)
+    return out[0], out[1]
 
 
 @mfa_bp.route("/status", methods=["GET"])
@@ -169,9 +219,7 @@ async def mfa_status() -> MfaStatusResponse | tuple[dict[str, object], int]:
     """The caller's MFA methods and their states."""
     async_dal, dal = _dal()
     try:
-        state = await mfa_service.get_status(
-            async_dal, dal, user_id=get_current_user_id(request), tenant_slug=_tenant_slug()
-        )
+        state = await mfa_service.get_status(async_dal, dal, user_id=get_current_user_id(request))
     except ApiError as exc:
         return _err(exc)
     return MfaStatusResponse(
@@ -193,12 +241,16 @@ async def totp_enroll() -> TotpEnrollResponse | tuple[dict[str, object], int]:
     """Start (or restart) TOTP enrollment; the secret stays PENDING until confirmed."""
     async_dal, dal = _dal()
     try:
+        password, code = await _reauth_fields()
         enrollment = await mfa_service.start_totp_enrollment(
             async_dal,
             dal,
             _envelope(),
             user_id=get_current_user_id(request),
             tenant_slug=_tenant_slug(),
+            password=password,
+            code=code,
+            claims=mfa_stepup.request_claims(request),
         )
     except ApiError as exc:
         logger.info("mfa totp enroll refused (%s)", exc.code)
@@ -237,8 +289,16 @@ async def email_enroll() -> EmailSentResponse | tuple[dict[str, object], int]:
     """Start email-code enrollment (verified address required); emails a confirmation code."""
     async_dal, dal = _dal()
     try:
+        password, code = await _reauth_fields()
         await mfa_service.start_email_enrollment(
-            async_dal, dal, user_id=get_current_user_id(request), tenant_slug=_tenant_slug()
+            async_dal,
+            dal,
+            _envelope(),
+            user_id=get_current_user_id(request),
+            tenant_slug=_tenant_slug(),
+            password=password,
+            code=code,
+            claims=mfa_stepup.request_claims(request),
         )
     except ApiError as exc:
         logger.info("mfa email enroll refused (%s)", exc.code)
@@ -257,6 +317,7 @@ async def email_confirm(data: CodeRequest) -> RecoveryCodesResponse | tuple[dict
         codes = await mfa_service.confirm_email_enrollment(
             async_dal,
             dal,
+            _envelope(),
             user_id=get_current_user_id(request),
             code=data.code,
             tenant_slug=_tenant_slug(),
@@ -341,6 +402,7 @@ async def login_email(data: LoginEmailRequest) -> EmailSentResponse | tuple[dict
     """Email a sign-in code for a pending (password-verified) login."""
     async_dal, dal = _dal()
     try:
+        await _limit_ip("login-email", IP_EMAIL_LIMIT)
         await mfa_service.send_login_email_code(async_dal, dal, token=data.mfaToken)
     except ApiError as exc:
         logger.info("mfa login email refused (%s)", exc.code)
@@ -356,6 +418,7 @@ async def login_verify(data: LoginVerifyRequest) -> LoginResponse | tuple[dict[s
     async_dal, dal = _dal()
     cfg = cast(HubAPIConfig, current_app.config["HUB_API_CONFIG"])
     try:
+        await _limit_ip("login-verify", IP_VERIFY_LIMIT)
         result = await auth_service.complete_mfa_login(
             async_dal,
             dal,

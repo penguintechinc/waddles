@@ -118,8 +118,35 @@ def normalize_recovery_code(code: str) -> str:
 
 
 def hash_recovery_code(code: str) -> str:
-    """SHA-256 hex of the normalized code (50-bit random input: a fast hash is sufficient)."""
+    """LEGACY unkeyed SHA-256 of the normalized code -- never used for storage any more.
+
+    Rows written this way (dev only, pre alembic `0146`) are deleted by that migration; kept
+    so the normalization contract stays pinned by its test.
+    """
     return hashlib.sha256(normalize_recovery_code(code).encode("ascii", "ignore")).hexdigest()
+
+
+#: Domain-separation label for the recovery-code pepper derived from the envelope data key.
+RECOVERY_PEPPER_INFO: Final = b"waddles-mfa-recovery-pepper/v1"
+
+
+def recovery_pepper(data_key: bytes) -> bytes:
+    """Derive the recovery-code pepper from an envelope data subkey (domain separated)."""
+    if len(data_key) < 16:
+        raise ValueError("recovery pepper needs at least 128 bits of key material")
+    return hmac.new(data_key, RECOVERY_PEPPER_INFO, hashlib.sha256).digest()
+
+
+def hmac_recovery_code(pepper: bytes, code: str) -> str:
+    """HMAC-SHA256 hex of the normalized code under the server-side pepper.
+
+    A leaked table alone is not testable offline: without the pepper (held by the envelope /
+    KMS service, never in the database) the 50-bit codes cannot be brute forced.
+    """
+    if len(pepper) < 16:
+        raise ValueError("recovery pepper too short")
+    message = normalize_recovery_code(code).encode("ascii", "ignore")
+    return hmac.new(pepper, message, hashlib.sha256).hexdigest()
 
 
 def new_email_code() -> str:

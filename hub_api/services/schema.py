@@ -555,6 +555,8 @@ def bind_mfa_tables(dal: Any, *, migrate: bool = False) -> None:
         "hub_user_mfa_recovery_codes",
         Field("user_id", "integer", notnull=True),
         Field("code_hash", "string", length=64, notnull=True),
+        # Envelope DEK version whose derived pepper keyed `code_hash` (alembic 0146).
+        Field("key_version", "integer", notnull=True),
         Field("used_at", "datetime"),
         Field("created_at", "datetime"),
         migrate=migrate,

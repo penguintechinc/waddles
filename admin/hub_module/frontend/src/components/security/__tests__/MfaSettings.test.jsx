@@ -144,4 +144,37 @@ describe('MfaSettings', () => {
     await waitFor(() => expect(mfaApi.confirmEmail).toHaveBeenCalledWith('111222'));
     expect(await within(screen.getByTestId('mfa-method-email')).findByText('On')).toBeInTheDocument();
   });
+
+  it('adding TOTP while email is on requires password + a code first', async () => {
+    mfaApi.status.mockResolvedValue(status({ email: { status: 2, available: true }, recoveryCodesRemaining: 10 }));
+    mfaApi.enrollTotp.mockResolvedValue({ data: { otpauthUri: 'otpauth://totp/x?secret=A', secret: 'A' } });
+    render(<MfaSettings />);
+    fireEvent.click(within(await screen.findByTestId('mfa-method-totp')).getByRole('button', { name: 'Set up' }));
+    const form = await screen.findByTestId('mfa-change-form');
+    expect(mfaApi.enrollTotp).not.toHaveBeenCalled();
+    fireEvent.change(within(form).getByLabelText('Current password'), { target: { value: 'pw-1234567' } });
+    fireEvent.change(within(form).getByLabelText(/Authenticator, email or recovery code/), {
+      target: { value: '445566' },
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(mfaApi.enrollTotp).toHaveBeenCalledWith({ password: 'pw-1234567', code: '445566' }));
+    expect(await screen.findByTestId('totp-secret')).toHaveTextContent('A');
+  });
+
+  it('adding email while TOTP is on requires re-auth before a code is sent', async () => {
+    mfaApi.status.mockResolvedValue(status({ totp: { status: 2, available: true }, recoveryCodesRemaining: 10 }));
+    mfaApi.enrollEmail.mockRejectedValueOnce({
+      response: { data: { error: { code: 'MFA_INVALID_CODE', message: 'Invalid verification code' } } },
+    });
+    render(<MfaSettings />);
+    fireEvent.click(within(await screen.findByTestId('mfa-method-email')).getByRole('button', { name: 'Set up' }));
+    const form = await screen.findByTestId('mfa-change-form');
+    fireEvent.change(within(form).getByLabelText('Current password'), { target: { value: 'pw-1234567' } });
+    fireEvent.change(within(form).getByLabelText(/Authenticator, email or recovery code/), {
+      target: { value: '000000' },
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid verification code');
+    expect(screen.queryByLabelText('Email code')).toBeNull();
+  });
 });

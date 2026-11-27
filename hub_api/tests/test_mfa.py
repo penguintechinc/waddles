@@ -15,18 +15,22 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import bcrypt
 import jwt
 import pytest
+from flask_core.auth import create_jwt_token as jwt_mint
 from quart import Quart
 from quart_schema import QuartSchema
 
 from app import bridge_session_cookie_to_bearer
+from blueprints.v1 import mfa as mfa_bp_module
 from blueprints.v1.auth import auth_bp
 from blueprints.v1.mfa import mfa_bp
 from services import dsar_rate_limit, mfa_email, mfa_service, totp
 from services.envelope import KmsProviderRegistry, TenantEnvelopeService
+from services.errors import ApiError
 from services.session_cookie import SESSION_COOKIE_NAME
-from tests.conftest import make_user_token
+from tests.conftest import TENANT_SLUG, make_user_token
 from tests.envelope.fakes import CountingPlatformKek, FakeGate, InMemoryEnvelopeRepo
 from tests.test_session_lifecycle import PASSWORD, _config, _seed_user
 
@@ -34,25 +38,54 @@ LOGIN = "/api/v1/auth/login"
 MFA = "/api/v1/auth/mfa"
 
 
+class EmailUnavailableError(RuntimeError):
+    """Mirror of `services.email_service.EmailUnavailableError` (the transport's failure base)."""
+
+    reason = "unavailable"
+
+
 class FakeTransport:
-    """Stands in for `services.email_service` (the SMTP boundary): records, never sends."""
+    """Stands in for `services.email_service` (the SMTP boundary): records, never sends.
+
+    Exactly the transport's public contract (PR #1541): `is_configured()`,
+    `async send_email(*, to_email, subject, text_body, kind, html_body=None)`, and the
+    `EmailUnavailableError` it raises.
+    """
+
+    EmailUnavailableError = EmailUnavailableError
 
     def __init__(self, *, configured: bool = True) -> None:
         """Start with an empty outbox."""
         self.configured = configured
+        self.fail_with: BaseException | None = None
         self.sent: list[dict[str, str]] = []
 
     def is_configured(self) -> bool:
         """Whether SMTP is configured."""
         return self.configured
 
-    async def send_email(self, *, to: str, subject: str, text: str) -> None:
-        """Record the message."""
-        self.sent.append({"to": to, "subject": subject, "text": text})
+    async def send_email(
+        self,
+        *,
+        to_email: str,
+        subject: str,
+        text_body: str,
+        kind: str,
+        html_body: str | None = None,
+    ) -> None:
+        """Record the message (or raise the configured transport failure)."""
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.sent.append({"to": to_email, "subject": subject, "text": text_body, "kind": kind})
+
+    def of_kind(self, kind: str) -> list[dict[str, str]]:
+        """Messages of one `kind` label."""
+        return [m for m in self.sent if m["kind"] == kind]
 
     def last_code(self) -> str:
-        """The 6-digit code in the newest message."""
-        return next(w.rstrip(".") for w in self.sent[-1]["text"].split() if w.rstrip(".").isdigit())
+        """The 6-digit code in the newest verification-code message."""
+        text = self.of_kind("mfa_code")[-1]["text"]
+        return next(w.rstrip(".") for w in text.split() if w.rstrip(".").isdigit())
 
 
 @pytest.fixture(autouse=True)
@@ -353,15 +386,25 @@ class TestLoginStep:
         assert last is not None and last.status_code == 429
         assert (await last.get_json())["error"]["code"] == "MFA_RATE_LIMITED"
 
-    async def test_kill_switch_restores_single_factor_login(
-        self, client: Any, user: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    async def test_kill_switch_still_challenges_enrolled_users(
+        self,
+        client: Any,
+        user: SimpleNamespace,
+        auth_db: Any,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        await _enroll_totp(client, user.headers)
+        """`waddles.disable-mfa` ON blocks NEW enrollment only -- never a silent downgrade."""
+        secret, _ = await _enroll_totp(client, user.headers)
         monkeypatch.setenv("FLAG_WADDLES_DISABLE_MFA", "true")
-        login = await client.post(LOGIN, json={"email": "alice@example.com", "password": PASSWORD})
-        assert login.status_code == 200
+        body = await _start_login(client)  # 202 + no cookie: the second factor is still required
+        assert body["mfaRequired"] is True and body["methods"] == ["totp", "recovery"]
+        ok = await _verify(client, body["mfaToken"], "totp", _now_code(secret))
+        assert ok.status_code == 200, await ok.get_data()
         enroll = await client.post(f"{MFA}/email/enroll", headers=user.headers)
         assert (await enroll.get_json())["error"]["code"] == "MFA_DISABLED"
+        other = _auth(_seed_user(auth_db, email="carol@example.com"))
+        totp_enroll = await client.post(f"{MFA}/totp/enroll", headers=other)
+        assert (await totp_enroll.get_json())["error"]["code"] == "MFA_DISABLED"
 
 
 class TestEmailOtp:
@@ -443,7 +486,8 @@ class TestEmailOtp:
             await client.post(f"{MFA}/login/email", json={"mfaToken": token})
         capped = await client.post(f"{MFA}/login/email", json={"mfaToken": token})
         assert capped.status_code == 429
-        assert len(transport.sent) == 1 + mfa_service.MAX_EMAIL_SENDS_PER_CHALLENGE  # enroll + cap
+        # enroll + the per-challenge cap (the factor-added notice is a different kind)
+        assert len(transport.of_kind("mfa_code")) == 1 + mfa_service.MAX_EMAIL_SENDS_PER_CHALLENGE
 
     async def test_wrong_email_codes_count_attempts(
         self, client: Any, user: SimpleNamespace, transport: FakeTransport
@@ -511,3 +555,350 @@ class TestDisable:
         assert resp.status_code == 200 and len(new) == 10 and not set(new) & set(old)
         stale = await _verify(client, (await _start_login(client))["mfaToken"], "recovery", old[1])
         assert stale.status_code == 401
+
+
+# -- security review (PR #1540) regressions ----------------------------------------------------
+
+
+def _wrong(secret: str) -> str:
+    """A 6-digit code that is not the current TOTP code."""
+    return "000000" if _now_code(secret) != "000000" else "111111"
+
+
+async def _enroll_email_only(
+    client: Any, headers: dict[str, str], transport: FakeTransport
+) -> list[str]:
+    """Enroll + confirm the email method as the FIRST factor; returns its recovery codes."""
+    resp = await client.post(f"{MFA}/email/enroll", headers=headers)
+    assert resp.status_code == 200, await resp.get_data()
+    confirm = await client.post(
+        f"{MFA}/email/confirm", headers=headers, json={"code": transport.last_code()}
+    )
+    assert confirm.status_code == 200, await confirm.get_data()
+    codes: list[str] = (await confirm.get_json())["recoveryCodes"]
+    return codes
+
+
+def _fresh_signin_headers(user_id: int, *, amr: list[str]) -> dict[str, str]:
+    """A session minted moments ago (auth_time = now) with the given `amr`."""
+    token = jwt_mint(
+        user_id=str(user_id),
+        username="oauth",
+        email="oauth@example.com",
+        roles=["viewer"],
+        tenant=TENANT_SLUG,
+        scope="",
+        amr=amr,
+        auth_time=int(time.time()),
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+class TestKillSwitchScope:
+    """Core kill switches are read at GLOBAL scope only; request tenants never flip them."""
+
+    async def test_tenant_slug_cannot_flip_the_kill_switch(
+        self, client: Any, user: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await _enroll_totp(client, user.headers)
+        seen: list[str] = []
+
+        async def tenant_scoped_flag(flag: str, *, tenant: str, **_: Any) -> bool:
+            # The flag is ON for every tenant EXCEPT the global/system scope.
+            seen.append(tenant)
+            return flag == mfa_service.FLAG_DISABLE_MFA and tenant != "system"
+
+        monkeypatch.setattr(mfa_service, "feature_enabled", tenant_scoped_flag)
+        resp = await client.post(
+            LOGIN,
+            json={"email": "alice@example.com", "password": PASSWORD, "tenantSlug": TENANT_SLUG},
+        )
+        assert resp.status_code == 202, await resp.get_data()
+        assert (await resp.get_json())["mfaRequired"] is True
+        assert seen and set(seen) == {"system"}
+
+    async def test_unknown_or_inactive_tenant_rejected_before_mfa(
+        self, client: Any, user: SimpleNamespace, auth_db: Any
+    ) -> None:
+        await _enroll_totp(client, user.headers)
+        dal = auth_db.dal
+        dal.tenants.insert(slug="dormant", display_name="Dormant", is_active=False)
+        dal.commit()
+        for slug in ("no-such-tenant", "dormant"):
+            resp = await client.post(
+                LOGIN,
+                json={"email": "alice@example.com", "password": PASSWORD, "tenantSlug": slug},
+            )
+            assert resp.status_code == 401, (slug, await resp.get_data())
+        purpose = dal.hub_mfa_challenges.purpose == mfa_service.PURPOSE_LOGIN
+        assert dal(purpose).count() == 0  # no MFA decision was ever made
+
+
+class TestEnrollmentGate:
+    async def test_stolen_session_cannot_add_totp_when_email_active(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        await _enroll_email_only(client, user.headers, transport)
+        # A stolen session alone (no password, no code): refused, no secret handed out.
+        bare = await client.post(f"{MFA}/totp/enroll", headers=user.headers)
+        bare_body = await bare.get_json()
+        assert bare.status_code == 401 and "secret" not in bare_body
+        assert bare_body["error"]["code"] == "REAUTH_FAILED"
+        # Password but no valid code from the existing (email) factor: still refused.
+        no_code = await client.post(
+            f"{MFA}/totp/enroll", headers=user.headers, json={"password": PASSWORD, "code": ""}
+        )
+        assert (await no_code.get_json())["error"]["code"] == "MFA_INVALID_CODE"
+        # Re-auth + a valid emailed code: allowed.
+        sent = await client.post(f"{MFA}/email/send-code", headers=user.headers)
+        assert sent.status_code == 200, await sent.get_data()
+        ok = await client.post(
+            f"{MFA}/totp/enroll",
+            headers=user.headers,
+            json={"password": PASSWORD, "code": transport.last_code()},
+        )
+        assert ok.status_code == 200, await ok.get_data()
+
+    async def test_stolen_session_cannot_add_email_when_totp_active(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        secret, _ = await _enroll_totp(client, user.headers)
+        bare = await client.post(f"{MFA}/email/enroll", headers=user.headers)
+        assert (await bare.get_json())["error"]["code"] == "REAUTH_FAILED"
+        assert transport.of_kind("mfa_code") == []
+        ok = await client.post(
+            f"{MFA}/email/enroll",
+            headers=user.headers,
+            json={"password": PASSWORD, "code": _now_code(secret)},
+        )
+        assert ok.status_code == 200, await ok.get_data()
+
+    async def test_fresh_oauth_session_alone_cannot_add_or_disable_a_factor(
+        self, client: Any, auth_db: Any, transport: FakeTransport
+    ) -> None:
+        uid = _seed_user(auth_db, email="oauth@example.com", password=None)
+        secret, _ = await _enroll_totp(client, _auth(uid))
+        no_mfa = _fresh_signin_headers(uid, amr=["ext"])  # fresh IdP sign-in, no MFA in it
+        resp = await client.post(
+            f"{MFA}/disable",
+            headers=no_mfa,
+            json={"method": "totp", "code": _now_code(secret)},
+        )
+        assert (await resp.get_json())["error"]["code"] == "REAUTH_REQUIRED"
+        add = await client.post(
+            f"{MFA}/email/enroll", headers=no_mfa, json={"code": _now_code(secret)}
+        )
+        assert (await add.get_json())["error"]["code"] == "REAUTH_REQUIRED"
+        with_mfa = _fresh_signin_headers(uid, amr=["ext", "otp", "mfa"])
+        ok = await client.post(
+            f"{MFA}/disable",
+            headers=with_mfa,
+            json={"method": "totp", "code": _now_code(secret, 1)},
+        )
+        assert ok.status_code == 200, await ok.get_data()
+
+    async def test_recovery_codes_preserved_when_second_factor_confirmed(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        originals = await _enroll_email_only(client, user.headers, transport)
+        assert len(originals) == 10
+        await client.post(f"{MFA}/email/send-code", headers=user.headers)
+        start = await client.post(
+            f"{MFA}/totp/enroll",
+            headers=user.headers,
+            json={"password": PASSWORD, "code": transport.last_code()},
+        )
+        assert start.status_code == 200, await start.get_data()
+        secret = (await start.get_json())["secret"]
+        confirm = await client.post(
+            f"{MFA}/totp/confirm",
+            headers=user.headers,
+            json={"code": totp.code_at_step(secret, totp.step_for(time.time()) - 1)},
+        )
+        assert confirm.status_code == 200, await confirm.get_data()
+        assert (await confirm.get_json())["recoveryCodes"] == []
+        token = (await _start_login(client))["mfaToken"]
+        ok = await _verify(client, token, "recovery", originals[0])
+        assert ok.status_code == 200, await ok.get_data()
+
+    async def test_factor_changes_notify_verified_email(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        secret, _ = await _enroll_totp(client, user.headers)
+        added = transport.of_kind("mfa_factor_change")
+        assert len(added) == 1 and added[0]["to"] == "alice@example.com"
+        assert "added" in added[0]["text"] and secret not in added[0]["text"]
+        resp = await client.post(
+            f"{MFA}/disable",
+            headers=user.headers,
+            json={"method": "totp", "code": _now_code(secret), "password": PASSWORD},
+        )
+        assert resp.status_code == 200
+        changes = transport.of_kind("mfa_factor_change")
+        assert len(changes) == 2 and "removed" in changes[1]["text"]
+
+    async def test_notification_failure_never_blocks_the_change(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        transport.fail_with = EmailUnavailableError("smtp down")
+        _secret, codes = await _enroll_totp(client, user.headers)  # asserts 200 inside
+        assert len(codes) == 10 and transport.sent == []
+
+    async def test_email_confirm_respects_the_kill_switch(
+        self,
+        client: Any,
+        user: SimpleNamespace,
+        transport: FakeTransport,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        resp = await client.post(f"{MFA}/email/enroll", headers=user.headers)
+        assert resp.status_code == 200
+        monkeypatch.setenv("FLAG_WADDLES_DISABLE_MFA", "true")
+        confirm = await client.post(
+            f"{MFA}/email/confirm", headers=user.headers, json={"code": transport.last_code()}
+        )
+        assert (await confirm.get_json())["error"]["code"] == "MFA_DISABLED"
+
+
+class TestBruteForce:
+    async def test_per_ip_limit_on_login_verify(self, client: Any) -> None:
+        limit = mfa_bp_module.IP_VERIFY_LIMIT[0]
+        statuses = [
+            (await _verify(client, f"bogus-{i}", "totp", "123456")).status_code
+            for i in range(limit + 1)
+        ]
+        assert statuses[:limit] == [401] * limit and statuses[-1] == 429
+
+    async def test_per_ip_limit_on_login_email(self, client: Any) -> None:
+        limit = mfa_bp_module.IP_EMAIL_LIMIT[0]
+        statuses = [
+            (await client.post(f"{MFA}/login/email", json={"mfaToken": f"x{i}"})).status_code
+            for i in range(limit + 1)
+        ]
+        assert statuses[:limit] == [401] * limit and statuses[-1] == 429
+
+    async def test_backoff_and_failed_attempt_notice(
+        self, client: Any, user: SimpleNamespace, transport: FakeTransport
+    ) -> None:
+        secret, _ = await _enroll_totp(client, user.headers)
+        token = (await _start_login(client))["mfaToken"]
+        for _ in range(mfa_service.FAILED_ATTEMPTS_NOTIFY):
+            await _verify(client, token, "totp", _wrong(secret))
+        notices = transport.of_kind("mfa_failed_attempts")
+        assert len(notices) == 1 and notices[0]["to"] == "alice@example.com"
+        # Backoff is now armed: even the right code on a fresh challenge waits it out.
+        fresh = (await _start_login(client))["mfaToken"]
+        held = await _verify(client, fresh, "totp", _now_code(secret))
+        assert held.status_code == 429
+
+    async def test_login_and_account_buckets_are_separate(
+        self, client: Any, user: SimpleNamespace
+    ) -> None:
+        _secret, codes = await _enroll_totp(client, user.headers)
+        login_statuses: list[int] = []
+        while len(login_statuses) < mfa_service.USER_VERIFY_ATTEMPTS + 1:
+            token = (await _start_login(client))["mfaToken"]
+            for _ in range(mfa_service.MAX_ATTEMPTS - 1):  # never burns the challenge
+                resp = await _verify(client, token, "recovery", "AAAAA-AAAAA")
+                login_statuses.append(resp.status_code)
+        assert login_statuses[-1] == 429  # login verification is locked out
+        regen = await client.post(
+            f"{MFA}/recovery-codes/regenerate",
+            headers=user.headers,
+            json={"code": codes[0], "password": PASSWORD},
+        )
+        assert regen.status_code == 200, await regen.get_data()
+
+
+class TestUnguardedSessionPaths:
+    async def test_verify_email_requires_the_second_factor(
+        self, client: Any, user: SimpleNamespace, auth_db: Any
+    ) -> None:
+        secret, _ = await _enroll_totp(client, user.headers)
+        dal = auth_db.dal
+        dal(dal.hub_users.id == user.id).update(
+            email_verification_token="verify-tok-1",  # noqa: S106 -- test fixture value
+            email_verification_expires=datetime.now(UTC) + timedelta(hours=1),
+        )
+        dal.commit()
+        resp = await client.get("/api/v1/auth/verify-email?token=verify-tok-1")
+        assert resp.status_code == 202, await resp.get_data()
+        assert resp.headers.getlist("Set-Cookie") == []
+        body = await resp.get_json()
+        assert body["mfaRequired"] is True and "token" not in body
+        ok = await _verify(client, body["mfaToken"], "totp", _now_code(secret))
+        assert ok.status_code == 200, await ok.get_data()
+
+    async def test_temp_password_requires_the_second_factor(
+        self, client: Any, user: SimpleNamespace, auth_db: Any
+    ) -> None:
+        secret, _ = await _enroll_totp(client, user.headers)
+        dal = auth_db.dal
+        dal.hub_temp_passwords.insert(
+            user_identifier="alice@example.com",
+            password_hash=bcrypt.hashpw(b"temp-1234", bcrypt.gensalt(rounds=4)).decode(),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            force_oauth_link=True,
+            created_at=datetime.now(UTC),
+        )
+        dal.commit()
+        resp = await client.post(
+            "/api/v1/auth/temp-password",
+            json={"identifier": "alice@example.com", "password": "temp-1234"},
+        )
+        assert resp.status_code == 202, await resp.get_data()
+        assert resp.headers.getlist("Set-Cookie") == []
+        token = (await resp.get_json())["mfaToken"]
+        ok = await _verify(client, token, "totp", _now_code(secret))
+        assert ok.status_code == 200, await ok.get_data()
+        claims = jwt.decode((await ok.get_json())["token"], options={"verify_signature": False})
+        assert claims["sub"] == "0"  # still the pending-link temp session, never a full one
+        assert {"otp", "mfa"} <= set(claims["amr"])
+
+
+class TestRecoveryCodeHashing:
+    async def test_codes_stored_as_peppered_hmac(
+        self, app: Quart, client: Any, user: SimpleNamespace, auth_db: Any
+    ) -> None:
+        _secret, codes = await _enroll_totp(client, user.headers)
+        dal = auth_db.dal
+        rows = dal(dal.hub_user_mfa_recovery_codes.user_id == user.id).select()
+        assert len(rows) == 10
+        stored = {r.code_hash for r in rows}
+        for code in codes:
+            assert totp.hash_recovery_code(code) not in stored  # never the plain SHA-256
+        system_id = dal(dal.tenants.slug == "system").select().first().id
+        envelope = app.config["envelope_runtime"].service
+        _v, data_key = await envelope.data_key(int(system_id), int(rows.first().key_version))
+        pepper = totp.recovery_pepper(data_key)
+        assert {totp.hmac_recovery_code(pepper, c) for c in codes} == stored
+        assert totp.hmac_recovery_code(pepper, codes[0].lower().replace("-", " ")) in stored
+
+    async def test_fails_closed_without_the_pepper(
+        self, app: Quart, client: Any, user: SimpleNamespace
+    ) -> None:
+        _secret, codes = await _enroll_totp(client, user.headers)
+        app.config["envelope_runtime"] = None
+        resp = await client.post(
+            f"{MFA}/recovery-codes/regenerate",
+            headers=user.headers,
+            json={"code": codes[0], "password": PASSWORD},
+        )
+        assert resp.status_code == 503
+        assert (await resp.get_json())["error"]["code"] == "MFA_UNAVAILABLE"
+
+
+class TestEmailAdapter:
+    async def test_transport_unavailable_error_maps_to_503(self, transport: FakeTransport) -> None:
+        transport.fail_with = EmailUnavailableError("down")
+        with pytest.raises(ApiError) as raised:
+            await mfa_email.send_email(to="x@example.com", subject="s", text="t")
+        assert raised.value.status_code == 503 and raised.value.code == "EMAIL_MFA_UNAVAILABLE"
+
+    async def test_passes_the_transport_contract(self, transport: FakeTransport) -> None:
+        await mfa_email.send_email(
+            to="x@example.com", subject="s", text="body", kind=mfa_email.KIND_FACTOR_CHANGE
+        )
+        assert transport.sent == [
+            {"to": "x@example.com", "subject": "s", "text": "body", "kind": "mfa_factor_change"}
+        ]

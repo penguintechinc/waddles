@@ -100,7 +100,15 @@ export default function MfaSettings() {
         {!totpActive && status.enabled && panel !== 'totp' && (
           <button type="button" onClick={() => setPanel('totp')} className="btn btn-primary text-sm">Set up</button>
         )}
-        {panel === 'totp' && <TotpSetup onEnrolled={enrolled} onCancel={() => setPanel(null)} />}
+        {panel === 'totp' && (
+          <TotpSetup
+            onEnrolled={enrolled}
+            onCancel={() => setPanel(null)}
+            reauth={emailActive}
+            hasPassword={status.hasPassword}
+            canEmail={emailActive}
+          />
+        )}
         {panel === 'disable-totp' && (
           <MfaChangeForm
             title="Turn off authenticator app"
@@ -132,7 +140,14 @@ export default function MfaSettings() {
         {!emailActive && !emailBlocked && status.enabled && panel !== 'email' && (
           <button type="button" onClick={() => setPanel('email')} className="btn btn-secondary text-sm">Set up</button>
         )}
-        {panel === 'email' && <EmailSetup onEnrolled={enrolled} onCancel={() => setPanel(null)} />}
+        {panel === 'email' && (
+          <EmailSetup
+            onEnrolled={enrolled}
+            onCancel={() => setPanel(null)}
+            reauth={totpActive}
+            hasPassword={status.hasPassword}
+          />
+        )}
         {panel === 'disable-email' && (
           <MfaChangeForm
             title="Turn off email codes"

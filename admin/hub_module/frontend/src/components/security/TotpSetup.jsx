@@ -2,33 +2,53 @@ import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { mfaApi } from '../../services/api';
 import CodeInput from './CodeInput';
+import MfaChangeForm from './MfaChangeForm';
 import { mfaError } from './mfaErrors';
 
 /**
  * Authenticator-app enrollment: asks hub-api for a pending secret, renders its
  * otpauth URI as a QR code locally (qrcode.react, no network -- the secret never
  * leaves this browser for a third-party service), then confirms with a first code.
+ * When another method is already on (`reauth`), the user first re-authenticates
+ * (password when the account has one + a code from an existing factor).
  * Calls `onEnrolled(recoveryCodes)` once the server activates TOTP.
  */
-export default function TotpSetup({ onEnrolled, onCancel }) {
+export default function TotpSetup({ onEnrolled, onCancel, reauth = false, hasPassword = true, canEmail = false }) {
   const [enrollment, setEnrollment] = useState(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  const begin = async (body) => {
+    const { data } = await mfaApi.enrollTotp(body);
+    setEnrollment({ uri: data.otpauthUri, secret: data.secret });
+    console.debug('[TotpSetup] Enrollment started');
+  };
+
   const start = async () => {
     setBusy(true);
     setError('');
     try {
-      const { data } = await mfaApi.enrollTotp();
-      setEnrollment({ uri: data.otpauthUri, secret: data.secret });
-      console.debug('[TotpSetup] Enrollment started');
+      await begin();
     } catch (err) {
       setError(mfaError(err, 'Could not start authenticator setup.').message);
     } finally {
       setBusy(false);
     }
   };
+
+  if (!enrollment && reauth) {
+    return (
+      <MfaChangeForm
+        title="Confirm it's you to add an authenticator app"
+        submitLabel="Continue"
+        hasPassword={hasPassword}
+        canEmail={canEmail}
+        submit={begin}
+        onCancel={onCancel}
+      />
+    );
+  }
 
   const confirm = async (e) => {
     e.preventDefault();
