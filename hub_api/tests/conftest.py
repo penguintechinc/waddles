@@ -292,6 +292,9 @@ def auth_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
+    # tenant_settings (+ the tenant columns its routes read): the signup-domain resolver
+    # (services/email_verification.py) reads a tenant's allowlist on every signup path.
+    bind_tenant_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     # `lazy_tables=True` (AsyncDAL's own default) defers each table's

@@ -88,12 +88,40 @@ async def update_tenant(
     await async_dal.update_async(dal.tenants.id == tenant_id, **update_fields)
 
 
+#: `tenant_settings` keys the generic key/value routes neither list nor write: each has a
+#: dedicated route with its own per-action scope and validation (e.g. the signup allowlist,
+#: `services/email_verification.py`, written only by PUT /api/v1/tenant/<slug>/signup-domains).
+RESERVED_SETTING_KEYS: frozenset[str] = frozenset({"signup_allowed_domains"})
+
+
+async def set_tenant_signup_domains(
+    async_dal: Any, dal: Any, *, tenant_id: int, domains: list[str]
+) -> None:
+    """Write the tenant's (already validated) signup allowlist; empty list = no restriction."""
+    now = datetime.now(UTC)
+    key = "signup_allowed_domains"
+    value = ",".join(domains)
+    where = (dal.tenant_settings.tenant_id == tenant_id) & (dal.tenant_settings.key == key)
+    if await async_dal.select_async(dal(where)):
+        await async_dal.update_async(where, value=value, updated_at=now)
+    else:
+        await async_dal.insert_async(
+            dal.tenant_settings,
+            tenant_id=tenant_id,
+            key=key,
+            value=value,
+            created_at=now,
+            updated_at=now,
+        )
+
+
 async def get_tenant_settings(async_dal: Any, dal: Any, *, tenant_id: int) -> list[Any]:
     """List all settings for a tenant, ordered by key."""
     rows = await async_dal.select_async(
         dal(dal.tenant_settings.tenant_id == tenant_id), orderby=dal.tenant_settings.key
     )
-    return list(rows)
+    # Reserved keys have dedicated, separately-scoped endpoints; they never round-trip here.
+    return [r for r in rows if r.key not in RESERVED_SETTING_KEYS]
 
 
 async def update_tenant_settings(
@@ -114,6 +142,8 @@ async def update_tenant_settings(
     for key, value in settings:
         if not key or not key.strip():
             raise bad_request("Each setting must have a valid string key")
+        if key.strip() in RESERVED_SETTING_KEYS:
+            raise bad_request(f"'{key.strip()}' is managed by its own endpoint")
 
         existing = await async_dal.select_async(
             dal((dal.tenant_settings.tenant_id == tenant_id) & (dal.tenant_settings.key == key))

@@ -5,16 +5,41 @@ Account email verification (`hub_api/services/email_verification.py`) is its fir
 
 ## Policy
 
-| Signup path | Allowlist (`signup_allowed_domains`) empty | Allowlist set |
-|---|---|---|
-| Local email/password | Pending until the emailed link is used | Same, and the domain must match |
-| OAuth (Discord, Twitch, Google...) | No email needed | Provider email must be in an allowed domain; account pending until verified |
+Each tenant has an effective signup allowlist. The resolver for it is
+`email_verification.resolve_signup_policy`, and every signup path calls it.
 
-- No session is issued while an account is pending. Login answers `403 requiresVerification`.
-- The domain match is exact. It is checked at signup and again when the link is used.
-- Kill switch: `waddles.disable-email-verification` (opt-out). Unset or OFF means verification
-  is enforced. ON restores the legacy `signup_require_email_verification` setting for local
-  signups and skips the OAuth domain gate.
+- It intersects the platform list (`hub_settings.signup_allowed_domains`) with the tenant's own
+  list (`tenant_settings` key `signup_allowed_domains`).
+- If one of the two lists is empty, the other list is used on its own.
+- If both lists are set but share no domain, no address can sign up.
+- Matches are exact domain matches.
+
+| Signup path | Tenant unrestricted | Tenant restricted |
+|---|---|---|
+| Local email/password (default tenant) | Pending until the emailed link is used | Same, and the domain must match |
+| OAuth (Discord, Twitch, Google; default tenant) | No email needed | Domain must match; pending until verified |
+| Tenant SSO (SAML/OIDC) | IdP email is enough | Domain must match; pending until verified |
+
+- No session is issued while an account is pending. Login answers `403 requiresVerification`,
+  or the SSO/OAuth redirect goes to `/login?error=email_verification_required`.
+- Existing users are not blocked retroactively. However, an unverified OAuth or SSO user whose
+  tenant later adds a restriction gets a link by email at their next login and is held until
+  they verify it.
+- When a link is used, the domain is checked again against the platform list.
+- Kill switch `waddles.disable-email-verification` is opt-out: unset or OFF means verification
+  is enforced.
+
+### Tenant setting
+
+| Method + path | Scope |
+|---|---|
+| `GET /api/v1/tenant/<slug>/signup-domains` | `tenant:admin` |
+| `PUT /api/v1/tenant/<slug>/signup-domains` `{domains: [...]}` | `tenant:admin` + `tenant.signup_domains:write` |
+
+- The URL slug must match the tenant in the token.
+- At most 50 domains, each validated as a DNS name.
+- The generic `/settings` routes never list or write this key.
+- In the webui, it is the "Signup email domains" card on Tenant settings.
 
 ## Tokens
 

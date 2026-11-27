@@ -528,7 +528,8 @@ async def register(
             raise bad_request("CAPTCHA verification failed")
 
     email_lower = email.lower()
-    if not ev.domain_allowed(email_lower, ev.allowed_domains(settings)):
+    policy = await ev.resolve_signup_policy(async_dal, dal)  # platform ∩ default tenant
+    if not policy.allows(email_lower):
         raise ApiError("Registration is restricted to specific email domains", 403, ev.ERR_DOMAIN)
 
     existing = await async_dal.select_async(dal(dal.hub_users.email == email_lower))

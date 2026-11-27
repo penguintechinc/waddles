@@ -137,6 +137,12 @@ SCOPE_CONNECTIONS_ADMIN = "connections:admin"
 SCOPE_TENANT_COMMUNITY_TIER_READ = "tenant.community_tier:read"
 SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE = "tenant.community_tier:allocate"
 
+#: Tenant-admin edit of the tenant's signup email-domain allowlist
+#: (`hub_api/blueprints/v1/tenant.py` PUT /<slug>/signup-domains). Per-action: the route ALSO
+#: requires `tenant:admin` (ANDed). Granted to the tenant `admin` bundle below; global admins do
+#: NOT hold it via `*:admin` (`*:admin` only matches action `admin`), so it fails closed.
+SCOPE_TENANT_SIGNUP_DOMAINS_WRITE = "tenant.signup_domains:write"
+
 
 @dataclass(slots=True)
 class OAuthProvider:
@@ -750,7 +756,7 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             'community:create', 'community:delete', 'billing:read', 'billing:write',
             'settings:write', 'compliance.audit:admin', SCOPE_SSO_ADMIN,
             SCOPE_CONNECTIONS_ADMIN, SCOPE_TENANT_COMMUNITY_TIER_READ,
-            SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE,
+            SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE, SCOPE_TENANT_SIGNUP_DOMAINS_WRITE,
         ],
         'maintainer': [
             'tenant:read', 'tenant:write', 'community:create',

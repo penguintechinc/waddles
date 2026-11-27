@@ -26,12 +26,14 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import SCOPE_TENANT_SIGNUP_DOMAINS_WRITE
 from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import branding_service
+from services import email_verification as ev
 from services import tenant_service as svc
 from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
@@ -380,6 +382,77 @@ async def update_tenant_settings(
     except ApiError as exc:
         return _err(exc)
     return MessageResponse(success=True, message="Tenant settings updated")
+
+
+@dataclass(slots=True, frozen=True)
+class SignupDomainsRequest:
+    """Request DTO for PUT /<slug>/signup-domains (empty list removes the restriction)."""
+
+    domains: list[str]
+
+
+@dataclass(slots=True, frozen=True)
+class SignupDomainsResponse:
+    """The tenant's own list, the platform list and the effective (intersected) policy."""
+
+    success: bool
+    domains: list[str]
+    platformDomains: list[str]
+    restricted: bool
+    effectiveDomains: list[str]
+
+
+async def _signup_domains_response(
+    async_dal: Any, dal: Any, tenant_id: int, tenant_slug: str
+) -> SignupDomainsResponse:
+    from services.auth_service import get_hub_settings_map
+
+    own = await ev.tenant_domains(async_dal, dal, tenant_id=tenant_id)
+    platform = ev.allowed_domains(await get_hub_settings_map(async_dal, dal))
+    policy = ev.combine_allowlists(platform, own)
+    return SignupDomainsResponse(
+        success=True,
+        domains=own,
+        platformDomains=platform,
+        restricted=policy.restricted,
+        effectiveDomains=list(policy.domains),
+    )
+
+
+@tenant_bp.route("/<tenant_slug>/signup-domains", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
+@validate_response(SignupDomainsResponse)
+async def get_signup_domains(
+    tenant_slug: str,
+) -> SignupDomainsResponse | tuple[dict[str, object], int]:
+    """Read the tenant's signup email-domain allowlist and the effective policy."""
+    async_dal, dal = _dal()
+    try:
+        tenant_id = _tenant_id(tenant_slug)
+        return await _signup_domains_response(async_dal, dal, tenant_id, tenant_slug)
+    except ApiError as exc:
+        return _err(exc)
+
+
+@tenant_bp.route("/<tenant_slug>/signup-domains", methods=["PUT"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin", SCOPE_TENANT_SIGNUP_DOMAINS_WRITE)  # type: ignore[misc]
+@validate_request(SignupDomainsRequest)
+@validate_response(SignupDomainsResponse)
+async def put_signup_domains(
+    data: SignupDomainsRequest, tenant_slug: str
+) -> SignupDomainsResponse | tuple[dict[str, object], int]:
+    """Replace the tenant's signup allowlist; non-empty = every signup must verify its email."""
+    async_dal, dal = _dal()
+    try:
+        tenant_id = _tenant_id(tenant_slug)
+        domains = ev.normalize_tenant_domains(data.domains)
+        await svc.set_tenant_signup_domains(async_dal, dal, tenant_id=tenant_id, domains=domains)
+        logger.info("tenant.signup_domains.updated tenant_id=%s count=%d", tenant_id, len(domains))
+        return await _signup_domains_response(async_dal, dal, tenant_id, tenant_slug)
+    except ApiError as exc:
+        return _err(exc)
 
 
 @tenant_bp.route("/<tenant_slug>/communities", methods=["GET"])

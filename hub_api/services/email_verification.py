@@ -4,9 +4,14 @@ Policy (core security mechanism, opt-out kill switch `waddles.disable-email-veri
 unseen/OFF = enforced):
 
 * Local email/password signups are ALWAYS pending until the address is verified (no session).
-* When the platform's signup allowlist (`hub_settings.signup_allowed_domains`, exact domain
-  match) is non-empty, every NEW OAuth signup must also verify an address in an allowed domain
-  before it gets a session -- proving control of the address, not just the provider's claim.
+* Signup-domain restriction: the EFFECTIVE allowlist for a tenant (`resolve_signup_policy`, the
+  one resolver every signup path uses) is the platform list (`hub_settings.
+  signup_allowed_domains`) intersected with the tenant's own list (`tenant_settings` key
+  `signup_allowed_domains`, edited via `PUT /api/v1/tenant/<slug>/signup-domains`); whichever is
+  empty imposes nothing. When the effective policy is restricted, EVERY signup into that tenant
+  -- local, OAuth and tenant SSO alike -- must verify an address in an allowed domain (exact
+  match) before it gets a session, and an existing user whose email is still unverified is
+  held at their next login the same way. Unrestricted tenants: OAuth/SSO need no email.
 
 Tokens: 32 random bytes (urlsafe), stored ONLY as a SHA-256 hex digest in
 `hub_users.email_verification_token`, single use (cleared on success), TTL 24 h
@@ -27,8 +32,10 @@ import hmac
 import html
 import logging
 import os
+import re
 import secrets
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -51,6 +58,14 @@ ERR_SEND_FAILED = "verification_email_failed"
 ERR_REQUIRED = "email_verification_required"
 ERR_DOMAIN = "email_domain_not_allowed"
 ERR_RATE_LIMITED = "verification_resend_rate_limited"
+
+#: `tenant_settings` key holding a tenant's comma-separated signup allowlist. Reserved: written
+#: only through the dedicated, per-action-scoped endpoint, never the generic settings PUT.
+TENANT_SETTING_KEY = "signup_allowed_domains"
+MAX_TENANT_DOMAINS = 50
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
 
 _meter = metrics.get_meter("hub_api.email_verification")
 verification_events = _meter.create_counter(
@@ -105,13 +120,81 @@ async def enforced(tenant_slug: str = DEFAULT_TENANT_SLUG) -> bool:
     return not await feature_enabled(FLAG_DISABLE_EMAIL_VERIFICATION, tenant=tenant_slug)
 
 
+def parse_domains(raw: str | None) -> list[str]:
+    """Comma-separated allowlist -> lower-cased, de-duplicated domains (order kept)."""
+    seen: dict[str, None] = {}
+    for d in (raw or "").split(","):
+        d = d.strip().lower().lstrip("@")
+        if d:
+            seen.setdefault(d, None)
+    return list(seen)
+
+
 def allowed_domains(settings: Mapping[str, str]) -> list[str]:
-    """The signup allowlist from `hub_settings.signup_allowed_domains` (lower-cased, exact)."""
-    return [
-        d.strip().lower().lstrip("@")
-        for d in settings.get("signup_allowed_domains", "").split(",")
-        if d.strip()
-    ]
+    """The PLATFORM signup allowlist from `hub_settings.signup_allowed_domains`."""
+    return parse_domains(settings.get(TENANT_SETTING_KEY, ""))
+
+
+def normalize_tenant_domains(domains: Iterable[str]) -> list[str]:
+    """Validate a tenant-supplied allowlist (exact DNS names, <= 50); raise 400 on a bad entry."""
+    out = parse_domains(",".join(str(d) for d in domains))
+    if len(out) > MAX_TENANT_DOMAINS:
+        raise ApiError(f"At most {MAX_TENANT_DOMAINS} signup domains", 400, "BAD_REQUEST")
+    for d in out:
+        if not _DOMAIN_RE.match(d) or d.rsplit(".", 1)[-1].isdigit():
+            raise ApiError(
+                "Each signup domain must be a domain name like example.com", 400, "BAD_REQUEST"
+            )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class SignupPolicy:
+    """Effective signup-domain policy for one tenant (`restricted` with no domains = deny all)."""
+
+    restricted: bool
+    domains: tuple[str, ...] = ()
+
+    def allows(self, email: str | None) -> bool:
+        """Exact-domain match; an unrestricted policy allows any address (even none)."""
+        if not self.restricted:
+            return True
+        return bool(email) and email_domain(str(email)) in self.domains
+
+
+def combine_allowlists(platform: list[str], tenant: list[str]) -> SignupPolicy:
+    """Platform ∩ tenant; an empty side imposes nothing. Disjoint non-empty lists deny all."""
+    if platform and tenant:
+        tenant_set = set(tenant)
+        return SignupPolicy(True, tuple(d for d in platform if d in tenant_set))
+    chosen = platform or tenant
+    return SignupPolicy(bool(chosen), tuple(chosen))
+
+
+async def tenant_domains(async_dal: Any, dal: Any, *, tenant_id: int) -> list[str]:
+    """The tenant's own stored allowlist (`tenant_settings`)."""
+    from services.schema import bind_tenant_tables  # lazy: schema imports are heavy
+
+    bind_tenant_tables(dal)
+    rows = await async_dal.select_async(
+        dal(
+            (dal.tenant_settings.tenant_id == tenant_id)
+            & (dal.tenant_settings.key == TENANT_SETTING_KEY)
+        )
+    )
+    return parse_domains(rows.first().value if rows else "")
+
+
+async def resolve_signup_policy(
+    async_dal: Any, dal: Any, *, tenant_slug: str = DEFAULT_TENANT_SLUG
+) -> SignupPolicy:
+    """THE resolver every signup path uses: platform allowlist ∩ the tenant's own allowlist."""
+    from services.auth_service import get_hub_settings_map  # lazy: auth_service imports us
+
+    platform = allowed_domains(await get_hub_settings_map(async_dal, dal))
+    rows = await async_dal.select_async(dal(dal.tenants.slug == tenant_slug))
+    tenant = await tenant_domains(async_dal, dal, tenant_id=int(rows.first().id)) if rows else []
+    return combine_allowlists(platform, tenant)
 
 
 def email_domain(email: str) -> str:
@@ -188,6 +271,73 @@ async def issue_and_send(
         updated_at=datetime.now(UTC),
     )
     await send_verification_email(cfg, to_email=email, raw_token=raw)
+
+
+def _domain_refused() -> ApiError:
+    verification_events.add(1, {"event": "external_signup", "outcome": "domain_refused"})
+    return ApiError(
+        "Sign-up is restricted to specific email domains. Use an account whose verified "
+        "email is in an allowed domain.",
+        403,
+        ERR_DOMAIN,
+    )
+
+
+def verification_required() -> ApiError:
+    """403 telling the browser to check its inbox; no session is minted."""
+    return ApiError(
+        "Check your inbox: verify your email address to finish signing up.",
+        403,
+        ERR_REQUIRED,
+        {"requiresVerification": True},
+    )
+
+
+async def external_signup_needs_verification(
+    async_dal: Any, dal: Any, *, email: str | None, tenant_slug: str = DEFAULT_TENANT_SLUG
+) -> bool:
+    """Policy for a NEW OAuth/SSO user, checked BEFORE anything is created.
+
+    Kill switch ON or unrestricted tenant: no verification. Restricted: the address must be in
+    an allowed domain (else `email_domain_not_allowed`) and SMTP must be configured (else
+    `email_not_configured`) -- refused loudly, never auto-verified.
+    """
+    if not await enforced(tenant_slug):
+        return False
+    policy = await resolve_signup_policy(async_dal, dal, tenant_slug=tenant_slug)
+    if not policy.restricted:
+        return False
+    if not policy.allows(email):
+        raise _domain_refused()
+    require_configured()
+    return True
+
+
+async def hold_unverified_external_login(
+    async_dal: Any,
+    dal: Any,
+    cfg: HubAPIConfig,
+    *,
+    row: Any,
+    tenant_slug: str = DEFAULT_TENANT_SLUG,
+) -> None:
+    """Gate an EXISTING OAuth/SSO user's login under a restricted tenant.
+
+    Verified users and unrestricted tenants pass (no retroactive block). An unverified user is
+    refused (`email_domain_not_allowed` when the address is outside the allowlist), mailed a link
+    when none was sent within the resend cooldown, and held with `email_verification_required`.
+    """
+    if bool(row.email_verified) or not await enforced(tenant_slug):
+        return
+    policy = await resolve_signup_policy(async_dal, dal, tenant_slug=tenant_slug)
+    if not policy.restricted:
+        return
+    if not policy.allows(row.email):
+        raise _domain_refused()
+    if not row.email_verification_token or resend_wait_seconds(row.email_verification_expires) == 0:
+        require_configured()
+        await issue_and_send(async_dal, dal, cfg, user_id=int(row.id), email=str(row.email))
+    raise verification_required()
 
 
 def resend_wait_seconds(expires: datetime | None) -> int:

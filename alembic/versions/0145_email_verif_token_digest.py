@@ -27,8 +27,12 @@ depends_on = None
 
 def upgrade() -> None:
     """Null every non-digest verification token (and its expiry) on hub_users."""
-    if not sa.inspect(op.get_bind()).has_table("hub_users"):
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("hub_users"):
         return  # partial/ordered replays without the identity table: nothing to clear
+    columns = {c["name"] for c in inspector.get_columns("hub_users")}
+    if not {"email_verification_token", "email_verification_expires"} <= columns:
+        return  # schema variants without the verification columns hold no raw tokens
     op.execute(
         "UPDATE hub_users SET email_verification_token = NULL, email_verification_expires = NULL "
         "WHERE email_verification_token IS NOT NULL AND LENGTH(email_verification_token) <> 64"

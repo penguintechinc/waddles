@@ -27127,6 +27127,122 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Update tenant settings.
+  /api/v1/tenant/{tenant_slug}/signup-domains:
+    get:
+      description: ''
+      operationId: get_get_signup_domains
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The tenant's own list, the platform list and the effective
+                  (intersected) policy.
+                properties:
+                  domains:
+                    items:
+                      type: string
+                    title: Domains
+                    type: array
+                  effectiveDomains:
+                    items:
+                      type: string
+                    title: Effectivedomains
+                    type: array
+                  platformDomains:
+                    items:
+                      type: string
+                    title: Platformdomains
+                    type: array
+                  restricted:
+                    title: Restricted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - domains
+                - platformDomains
+                - restricted
+                - effectiveDomains
+                title: SignupDomainsResponse
+                type: object
+          description: The tenant's own list, the platform list and the effective
+            (intersected) policy.
+      summary: Read the tenant's signup email-domain allowlist and the effective policy.
+    put:
+      description: ''
+      operationId: put_put_signup_domains
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for PUT /<slug>/signup-domains (empty list
+                removes the restriction).
+              properties:
+                domains:
+                  items:
+                    type: string
+                  title: Domains
+                  type: array
+              required:
+              - domains
+              title: SignupDomainsRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The tenant's own list, the platform list and the effective
+                  (intersected) policy.
+                properties:
+                  domains:
+                    items:
+                      type: string
+                    title: Domains
+                    type: array
+                  effectiveDomains:
+                    items:
+                      type: string
+                    title: Effectivedomains
+                    type: array
+                  platformDomains:
+                    items:
+                      type: string
+                    title: Platformdomains
+                    type: array
+                  restricted:
+                    title: Restricted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - domains
+                - platformDomains
+                - restricted
+                - effectiveDomains
+                title: SignupDomainsResponse
+                type: object
+          description: The tenant's own list, the platform list and the effective
+            (intersected) policy.
+      summary: Replace the tenant's signup allowlist; non-empty = every signup must
+        verify its email.
   /api/v1/tenant/{tenant_slug}/usage:
     get:
       description: ''

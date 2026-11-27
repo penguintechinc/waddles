@@ -32,7 +32,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -42,6 +42,7 @@ import httpx
 from flask_core.feature_flags import feature_enabled
 
 from config import HubAPIConfig
+from services import email_verification as ev
 from services import sso_crypto, sso_saml, sso_state
 from services.auth_service import SessionUser, add_user_to_global_community, create_session_token
 from services.errors import ApiError, bad_request, not_found, payment_required, unprocessable
@@ -1167,7 +1168,31 @@ async def _finish_login(
     """Resolve or provision the hub user for `identity`, then mint the tenant session."""
     with sso_span("sso.login.provision", **{"sso.protocol": conn.protocol}):
         _enforce_domain_policy(conn, identity)
-        user_row, created = await _resolve_user(ctx, conn, identity)
+        # Tenant signup-domain restriction (services/email_verification.py): a NEW user of a
+        # restricted tenant is created unverified, mailed a link and gets no session; an
+        # existing unverified user is held at login. Unrestricted tenants: IdP email suffices.
+        is_new = await _find_identity_link(ctx, conn.id, identity.subject) is None
+        needs_verification = is_new and await _email_gate(
+            ev.external_signup_needs_verification(
+                ctx.async_dal, ctx.dal, email=identity.email, tenant_slug=tenant.slug
+            )
+        )
+        user_row, created = await _resolve_user(
+            ctx, conn, identity, email_verified=not needs_verification
+        )
+        if created and needs_verification:
+            await _email_gate(
+                ev.issue_and_send(
+                    ctx.async_dal, ctx.dal, ctx.cfg, user_id=int(user_row.id), email=user_row.email
+                )
+            )
+            raise _sso_pending()
+        if not created:
+            await _email_gate(
+                ev.hold_unverified_external_login(
+                    ctx.async_dal, ctx.dal, ctx.cfg, row=user_row, tenant_slug=tenant.slug
+                )
+            )
 
     user = SessionUser(
         id=int(user_row.id),
@@ -1219,10 +1244,31 @@ async def _user_row(ctx: SsoContext, user_id: int) -> Any | None:
     return rows.first() if rows else None
 
 
+async def _email_gate[T](step: Coroutine[Any, Any, T]) -> T:
+    """Run an email-verification step, re-raising its `ApiError` as a browser-safe SSO refusal."""
+    try:
+        return await step
+    except ApiError as exc:
+        raise SsoPolicyError(exc.code, exc.message, reason=exc.code) from None
+
+
+def _sso_pending() -> SsoPolicyError:
+    """No session until the emailed link is used (login page renders the typed reason)."""
+    err = ev.verification_required()
+    return SsoPolicyError(err.code, err.message, reason=err.code)
+
+
 async def _resolve_user(
-    ctx: SsoContext, conn: SsoConnection, identity: ExternalIdentity
+    ctx: SsoContext,
+    conn: SsoConnection,
+    identity: ExternalIdentity,
+    *,
+    email_verified: bool = True,
 ) -> tuple[Any, bool]:
-    """Return `(hub_users row, created)` for `identity` on `conn`; JIT-provision on first login."""
+    """Return `(hub_users row, created)` for `identity` on `conn`; JIT-provision on first login.
+
+    `email_verified=False` provisions the user pending OUR verification (restricted tenant).
+    """
     link = await _find_identity_link(ctx, conn.id, identity.subject)
     if link is not None:
         return await _existing_user(ctx, conn, link), False
@@ -1258,7 +1304,7 @@ async def _resolve_user(
         display_name=identity.display_name,
         username=None,
         is_active=True,
-        email_verified=True,
+        email_verified=email_verified,
         created_at=now,
         updated_at=now,
     )
