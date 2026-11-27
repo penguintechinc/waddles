@@ -10,17 +10,17 @@ Two assertions against the rendered chart:
    finishes -- so a DB-dependent pre-install Job always races a Postgres that
    doesn't exist yet on a true fresh install ("Database not ready after 60s",
    confirmed on alpha 2026-10-01).
-2. `db-migrate` (templates/migrations-job.yaml) carries EXACTLY
-   "post-install,pre-upgrade" -- no more, no less. USER DECISION (2026-10-01):
-   the schema always comes from this Job, fresh install included (an earlier
-   design on this same branch instead created the schema from hub-api's own
-   startup path via SQLAlchemy create_all()+stamp, which left 80+ raw-SQL-only
-   tables missing -- see hub_api/bootstrap.py's module docstring and
-   hub_api/tests/test_bootstrap_schema_drift.py's git history). "post-install"
-   is required (fresh installs must run it); "pre-install" must NEVER be
-   present (would reintroduce the original Postgres-doesn't-exist-yet race);
-   "pre-upgrade" is required (existing releases must still advance the
-   schema on `helm upgrade`).
+2. `db-migrate` (templates/migrations-job.yaml) carries EXACTLY "pre-upgrade"
+   -- no more, no less (fix/db-migrate-fresh-install-ordering, 2026-11-27;
+   supersedes the 2026-10-01 "post-install,pre-upgrade" decision). "pre-upgrade"
+   is required (existing releases advance the schema before any new pod rolls);
+   "pre-install" must NEVER be present (Postgres does not exist yet); and
+   "post-install" must NEVER be present: hub-api `/ready` waits for the alembic
+   head revision, so a post-install migrate deadlocks `helm upgrade --install
+   --wait` on every fresh install.
+3. The fresh-install schema comes from hub-api's `db-migrate` initContainer
+   (templates/_db_migrate.tpl, the full migrations image -- never
+   create_all()+stamp) -- it must be rendered, or a fresh install never migrates.
 
 Fails loudly (never masked) if zero Jobs are examined -- a scanner pointed at
 a moved/renamed chart path reporting "0 violations" is not a passing gate,
@@ -112,10 +112,25 @@ def main(argv: list[str] | None = None) -> int:
 
     name, hook = migrate_job
     phases = set(hook.split(","))
-    if phases != {"post-install", "pre-upgrade"}:
+    if phases != {"pre-upgrade"}:
         violations.append(
-            f"{name} (hook={hook!r}) must carry exactly 'post-install,pre-upgrade', got {sorted(phases)}"
+            f"{name} (hook={hook!r}) must carry exactly 'pre-upgrade', got {sorted(phases)}"
         )
+
+    hub_api = [
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment"
+        and doc.get("metadata", {}).get("name", "").endswith("hub-api-v3")
+    ]
+    if len(hub_api) != 1:
+        violations.append(f"expected exactly one hub-api Deployment, found {len(hub_api)}")
+    else:
+        inits = hub_api[0]["spec"]["template"]["spec"].get("initContainers") or []
+        if "db-migrate" not in [c.get("name") for c in inits]:
+            violations.append(
+                "hub-api has no db-migrate initContainer -- a fresh install would never migrate"
+            )
 
     if violations:
         print(f"FAIL: {len(violations)} hook-phase violation(s):", file=sys.stderr)
@@ -124,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS: no DB-dependent Job carries pre-install, and db-migrate is exactly post-install,pre-upgrade."
+        "PASS: no DB-dependent Job carries pre-install, db-migrate Job is exactly pre-upgrade, "
+        "and hub-api runs the db-migrate initContainer."
     )
     return 0
 

@@ -81,9 +81,16 @@ def _seaweed_script(docs):
 
 
 def _init_script(docs):
-    jobs = [d for d in docs if d["kind"] == "Job" and d["metadata"]["name"] == "seaweedfs-bucket-init"]
-    assert len(jobs) == 1
-    c = jobs[0]["spec"]["template"]["spec"]["containers"][0]
+    # Bucket init is hub-api's initContainer (fix/escrow-bucket-init-ordering), not a hook Job.
+    inits = [
+        c
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("hub-api-v3")
+        for c in d["spec"]["template"]["spec"].get("initContainers", [])
+        if c["name"] == "seaweedfs-bucket-init"
+    ]
+    assert len(inits) == 1
+    c = inits[0]
     return (c.get("args") or c["command"])[-1]
 
 

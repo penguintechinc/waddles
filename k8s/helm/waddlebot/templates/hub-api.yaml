@@ -39,10 +39,30 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no initContainers: hub-api
-      # bootstraps its own schema in-process at startup (hub_api/bootstrap.py), gated on
-      # its own `/ready` readinessProbe below rather than a pre-run initContainer. hub-api
-      # is the one Deployment in this chart that never waits on itself.
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no wait-for-hub-api / schema
+      # initContainer: hub-api observes its own schema in-process at startup
+      # (hub_api/bootstrap.py), gated on its own `/ready` readinessProbe below. hub-api is the
+      # one Deployment in this chart that never waits on itself.
+      {{- if or .Values.infrastructure.seaweedfs.enabled .Values.pipeline.migrationsJob.enabled }}
+      initContainers:
+      {{- end }}
+      {{- if .Values.infrastructure.seaweedfs.enabled }}
+      # fix/escrow-bucket-init-ordering -- SeaweedFS bucket init (escrow bucket included) runs
+      # HERE, before the hub-api container, instead of as a post-install hook: the platform vault
+      # refuses to boot without the escrow bucket (`escrow_unavailable`), and a post hook never
+      # runs while `helm upgrade --wait` waits on this pod (fresh-install deadlock). Idempotent
+      # create-if-absent; bounded wait for the S3 gateway; kubelet retries on failure. The vault's
+      # runtime fail-closed check is unchanged. Spec: templates/_seaweedfs_bucket_init.tpl.
+      {{- include "waddlebot.seaweedfsBucketInit.container" . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.pipeline.migrationsJob.enabled }}
+      # fix/db-migrate-fresh-install-ordering -- schema migration runs HERE, before the hub-api
+      # container, instead of as a post-install hook: `/ready` waits for the alembic head revision,
+      # so a post hook never ran under `helm upgrade --install --wait` (fresh-install deadlock).
+      # Advisory-locked across replicas (migrate_locked.py); migrator DSN in THIS container's env
+      # only; kubelet retries until Postgres is up. Spec: templates/_db_migrate.tpl.
+      {{- include "waddlebot.dbMigrate.container" . | nindent 6 }}
+      {{- end }}
       containers:
       - name: hub-api
         # fix/alpha-helm-deploy -- hub_api/Dockerfile (Python 3.13 + Quart control-plane
@@ -461,6 +481,9 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if .Values.pipeline.migrationsJob.enabled }}
+      {{- include "waddlebot.dbMigrate.volume" . | nindent 6 }}
+      {{- end }}
       {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
@@ -498,5 +521,13 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-api
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort)) }}
+{{- /* Each init container gets its OWN Tetragon exec allowlist (containerSelector-scoped). */}}
+{{- $hubInits := list }}
+{{- if $.Values.infrastructure.seaweedfs.enabled }}
+{{- $hubInits = append $hubInits (dict "name" "seaweedfs-bucket-init" "binaries" $.Values.infrastructure.seaweedfs.bucketInitJob.execBinaries) }}
+{{- end }}
+{{- if $.Values.pipeline.migrationsJob.enabled }}
+{{- $hubInits = append $hubInits (dict "name" "db-migrate" "binaries" $.Values.pipeline.migrationsJob.execBinaries) }}
+{{- end }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "hub-api" "ports" (list $.Values.pipeline.hubApi.port $.Values.pipeline.hubApi.grpcPort) "runtime" "python" "egress" "https" "kubeApiServer" true "excludePorts" (list $.Values.pipeline.hubApi.grpcPort) "initContainers" $hubInits) }}
 {{- end }}

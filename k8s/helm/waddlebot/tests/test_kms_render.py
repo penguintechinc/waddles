@@ -119,8 +119,13 @@ def seaweedfs_script(docs: list[dict[str, Any]]) -> str:
 
 
 def bucket_init_script(docs: list[dict[str, Any]]) -> str:
-    job = find(docs, "Job", "seaweedfs-bucket-init")
-    return str(job["spec"]["template"]["spec"]["containers"][0]["command"][-1])
+    # Bucket init is hub-api's initContainer (fix/escrow-bucket-init-ordering), not a hook Job.
+    for d in docs:
+        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("hub-api-v3"):
+            for c in d["spec"]["template"]["spec"].get("initContainers", []):
+                if c["name"] == "seaweedfs-bucket-init":
+                    return str(c["command"][-1])
+    pytest.fail("seaweedfs-bucket-init initContainer not found on hub-api")
 
 
 def s3_config(script: str, env: dict[str, str], tmp_path: Path) -> dict[str, Any]:

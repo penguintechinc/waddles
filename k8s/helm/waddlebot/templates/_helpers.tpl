@@ -326,6 +326,9 @@ other pod that needs the schema waits on hub-api's own `/ready` instead
 migrations against the same advisory lock. The migrations image itself still exists and
 still runs the full migration directory + the admin-seed step -- now ONLY via
 templates/migrations-job.yaml's pre-upgrade hook, never per-pod.
+[Superseded 2026-11-27, fix/db-migrate-fresh-install-ordering: hub-api ONLY now runs the
+migrations image as its `db-migrate` initContainer under a Postgres advisory lock
+(templates/_db_migrate.tpl); every other pod still waits on hub-api `/ready`.]
 
 KNOWN GAP this removal surfaces (reported, not fixed here -- see PR description): the
 INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD seed step lived inside the migrations image's

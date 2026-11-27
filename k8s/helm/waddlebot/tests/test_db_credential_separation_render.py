@@ -258,11 +258,16 @@ def test_no_workload_envfroms_the_credential_secrets_wholesale(
         whole = {
             ef["secretRef"]["name"] for ef in container.get("envFrom") or [] if "secretRef" in ef
         }
+        # The migrator DSN is allowed only in the db-migrate hook Job and hub-api's `db-migrate`
+        # initContainer (templates/_db_migrate.tpl) -- never a long-running container.
+        migrator = doc["metadata"]["name"] == "waddlebot-db-migrate" or (
+            container.get("name") == "db-migrate" and whole == {"waddlebot-db-migrate-secret"}
+        )
         assert not whole & {
             "waddlebot-db-credentials",
             "waddlebot-db-admin",
             "waddlebot-db-migrate-secret",
-        } or (doc["metadata"]["name"] == "waddlebot-db-migrate"), (
+        } or migrator, (
             f"{doc['metadata']['name']} envFrom's a DB credential Secret wholesale"
         )
     assert examined > 10

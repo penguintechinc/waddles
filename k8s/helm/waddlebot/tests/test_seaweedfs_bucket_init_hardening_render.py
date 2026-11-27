@@ -1,4 +1,8 @@
-"""Render assertions for the seaweedfs-bucket-init hook Job hardening.
+"""Render assertions for the seaweedfs-bucket-init script + hook Job hardening.
+
+The container is defined once (templates/_seaweedfs_bucket_init.tpl). By default it is hub-api's
+initContainer (test_escrow_bucket_init_ordering_render.py); the hook Job form asserted here renders
+only with hub-api disabled, so `_job` sets pipeline.hubApi.enabled=false. The script is identical.
 
 A stall must fail FAST and DIAGNOSABLY: every aws call is wrapped in `timeout`, the S3 wait is
 bounded and names the endpoint, the script ends with an N/N verified line equal to the configured
@@ -28,7 +32,7 @@ def _job(values: str | None, *sets: str) -> dict[str, Any]:
     argv = [_HELM, "template", "waddlebot", str(_CHART), "--kube-version", "1.30.0"]
     if values:
         argv += ["--values", str(_CHART / values)]
-    for s in sets:
+    for s in ("pipeline.hubApi.enabled=false", *sets):
         argv += ["--set", s]
     out = subprocess.run(argv, capture_output=True, text=True, check=False)
     if out.returncode != 0:
@@ -52,7 +56,8 @@ def test_script_is_bounded_and_counts_buckets(values: str | None) -> None:
     extra = () if values else ("infrastructure.seaweedfs.encryption.secretName=seaweedfs-sse-kek",)
     script = _script(_job(values, *extra))
     assert "set -eu" in script and "pipefail" in script
-    assert 'timeout "$(capped_timeout "${CALL_TIMEOUT}")" aws' in script
+    assert 'timeout "$(capped_timeout "${CALL_TIMEOUT}")" "${AWS_BIN}"' in script
+    assert "AWS_BIN=$(command -v aws)" in script
     # No bare aws invocation outside the timeout wrapper / bounded wait loop.
     bare = [
         ln.strip()
@@ -61,7 +66,7 @@ def test_script_is_bounded_and_counts_buckets(values: str | None) -> None:
     ]
     assert not bare, f"unwrapped aws calls: {bare}"
     # Readiness wait is capped by CALL_TIMEOUT (not a hardcoded 10s) and logs rc + per-attempt time.
-    assert 'timeout "${call_to}" aws' in script and "WAIT_MAX" in script
+    assert 'timeout "${call_to}" "${AWS_BIN}"' in script and "WAIT_MAX" in script
     assert "capped_timeout 10" not in script
     assert "rc=${rc}" in script and "took=${took}s" in script and "124)" in script
     assert "not ready after" in script and "${ENDPOINT}" in script
