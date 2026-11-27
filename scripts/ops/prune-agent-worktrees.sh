@@ -19,8 +19,10 @@ set -euo pipefail
 BASE="${BASE_REF:-origin/release/v3.0.X}"
 MODE=dry
 PR_CHECK=1
-# Newline-delimited lists (bash 3.2-safe; empty arrays trip `set -u` there).
+# Newline-delimited lists (bash 3.2-safe; empty arrays trip `set -u` there). Word-splitting is intended.
+# shellcheck disable=SC2086
 SKIP_BRANCHES="$(printf '%s\n' ${PRUNE_SKIP_BRANCHES:-})"
+# shellcheck disable=SC2086
 SKIP_PATHS="$(printf '%s\n' ${PRUNE_SKIP_PATHS:-})"
 usage() { echo "usage: $0 [--dry-run|--apply] [--skip-branch NAME]... [--skip-path GLOB]... [--no-pr-check]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -87,7 +89,7 @@ classify_dirty() { # wt -> echoes "clean" | "dirty"
   if [ "${#rest[@]}" -eq 0 ]; then echo clean; return; fi
   # Stale-index exception: staged-only, index equals BASE for every staged path.
   for line in "${rest[@]}"; do
-    [ "${line:1:1}" = " " ] && [ "${line:0:1}" != "?" ] || { echo dirty; return; }
+    if [ "${line:1:1}" != " " ] || [ "${line:0:1}" = "?" ]; then echo dirty; return; fi
     staged_paths+=("${line:3}")
   done
   git -C "$wt" diff --cached HEAD --quiet && { echo dirty; return; }
@@ -98,7 +100,6 @@ classify_dirty() { # wt -> echoes "clean" | "dirty"
   fi
 }
 
-cur=""
 while IFS= read -r wt; do
   case "$wt" in
     "$ROOT"/.claude/worktrees/*|"$ROOT"/.worktrees/*) ;;

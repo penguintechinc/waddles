@@ -216,5 +216,28 @@ mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"
 out="$(env -u REPO D="$D" POLL_SECONDS=0 PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" 7 "$H" 1 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q "pr merge 7 -R acme/widgets" "$D/calls"; then PASS=$((PASS + 1)); echo "ok   repo from gh repo view"; else FAIL=$((FAIL + 1)); echo "FAIL repo from gh repo view (rc=$rc)"; printf '%s\n' "$out"; fi
 
+# zero checks examined is a failure (exit 1) once NO_CHECKS_POLLS consecutive polls see none
+mk release/v3.0.X "$H" "[]"
+ENVX="NO_CHECKS_POLLS=2"
+expect "zero checks examined fails (exit 1)" 1 "examined=0 \(2/2 polls\).*FAIL: zero checks examined after 2 polls" 7 "$H" 5
+no_call "zero checks never merges" "pr merge"
+# checks appearing resets the zero-checks counter
+mk release/v3.0.X "$H" "[]"
+printf '{"baseRefName":"release/v3.0.X","state":"OPEN","headRefOid":"%s","mergeCommit":{"oid":"mmm111"},"statusCheckRollup":[%s,%s]}\n' "$H" "$OK_GATE" "$OK_BUILD" > "$D/pr2.json"
+ENVX="NO_CHECKS_POLLS=3 SWITCH_AFTER=2"
+expect "checks appear before the zero-checks limit" 0 "MERGED" 7 "$H" 5
+ENVX="NO_CHECKS_POLLS=0"
+expect "NO_CHECKS_POLLS=0 rejected (exit 4)" 4 "positive integer" 7 "$H" 1
+
+# upper-case sha is accepted and normalized (bash 3.2-safe lower-casing)
+mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"
+expect "upper-case sha normalized" 0 "MERGED" 7 "$(printf '%s' "$H" | tr 'a-f' 'A-F')" 1
+has_call "normalized sha used for the pin" "match-head-commit $H"
+
+# --help prints the header and exits 0 without calling gh
+mk release/v3.0.X "$H" "[$OK_GATE]"
+expect "--help exits 0" 0 "Usage: scripts/release-merge.sh" --help
+no_call "--help makes no gh calls" "."
+
 echo "release-merge self-test: pass=$PASS fail=$FAIL (cases=$((PASS + FAIL)))"
 [ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]

@@ -10,9 +10,11 @@ mkdir -p "$SCRATCH/bin"
 H="abcdef1234567890abcdef1234567890abcdef12"
 OTHER="1111111111111111111111111111111111111111"
 
-# gh shim: pr view -> $FIXTURE; api jobs/<id>/logs -> $SCRATCH/log-<id>; everything else fails loudly.
+# gh shim: repo view -> o/r; pr view -> $FIXTURE; api jobs/<id>/logs -> $SCRATCH/log-<id>;
+# run rerun -> refused unless RERUN_OK=1 (then logged to $SCRATCH/reruns); everything else fails loudly.
 cat > "$SCRATCH/bin/gh" <<'SHIM'
 #!/usr/bin/env bash
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then echo "o/r"; exit 0; fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   if [ -n "${FAIL_PRVIEW:-}" ]; then
     n=0; [ -f "$SCRATCH/prview.n" ] && n="$(cat "$SCRATCH/prview.n")"
@@ -32,6 +34,7 @@ if [ "$1" = "api" ]; then
   [ -f "$SCRATCH/log-$id" ] || exit 1
   cat "$SCRATCH/log-$id"; exit 0
 fi
+if [ "$1" = "run" ] && [ "$2" = "rerun" ] && [ -n "${RERUN_OK:-}" ]; then echo "$3" >> "$SCRATCH/reruns"; exit 0; fi
 if [ "$1" = "run" ] && [ "$2" = "rerun" ]; then echo "run $3 cannot be rerun; its workflow file may be broken" >&2; exit 1; fi
 echo "gh shim: unexpected call: $*" >&2; exit 99
 SHIM
@@ -46,6 +49,7 @@ mk() {
 fail_chk() { printf '{"__typename":"CheckRun","name":"%s","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"%s"}' "$1" "$(url "$2" "$3")"; }
 GATE_OK='{"__typename":"CheckRun","name":"ci-gate","status":"COMPLETED","conclusion":"SUCCESS"}'
 GATE_BAD="$(fail_chk ci-gate 9 99)"
+ck_ok() { printf '{"__typename":"CheckRun","name":"%s","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"%s"}' "$1" "$(url 8 88)"; }
 
 # expect <name> <rx> <args...>
 expect() {
@@ -58,13 +62,17 @@ expect() {
 
 echo "step timed out after 10 minutes" > "$SCRATCH/log-11"; echo "apt attempt 3 failed after 60s" > "$SCRATCH/log-12"
 echo "error[E0308]: mismatched types" > "$SCRATCH/log-13"
+echo "sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?" > "$SCRATCH/log-15"
 
 mk "$H" "[$GATE_OK]";                                  expect "green unpinned: warn + full-sha merge" "would merge via release-merge.sh pinned to $H" 5
 mk "$H" "[$GATE_OK]";                                  expect "green pinned matches" "would merge via release-merge.sh pinned to $H" "5@$H"
 mk "$OTHER" "[$GATE_OK]";                              expect "pinned head drift: skip" "head changed, needs human" "5@$H"
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 11)]";              expect "timeout job -> rerun" "would rerun --failed \(all failed jobs" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 12)]";              expect "apt attempt job -> rerun" "would rerun --failed \(all failed jobs" 5
+mk "$H" "[$GATE_BAD,$(fail_chk a 7 15)]";              expect "sccache startup timeout -> rerun" "would rerun --failed \(all failed jobs are infra flakes" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 11),$(fail_chk b 7 13)]"; expect "mixed run -> REAL" "REAL FAILURE" 5
+mk "$H" "[$GATE_BAD,$(ck_ok build)]";                 expect "stale ci-gate -> rerun gate run" "run=9 DRY-RUN would rerun --failed \(ci-gate ran before" 5
+mk "$H" "[]";                                          expect "zero checks: wait, never merge" "WAIT zero checks examined \(1/10\)" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 14)]";              expect "unreadable log -> REAL" "REAL FAILURE" 5
 
 # live (non-dry) rerun refused by GitHub: watcher must keep running, retry next tick, not consume the counter
@@ -108,6 +116,44 @@ if [ "$rc" -ne 0 ]; then PASS=$((PASS + 1)); echo "ok   short pin refused"; else
 ln -s "$SCRATCH" "$SCRATCH/link"; rc=0
 RELEASE_AUTO_MERGE_STATE="$SCRATCH/link" PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --dry-run 5 >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then PASS=$((PASS + 1)); echo "ok   symlink state refused"; else FAIL=$((FAIL + 1)); echo "FAIL symlink state accepted"; fi
+
+# expect_rc <name> <want-rc> <rx> <args...>: run live (no implicit --dry-run) under a 10s timeout; ENVX adds env.
+ENVX=""
+expect_rc() {
+  local name="$1" want="$2" rx="$3" out rc=0; shift 3
+  # shellcheck disable=SC2086
+  out="$(env SCRATCH="$SCRATCH" FIXTURE="$SCRATCH/f.json" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state-x" $ENVX PATH="$SCRATCH/bin:$PATH" timeout 10 bash "$SCRIPT" "$@" 2>&1)" || rc=$?
+  if [ "$rc" -eq "$want" ] && grep -Eq -e "$rx" <<<"$(tr '\n' ' ' <<<"$out")"; then PASS=$((PASS + 1)); echo "ok   $name"
+  else FAIL=$((FAIL + 1)); echo "FAIL $name (rc=$rc want=$want, want /$rx/)"; printf '%s\n' "$out" | tail -8; fi
+  rm -rf "$SCRATCH/state-x"; ENVX=""
+}
+
+# --exit-on-stuck: a single stuck PR exits 1 fast instead of waiting --max-hours
+mk "$H" "[$GATE_BAD,$(fail_chk a 7 13)]"
+expect_rc "real failure + --exit-on-stuck exits 1" 1 "REAL FAILURE.*FAIL: every open PR is stuck" --exit-on-stuck --interval 0 "5@$H"
+mk "$H" "[]"; ENVX="NO_CHECKS_TICKS=2"
+expect_rc "zero checks + --exit-on-stuck exits 1" 1 "FAIL zero checks examined for 2 ticks" --exit-on-stuck --interval 0 "5@$H"
+mk "$OTHER" "[$GATE_OK]"
+expect_rc "head drift + --exit-on-stuck exits 1" 1 "FAIL: every open PR is stuck \(1\)" --exit-on-stuck --interval 0 "5@$H"
+# flake that persists: rerun up to the cap (2), then stuck -> exit 1
+rm -f "$SCRATCH/reruns"; mk "$H" "[$GATE_BAD,$(fail_chk a 7 15)]"; ENVX="RERUN_OK=1"
+expect_rc "persistent flake: 2 reruns then stuck (exit 1)" 1 "rerun cap \(2\) reached.*FAIL: every open PR is stuck" --exit-on-stuck --interval 0 "5@$H"
+if [ "$(grep -c '^7$' "$SCRATCH/reruns" 2>/dev/null || true)" = 2 ]; then PASS=$((PASS + 1)); echo "ok   flake run 7 rerun exactly twice"
+else FAIL=$((FAIL + 1)); echo "FAIL flake rerun count: $(tr '\n' ' ' < "$SCRATCH/reruns" 2>/dev/null)"; fi
+# all green + --exit-on-stuck merges (stub release-merge) and exits 0
+FD2="$SCRATCH/fd2"; mkdir -p "$FD2/scripts"; rm -f "$FD2/merged"
+cp "$SCRIPT" "$FD2/scripts/release-auto-merge.sh"
+printf '#!/usr/bin/env bash\necho "$*" > "%s/merged"\n' "$FD2" > "$FD2/scripts/release-merge.sh"; chmod +x "$FD2/scripts/release-merge.sh"
+mk "$H" "[$GATE_OK]"; cp "$SCRATCH/f.json" "$FD2/pr-5.json"; sed 's/"state":"OPEN"/"state":"MERGED"/' "$FD2/pr-5.json" > "$FD2/pr-5-merged.json"
+rc=0; out="$(env SCRATCH="$SCRATCH" FIXTURE_DIR="$FD2" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state6" PATH="$SCRATCH/bin:$PATH" timeout 10 bash "$FD2/scripts/release-auto-merge.sh" --exit-on-stuck --interval 0 "5@$H" 2>&1)" || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'all PRs merged/closed; done' <<<"$out" && [ "$(cat "$FD2/merged")" = "5 $H 1" ]; then
+  PASS=$((PASS + 1)); echo "ok   all green: release-merge called pinned (5 <sha> 1), exit 0"
+else FAIL=$((FAIL + 1)); echo "FAIL all-green merge (rc=$rc)"; printf '%s\n' "$out"; fi
+# bad pins and --help
+rc=0; PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --dry-run "5@gggggggggggggggggggggggggggggggggggggggg" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then PASS=$((PASS + 1)); echo "ok   non-hex 40-char pin refused"; else FAIL=$((FAIL + 1)); echo "FAIL non-hex pin accepted"; fi
+rc=0; out="$(PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --help 2>&1)" || rc=$?
+if [ "$rc" -eq 0 ] && grep -q -e '--exit-on-stuck' <<<"$out"; then PASS=$((PASS + 1)); echo "ok   --help exits 0"; else FAIL=$((FAIL + 1)); echo "FAIL --help (rc=$rc)"; fi
 
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]
