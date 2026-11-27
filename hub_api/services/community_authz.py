@@ -81,6 +81,7 @@ from quart import Request
 from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, unauthorized
 from services.global_identity import is_global_admin
+from services.membership_state import is_banned
 from services.schema import bind_community_authz_tables
 from services.scope_registry import (
     KIND_ADMIN,
@@ -633,11 +634,23 @@ def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[s
     if member is None or not member.community_role_id:
         return frozenset()
     role_row = dal(dal.community_roles.id == member.community_role_id).select().first()
-    if role_row is None:
+    return member_role_scopes(member, role_row)
+
+
+def member_role_scopes(member: Any, role_row: Any) -> frozenset[str]:
+    """THE scope resolution for one membership row + its joined `community_roles` row (pure).
+
+    Admin-kind roles resolve to the full registry; otherwise the member's `claims_cache`, falling
+    back to the role's `base_claims`. No role row, or a BANNED membership, holds no scopes (fail
+    closed). Every effective-scope reader (authz gates, `/auth/me`) goes through this one helper.
+    """
+    if member is None or role_row is None or is_banned(member):
         return frozenset()
     if _row_kind(role_row) == KIND_ADMIN:
         return effective_scopes(KIND_ADMIN, None)
-    return _parse_claims_scopes(member.claims_cache) or _parse_claims_scopes(role_row.base_claims)
+    return _parse_claims_scopes(getattr(member, "claims_cache", None)) or _parse_claims_scopes(
+        role_row.base_claims
+    )
 
 
 @dataclass(slots=True, frozen=True)
