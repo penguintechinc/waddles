@@ -1115,6 +1115,42 @@ class TestRadioStationDefault:
         assert _station_row(streaming_db, other_default).is_default is True
 
 
+class TestAuditClassification:
+    """The three inline-authz admin routes are audited as music config changes."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/music/providers/<provider>/config"),
+            (
+                "POST",
+                "/api/v1/admin/<cuuid:community_id>/music/radio-stations/<puuid:station_id>/test",
+            ),
+            (
+                "PUT",
+                "/api/v1/admin/<cuuid:community_id>/music/radio-stations/<puuid:station_id>/default",
+            ),
+        ],
+    )
+    def test_route_is_classified_music_config_changed(self, key: tuple[str, str]) -> None:
+        from services.audit_events import INLINE_AUTHZ_ROUTES, AuditAction, AuditCategory
+
+        route = INLINE_AUTHZ_ROUTES[key]
+        assert (route.category, route.action) == (
+            AuditCategory.ADMIN,
+            AuditAction.ADMIN_MUSIC_CONFIG_CHANGED,
+        )
+
+    def test_rules_match_registered_blueprint_rules(self, app: Quart) -> None:
+        rules = {(m, r.rule) for r in app.url_map.iter_rules() for m in r.methods or ()}
+        for suffix, method in (
+            ("providers/<provider>/config", "PUT"),
+            ("radio-stations/<puuid:station_id>/test", "POST"),
+            ("radio-stations/<puuid:station_id>/default", "PUT"),
+        ):
+            assert (method, f"/api/v1/admin/<cuuid:community_id>/music/{suffix}") in rules
+
+
 class TestGuardedProbe:
     """`services.url_guard.guarded_probe` -- headers only, every redirect hop re-validated."""
 
