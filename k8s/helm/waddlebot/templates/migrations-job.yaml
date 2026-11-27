@@ -22,7 +22,7 @@
 # Hook-weight ordering within the post-install phase (Helm runs a phase's hooks strictly by
 # ascending weight, waiting for each to complete before the next starts): this Job's
 # dedicated SA/Secret (migrations-job-rbac.yaml, secrets.yaml; weight -10) -> this Job
-# (weight -5) -> seaweedfs-bucket-init (weight 1) -> core-bundle-seeder (weight 5, needs
+# (weight -5) -> core-bundle-seeder (weight 5, needs  [bucket init = hub-api initContainer]
 # both the schema AND hub-api `/ready`). hub-api's own startup (hub_api/bootstrap.py) only
 # OBSERVES `alembic_version` (never creates/alters schema) and polls until this Job has run
 # -- see that module's docstring for its state machine.
