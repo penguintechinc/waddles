@@ -213,10 +213,12 @@ async def create_community(
 
     slug = name.lower().strip().replace(" ", "-")
     comm = dal.communities
-    # Name uniqueness is per tenant (never leaks another tenant's names); a platform server
-    # (e.g. a Discord guild) may be claimed by ONE community across ALL tenants.
-    if await async_dal.select_async(dal((comm.name == slug) & (comm.tenant_id == tenant_id))):
-        raise conflict("Community name already exists")
+    # Names stay globally unique (`communities_name_key`): name-only lookups (Rust tenant
+    # resolver, seeds) would cross tenants otherwise. Per-tenant uniqueness is a follow-up; the
+    # generic message never says WHICH tenant holds the name. A platform server (e.g. a Discord
+    # guild) may be claimed by ONE community across ALL tenants.
+    if await async_dal.select_async(dal(comm.name == slug)):
+        raise conflict("Community name is unavailable")
     if platform_server_id and await async_dal.select_async(
         dal((comm.platform == platform) & (comm.platform_server_id == platform_server_id))
     ):

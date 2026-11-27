@@ -46,13 +46,14 @@ async def test_claimed_server_id_rejected_across_tenants(automation_db: Any) -> 
     assert dal(dal.communities.name == "second").isempty()
 
 
-async def test_same_name_across_tenants_ok_within_tenant_409(automation_db: Any) -> None:
+async def test_name_is_globally_unique_with_generic_409(automation_db: Any) -> None:
     dal = automation_db.dal
     t1 = dal.tenants.insert(slug="t1y", display_name="A", is_active=True)
     t2 = dal.tenants.insert(slug="t2y", display_name="B", is_active=True)
     dal.commit()
     await _create(automation_db, t1, "Shared Name")
-    await _create(automation_db, t2, "Shared Name")
-    with pytest.raises(ApiError) as exc:
-        await _create(automation_db, t1, "shared name")
-    assert exc.value.status_code == 409
+    for tenant in (t2, t1):
+        with pytest.raises(ApiError) as exc:
+            await _create(automation_db, tenant, "shared name")
+        assert exc.value.status_code == 409
+        assert exc.value.message == "Community name is unavailable"

@@ -114,7 +114,7 @@ class TestSelfCreate:
         assert dal(dal.communities).count() == before
         flag.assert_not_awaited()  # rejected before flag / cap / slot logic
 
-    async def test_same_name_other_tenant_ok_same_tenant_409(
+    async def test_name_taken_in_other_tenant_is_generic_409(
         self, app: Quart, automation_db: Any, flag: AsyncMock
     ) -> None:
         dal = automation_db.dal
@@ -122,10 +122,13 @@ class TestSelfCreate:
         dal.communities.insert(name="taken", display_name="t", tenant_id=other, is_active=True)
         dal.commit()
         client = app.test_client()
-        ok = await client.post("/api/v1/communities", json={"name": "Taken"}, headers=_hdr())
-        assert ok.status_code == 201
-        dup = await client.post("/api/v1/communities", json={"name": "taken"}, headers=_hdr())
+        # Names stay globally unique for now (per-tenant uniqueness is a follow-up); the 409 is
+        # generic and never names the tenant holding it.
+        dup = await client.post("/api/v1/communities", json={"name": "Taken"}, headers=_hdr())
         assert dup.status_code == 409
+        body = await dup.get_json()
+        assert "other" not in str(body).lower()
+        assert dal(dal.communities.name == "taken").count() == 1
 
     async def test_missing_name_is_400(self, app: Quart, flag: AsyncMock) -> None:
         resp = await app.test_client().post("/api/v1/communities", json={}, headers=_hdr())

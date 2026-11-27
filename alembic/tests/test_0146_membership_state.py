@@ -1,4 +1,4 @@
-"""Tests for 0146_membership_state: state backfill + the per-tenant community-name unique index."""
+"""Tests for 0146_membership_state: state backfill, closed-set CHECK, downgrade round trip."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _scalar(cur: psycopg2.extensions.cursor, sql: str) -> object:
 
 
 @requires_docker
-def test_backfills_state_and_scopes_name_uniqueness_to_tenant() -> None:
+def test_backfills_state_check_and_round_trip() -> None:
     with migrated_postgres("0146-membership-state") as db:
         alembic_cli("downgrade", _PREV, dsn=db.dsn)
         conn = psycopg2.connect(db.dsn)
@@ -69,11 +69,6 @@ def test_backfills_state_and_scopes_name_uniqueness_to_tenant() -> None:
                         "VALUES (%s, 'discord', %s, %s)",
                         (cid, puid, role),
                     )
-                # pre-upgrade: the GLOBAL unique still blocks a same-name row in another tenant
-                with pytest.raises(psycopg2.errors.UniqueViolation):
-                    cur.execute(
-                        "INSERT INTO communities (name, tenant_id) VALUES ('c1', 2)"
-                    )
 
             alembic_cli("upgrade", _REV, dsn=db.dsn)
 
@@ -84,45 +79,26 @@ def test_backfills_state_and_scopes_name_uniqueness_to_tenant() -> None:
                     (cid,),
                 )
                 assert dict(cur.fetchall()) == {"bad": 2, "good": 1}
-                # composite replaces the global constraint: other tenant OK, same tenant blocked
-                cur.execute(
-                    "INSERT INTO communities (name, tenant_id) VALUES ('c1', 2)"
-                )
-                with pytest.raises(psycopg2.errors.UniqueViolation):
-                    cur.execute(
-                        "INSERT INTO communities (name, tenant_id) VALUES ('c1', 1)"
-                    )
-                assert (
-                    _scalar(
-                        cur,
-                        "SELECT count(*) FROM pg_constraint WHERE conrelid = 'communities'::regclass "
-                        "AND conname = 'communities_name_key'",
-                    )
-                    == 0
-                )
-                cur.execute(
-                    "DELETE FROM communities WHERE name = 'c1' AND tenant_id = 2"
-                )
+                with pytest.raises(psycopg2.errors.CheckViolation):
+                    cur.execute("UPDATE community_members SET membership_state = 3")
 
-            # idempotent re-run, then a clean round trip restores the global constraint
+            # idempotent re-run, then a round trip folds BANNED back into the role string
             alembic_cli("downgrade", _PREV, dsn=db.dsn)
             alembic_cli("upgrade", _REV, dsn=db.dsn)
             alembic_cli("downgrade", _PREV, dsn=db.dsn)
             with conn.cursor() as cur:
-                assert (
-                    _scalar(
-                        cur,
-                        "SELECT count(*) FROM pg_constraint WHERE conrelid = 'communities'::regclass "
-                        "AND conname = 'communities_name_key'",
-                    )
-                    == 1
+                cur.execute(
+                    "SELECT role FROM community_members WHERE platform_user_id = 'bad'"
                 )
+                assert cur.fetchone()[0] == "banned"  # type: ignore[index]
                 assert (
                     _scalar(
                         cur,
-                        "SELECT to_regclass('public.uq_communities_tenant_name') IS NULL",
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_name = 'community_members' "
+                        "AND column_name = 'membership_state'",
                     )
-                    is True
+                    == 0
                 )
         finally:
             conn.close()

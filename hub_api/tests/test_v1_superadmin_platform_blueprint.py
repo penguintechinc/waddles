@@ -245,7 +245,7 @@ class TestCommunityManagement:
         )
         assert response.status_code == 409
 
-    async def test_create_community_same_name_other_tenant_is_allowed(
+    async def test_create_community_same_name_other_tenant_is_generic_409(
         self, client: Any, admin_db: Any
     ) -> None:
         dal = admin_db.dal
@@ -257,7 +257,8 @@ class TestCommunityManagement:
             headers=_headers(),
             json={"name": "Acme Community", "platform": "discord"},
         )
-        assert response.status_code == 201
+        assert response.status_code == 409
+        assert "other-tenant" not in (await response.get_data(as_text=True))
 
     async def test_create_community_invalid_type_is_400(self, client: Any) -> None:
         response = await client.post(
