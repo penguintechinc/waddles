@@ -243,6 +243,11 @@ class RefreshResponse:
 
     success: bool
     token: str
+    access_token: str | None = None
+    refresh_token: str | None = None
+
+
+ALLOWED_DESKTOP_OAUTH_REDIRECT_URIS: frozenset[str] = frozenset({"waddles://oauth/callback"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -637,17 +642,23 @@ async def link_oauth_legacy() -> tuple[dict[str, object], int]:
 @auth_bp.route("/refresh", methods=["POST"])
 @validate_response(RefreshResponse)
 async def refresh() -> RefreshResponse | tuple[dict[str, object], int]:
-    """Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute access token out.
+    """Renew the session from the HttpOnly refresh cookie or JSON `refresh_token` body.
 
     The refresh token rotates on every use (the browser takes the new `Set-Cookie`); presenting
-    one that was already rotated away revokes the whole session. The response body still carries
-    the new access `token` (the SPA ignores it -- it lives in the cookie).
+    one that was already rotated away revokes the whole session. Non-browser desktop clients
+    without a cookie jar may pass `{"refresh_token": "..."}` in the JSON body and read
+    `token` / `access_token` + `refresh_token` from the response.
     """
     async_dal, dal = _dal()
     cfg = _cfg()
+    raw_refresh_token = refresh_token_from_cookie(request)
+    if not raw_refresh_token:
+        body = await request.get_json(silent=True)
+        if isinstance(body, dict) and isinstance(body.get("refresh_token"), str):
+            raw_refresh_token = body["refresh_token"]
     try:
         renewed = await auth_service.refresh_session(
-            async_dal, dal, cfg, refresh_token=refresh_token_from_cookie(request) or ""
+            async_dal, dal, cfg, refresh_token=raw_refresh_token or ""
         )
     except ApiError as exc:
         logger.info("%s refused: status=%s code=%s", "refresh", exc.status_code, exc.code)
@@ -655,7 +666,12 @@ async def refresh() -> RefreshResponse | tuple[dict[str, object], int]:
     issue_session_cookie(renewed.access_token)
     if renewed.refresh_token is not None:
         issue_refresh_cookie(renewed.refresh_token, max_age=cfg.refresh_token_ttl_seconds)
-    return RefreshResponse(success=True, token=renewed.access_token)
+    return RefreshResponse(
+        success=True,
+        token=renewed.access_token,
+        access_token=renewed.access_token,
+        refresh_token=renewed.refresh_token,
+    )
 
 
 @auth_bp.route("/logout", methods=["POST"])
@@ -868,6 +884,16 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
     """Oauth start."""
     async_dal, dal = _dal()
     mode = request.args.get("mode", "login")
+    redirect_uri = request.args.get("redirect_uri")
+    is_desktop = False
+    if redirect_uri is not None:
+        if redirect_uri not in ALLOWED_DESKTOP_OAUTH_REDIRECT_URIS:
+            return cast(
+                tuple[dict[str, object], int],
+                error_response("Invalid redirect_uri", 400, "INVALID_REDIRECT_URI"),
+            )
+        is_desktop = True
+
     try:
         nonce = binding.new_nonce()
         authorize_url, state = await oauth_service.start_oauth(
@@ -877,16 +903,19 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
             mode=mode,
             callback_base_url=_callback_base_url(),
             binding_nonce=nonce,
+            desktop=is_desktop,
         )
     except ApiError as exc:
         logger.warning("auth.oauth_start.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
 
-    @after_this_request
-    def _bind_browser(response: Any) -> Any:
-        """Bind the login state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
-        binding.set_binding_cookie(response, LOGIN_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
-        return response
+    if not is_desktop:
+
+        @after_this_request
+        def _bind_browser(response: Any) -> Any:
+            """Bind the login state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+            binding.set_binding_cookie(response, LOGIN_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+            return response
 
     return OAuthStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
@@ -936,8 +965,15 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         return redirect(f"{frontend_origin}/login?error={error}")
 
     exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(
-        async_dal, dal, token=token, platform=platform
+        async_dal,
+        dal,
+        token=token,
+        platform=platform,
+        desktop=state.startswith(oauth_service.DESKTOP_STATE_PREFIX),
     )
+    if state.startswith(oauth_service.DESKTOP_STATE_PREFIX):
+        return redirect(f"waddles://oauth/callback?code={exchange_code}&state={state}")
+
     page = redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
     binding.clear_binding_cookie(page, LOGIN_BINDING_COOKIE)
     binding.set_binding_cookie(

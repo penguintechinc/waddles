@@ -29,6 +29,7 @@ from functools import wraps
 from typing import Any, Callable, FrozenSet, Optional
 
 from .auth import verify_jwt_token
+from .tenancy import TenantIsolationError, resolve_cat_token
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ def require_scope(*required_scopes: str) -> Callable:
     def decorator(f: Callable) -> Callable:
         @wraps(f)
         async def decorated_function(*args: Any, **kwargs: Any) -> Any:
-            from quart import request
+            from quart import current_app, request
 
             from .api_utils import error_response
 
@@ -158,22 +159,55 @@ def require_scope(*required_scopes: str) -> Callable:
                 return error_response("Authentication required", status_code=403)
 
             token = auth_header[7:]
-            payload = verify_jwt_token(token)
-            if payload is None:
-                request.authz_decision = AuthzDecision(required_scopes, False, "invalid_token")
-                logger.warning(
-                    "require_scope: invalid or expired token",
-                    extra={
-                        "event_type": "AUTHZ",
-                        "action": "require_scope",
-                        "result": "FORBIDDEN",
-                    },
-                )
-                return error_response("Invalid or expired token", status_code=403)
+            if token.startswith("wdl_c_"):
+                try:
+                    cat = resolve_cat_token(current_app.config.get("dal"), token)
+                except TenantIsolationError:
+                    request.authz_decision = AuthzDecision(
+                        required_scopes, False, "tenant_isolation_error"
+                    )
+                    return error_response("Forbidden", status_code=403)
+                if cat is None:
+                    request.authz_decision = AuthzDecision(
+                        required_scopes, False, "invalid_token"
+                    )
+                    logger.warning(
+                        "require_scope: invalid or expired CAT",
+                        extra={
+                            "event_type": "AUTHZ",
+                            "action": "require_scope",
+                            "result": "FORBIDDEN",
+                        },
+                    )
+                    return error_response("Invalid or expired token", status_code=403)
 
-            granted = _parse_scope_claim(payload.get("scope"))
-            subject = payload.get("sub")
-            subject = None if subject is None else str(subject)
+                view_cid = (request.view_args or {}).get("community_id")
+                subject = f"cat:{cat.token_id}"
+                if view_cid is not None and view_cid != cat.community_id:
+                    request.authz_decision = AuthzDecision(
+                        required_scopes, False, "community_mismatch", subject, cat.scopes
+                    )
+                    return error_response("Token not authorized for this community", status_code=403)
+
+                granted = cat.scopes
+            else:
+                payload = verify_jwt_token(token)
+                if payload is None:
+                    request.authz_decision = AuthzDecision(required_scopes, False, "invalid_token")
+                    logger.warning(
+                        "require_scope: invalid or expired token",
+                        extra={
+                            "event_type": "AUTHZ",
+                            "action": "require_scope",
+                            "result": "FORBIDDEN",
+                        },
+                    )
+                    return error_response("Invalid or expired token", status_code=403)
+
+                granted = _parse_scope_claim(payload.get("scope"))
+                raw_sub = payload.get("sub")
+                subject = None if raw_sub is None else str(raw_sub)
+
             if not has_required_scopes(granted, required_scopes):
                 request.authz_decision = AuthzDecision(
                     required_scopes, False, "insufficient_scope", subject, granted

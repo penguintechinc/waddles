@@ -6,7 +6,7 @@
 # node:20 reached upstream EOL 2026-04-30; bumped to node:24 (same interim pin as
 # the former hub backend image) -- org target node:26 not yet adopted here.
 # Stage 1: Build frontend
-FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS frontend-build
+FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530 AS frontend-build
 
 WORKDIR /build/admin/hub_module/frontend
 
@@ -25,15 +25,20 @@ COPY admin/hub_module/frontend/ ./
 RUN npm run build
 
 # Stage 2: Express runtime -- static serving + /api proxy only
-FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530
 
 WORKDIR /app
 
 # OS-package CVE fix: exact pin of the Debian bookworm security release for
-# perl-base (trivy HIGH/CRITICAL gate). Never a blanket `apt-get upgrade`
-# (devops-containers.md); drop the pin once the base digest is rebuilt upstream.
+# perl-base and linux-pam (CVE-2025-6020, trivy HIGH/CRITICAL gate). Never a blanket
+# `apt-get upgrade` (devops-containers.md); drop once the base digest is rebuilt upstream.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    perl-base=5.36.0-7+deb12u4 dumb-init curl \
+    perl-base=5.36.0-7+deb12u4 \
+    libpam-modules=1.5.2-6+deb12u3 \
+    libpam-modules-bin=1.5.2-6+deb12u3 \
+    libpam-runtime=1.5.2-6+deb12u3 \
+    libpam0g=1.5.2-6+deb12u3 \
+    dumb-init curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

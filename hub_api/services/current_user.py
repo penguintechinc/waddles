@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import parse_scope_claim
-from quart import Request
+from flask_core.tenancy import TenantIsolationError, resolve_cat_token
+from quart import Request, current_app
 
 from services.errors import unauthorized
 
@@ -34,6 +35,15 @@ def get_current_user_id(request: Request) -> int:
         raise unauthorized("Authentication required")
 
     token = auth_header[7:]
+    if token.startswith("wdl_c_"):
+        try:
+            cat = resolve_cat_token(current_app.config.get("dal"), token)
+        except TenantIsolationError as exc:
+            raise unauthorized(str(exc)) from exc
+        if cat is None or cat.created_by_user_id is None:
+            raise unauthorized("Invalid or expired token")
+        return int(cat.created_by_user_id)
+
     payload = verify_jwt_token(token)
     if payload is None:
         raise unauthorized("Invalid or expired token")

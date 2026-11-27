@@ -3588,6 +3588,28 @@ components:
       - ranks
       title: MyActivityStats
       type: object
+    MyCommunityDTO:
+      description: Community summary returned by `GET /api/v1/communities/my`.
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        role:
+          title: Role
+          type: string
+      required:
+      - id
+      - name
+      - displayName
+      - role
+      title: MyCommunityDTO
+      type: object
     MyJoinRequestDTO:
       description: Response sub-DTO -- snake_case, matches Node's raw SELECT shape
         verbatim.
@@ -16329,10 +16351,13 @@ paths:
         The refresh token rotates on every use (the browser takes the new `Set-Cookie`);
         presenting
 
-        one that was already rotated away revokes the whole session. The response
-        body still carries
+        one that was already rotated away revokes the whole session. Non-browser desktop
+        clients
 
-        the new access `token` (the SPA ignores it -- it lives in the cookie).'
+        without a cookie jar may pass `{"refresh_token": "..."}` in the JSON body
+        and read
+
+        `token` / `access_token` + `refresh_token` from the response.'
       operationId: post_refresh
       parameters: []
       responses:
@@ -16342,6 +16367,18 @@ paths:
               schema:
                 description: Response DTO for refresh endpoints.
                 properties:
+                  access_token:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Access Token
+                  refresh_token:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Refresh Token
                   success:
                     title: Success
                     type: boolean
@@ -16354,8 +16391,8 @@ paths:
                 title: RefreshResponse
                 type: object
           description: Response DTO for refresh endpoints.
-      summary: 'Renew the session: the HttpOnly refresh cookie in, a fresh 15-minute
-        access token out.'
+      summary: Renew the session from the HttpOnly refresh cookie or JSON `refresh_token`
+        body.
   /api/v1/auth/register:
     post:
       description: ''
@@ -16750,6 +16787,30 @@ paths:
           description: Self-hosted ALTCHA proof-of-work challenge DTO.
       summary: Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited,
         fail closed).
+  /api/v1/communities/my:
+    get:
+      description: ''
+      operationId: get_list_my_communities
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/communities/my`.
+                properties:
+                  communities:
+                    items:
+                      $ref: '#/components/schemas/MyCommunityDTO'
+                    title: Communities
+                    type: array
+                required:
+                - communities
+                title: MyCommunitiesResponse
+                type: object
+          description: Response DTO for `GET /api/v1/communities/my`.
+      summary: '`GET /api/v1/communities/my` -- communities the caller (JWT user or
+        CAT) can act on.'
   /api/v1/communities/{community_id}/calendar/event-sync:
     get:
       description: ''
