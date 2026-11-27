@@ -343,6 +343,7 @@ async def list_my_communities() -> MyCommunitiesResponse | tuple[dict[str, objec
     try:
         user_id = get_current_user_id(request)
     except ApiError as exc:
+        current_app.logger.warning("communities/my: user auth failed (%s)", exc.code)
         return _err(exc)
 
     if "community_members" in getattr(dal, "tables", ()):
