@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid as uuid_mod
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum
@@ -31,7 +32,9 @@ from typing import Any
 
 from flask_core.reputation_tiers import REPUTATION_TIERS, reputation_tier
 
+from services import ban_suppression
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found
+from services.member_roles import run_write_job
 from services.schema import (
     bind_auth_tables,
     bind_erasure_reputation_tables,
@@ -202,6 +205,49 @@ async def _admin_actor(async_dal: Any, dal: Any, actor_user_id: int | None) -> s
     return str(row.uuid)
 
 
+def _admin_actor_sync(dal: Any, actor_user_id: int | None) -> str:
+    """Sync twin of :func:`_admin_actor` for work that runs inside one locked transaction."""
+    if actor_user_id is None:
+        raise forbidden("A signed-in admin is required for this action")
+    users = dal.hub_users
+    row = dal(users.id == actor_user_id).select(users.uuid).first()
+    if row is None or not row.uuid:
+        raise forbidden("Acting admin has no identity UUID")
+    return str(row.uuid)
+
+
+def _member_uuid_sync(dal: Any, *, community_id: int, hub_user_id: int) -> str | None:
+    """Sync twin of :func:`_member_uuid` (same transaction as the caller's member lock)."""
+    cm = dal.community_members
+    row = (
+        dal((cm.community_id == community_id) & (cm.user_id == str(hub_user_id)))
+        .select(cm.user_uuid)
+        .first()
+    )
+    return str(row.user_uuid) if row is not None and row.user_uuid else None
+
+
+def _execute_sync(dal: Any, sql: str, args: list[Any]) -> Any:
+    """Run one reputation SQL function in the caller's transaction; typed RAISEs -> API errors."""
+    try:
+        return dal.executesql(sql, placeholders=args)
+    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
+        translated = _translate_db_error(exc)
+        if translated is exc:
+            raise
+        raise translated from exc
+
+
+async def _run_job[T](async_dal: Any, dal: Any, job: Callable[[], T]) -> T:
+    """Run ``job`` as ONE committed (or rolled back) executor transaction."""
+    return await run_write_job(async_dal, dal, job)
+
+
+#: An optional in-transaction pre-step (e.g. `community_authz.lock_member_for_change`) that locks
+#: and authorizes the target member BEFORE the write, in the very same transaction.
+MemberLock = Callable[[], Any]
+
+
 def _int_literal(dal: Any, value: int) -> Any:
     """A typed integer SQL literal (`int()`-coerced, so injection-safe) for COALESCE/compare.
 
@@ -266,11 +312,9 @@ async def _member_uuid(
     return str(row.user_uuid) if row is not None and row.user_uuid else None
 
 
-async def _policy(async_dal: Any, dal: Any, *, community_id: int) -> dict[str, Any]:
-    """The community policy row as a dict, defaults filled when no row exists."""
+def _policy_fields(dal: Any) -> list[Any]:
     pol = dal.bundle_reputation_policy
-    rows = await async_dal.select_async(
-        dal(pol.community_id == community_id),
+    return [
         pol.score_min,
         pol.score_max,
         pol.score_default,
@@ -280,8 +324,27 @@ async def _policy(async_dal: Any, dal: Any, *, community_id: int) -> dict[str, A
         pol.hard_ban_floor,
         pol.at_risk_threshold,
         pol.updated_at,
+    ]
+
+
+async def _policy(async_dal: Any, dal: Any, *, community_id: int) -> dict[str, Any]:
+    """The community policy row as a dict, defaults filled when no row exists."""
+    rows = await async_dal.select_async(
+        dal(dal.bundle_reputation_policy.community_id == community_id), *_policy_fields(dal)
     )
-    row = rows.first() if rows else None
+    return _policy_dict(rows.first() if rows else None)
+
+
+def _policy_sync(dal: Any, *, community_id: int) -> dict[str, Any]:
+    """Sync twin of :func:`_policy` (same transaction as the caller's member lock)."""
+    rows = dal(dal.bundle_reputation_policy.community_id == community_id).select(
+        *_policy_fields(dal)
+    )
+    return _policy_dict(rows.first() if rows else None)
+
+
+def _policy_dict(row: Any) -> dict[str, Any]:
+    """A policy row as a dict; defaults when there is no row."""
     if row is None:
         return {
             "score_min": SCALE_MIN,
@@ -392,6 +455,47 @@ async def get_leaderboard(
     return entries
 
 
+_APPLY_SQL = (
+    "SELECT new_score, applied FROM reputation_apply(%s, %s, %s::uuid, %s, %s::smallint, "
+    "%s::smallint, %s, %s, %s, %s)"
+)
+
+
+def apply_reputation_sync(
+    dal: Any,
+    *,
+    tenant_id: int,
+    community_id: int,
+    user_uuid: str,
+    delta: int,
+    reason_code: ReasonCode,
+    actor: str,
+    source_event: str,
+    idempotency_key: str,
+    reason_class: ReasonClass = ReasonClass.ACTIVITY,
+) -> ApplyResult:
+    """:func:`apply_reputation` inside the caller's transaction (after its member lock)."""
+    rows = _execute_sync(
+        dal,
+        _APPLY_SQL,
+        [
+            tenant_id,
+            community_id,
+            user_uuid,
+            delta,
+            int(reason_class),
+            int(reason_code),
+            None,
+            actor,
+            source_event,
+            idempotency_key,
+        ],
+    )
+    if not rows:
+        raise RuntimeError("reputation_apply returned no row")
+    return ApplyResult(new_score=int(rows[0][0]), applied=bool(rows[0][1]))
+
+
 async def apply_reputation(
     async_dal: Any,
     *,
@@ -413,8 +517,7 @@ async def apply_reputation(
     """
     try:
         rows = await async_dal.executesql_async(
-            "SELECT new_score, applied FROM reputation_apply(%s, %s, %s::uuid, %s, %s::smallint, "
-            "%s::smallint, %s, %s, %s, %s)",
+            _APPLY_SQL,
             [
                 tenant_id,
                 community_id,
@@ -448,55 +551,64 @@ async def override_member_reputation(
     amount: float | None,
     set_to: float | None,
     actor_user_id: int | None,
+    lock: MemberLock | None = None,
 ) -> tuple[int, int | None]:
     """Admin adjust (`amount`) or set (`set_to`) of a member's score. Returns (new, change|None).
 
-    Resolves the member's `user_uuid`, computes the delta against the current stored score
-    (policy default when none) and applies it via `reputation_apply()` (class admin_override)
-    with the admin's UUID as actor.
+    ONE transaction: ``lock`` (the target-member lock + owner/scope check) runs first, then the
+    member's `user_uuid` and current stored score (policy default when none) are read and the
+    delta is applied via `reputation_apply()` (class admin_override) with the admin's UUID as
+    actor -- so the check, the read and the write see one consistent member row.
     """
     _ensure_reputation_tables(dal)
-    uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
-    if uuid is None:
-        raise conflict("Member has no identity token yet; reputation cannot be applied")
-    policy = await _policy(async_dal, dal, community_id=community_id)
-    scores = dal.bundle_reputation_scores
-    cur_rows = await async_dal.select_async(
-        dal((scores.community_id == community_id) & (scores.user_uuid == uuid)), scores.balance
-    )
-    cur_row = cur_rows.first() if cur_rows else None
-    current = int(cur_row.balance) if cur_row is not None else int(policy["score_default"])
-    actor = await _admin_actor(async_dal, dal, actor_user_id)
-    if set_to is not None:
-        target = int(max(policy["score_min"], min(policy["score_max"], set_to)))
-        result = await apply_reputation(
-            async_dal,
+    if set_to is None and (amount is None or amount == 0):
+        raise bad_request("Invalid amount - provide amount (relative) or setTo (absolute)")
+
+    def job() -> tuple[int, int | None]:
+        if lock is not None:
+            lock()
+        uuid = _member_uuid_sync(dal, community_id=community_id, hub_user_id=user_id)
+        if uuid is None:
+            raise conflict("Member has no identity token yet; reputation cannot be applied")
+        policy = _policy_sync(dal, community_id=community_id)
+        scores = dal.bundle_reputation_scores
+        cur_row = (
+            dal((scores.community_id == community_id) & (scores.user_uuid == uuid))
+            .select(scores.balance)
+            .first()
+        )
+        current = int(cur_row.balance) if cur_row is not None else int(policy["score_default"])
+        actor = _admin_actor_sync(dal, actor_user_id)
+        if set_to is not None:
+            target = int(max(policy["score_min"], min(policy["score_max"], set_to)))
+            result = apply_reputation_sync(
+                dal,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                user_uuid=uuid,
+                delta=target - current,
+                reason_code=ReasonCode.ADMIN_OVERRIDE,
+                actor=actor,
+                source_event="admin.reputation.set",
+                idempotency_key=f"admin.{uuid_mod.uuid4().hex}",
+                reason_class=ReasonClass.ADMIN_OVERRIDE,
+            )
+            return result.new_score, None
+        result = apply_reputation_sync(
+            dal,
             tenant_id=tenant_id,
             community_id=community_id,
             user_uuid=uuid,
-            delta=target - current,
-            reason_code=ReasonCode.ADMIN_OVERRIDE,
+            delta=int(amount or 0),
+            reason_code=ReasonCode.ADMIN_ADJUST,
             actor=actor,
-            source_event="admin.reputation.set",
+            source_event="admin.reputation.adjust",
             idempotency_key=f"admin.{uuid_mod.uuid4().hex}",
             reason_class=ReasonClass.ADMIN_OVERRIDE,
         )
-        return result.new_score, None
-    if amount is None or amount == 0:
-        raise bad_request("Invalid amount - provide amount (relative) or setTo (absolute)")
-    result = await apply_reputation(
-        async_dal,
-        tenant_id=tenant_id,
-        community_id=community_id,
-        user_uuid=uuid,
-        delta=int(amount),
-        reason_code=ReasonCode.ADMIN_ADJUST,
-        actor=actor,
-        source_event="admin.reputation.adjust",
-        idempotency_key=f"admin.{uuid_mod.uuid4().hex}",
-        reason_class=ReasonClass.ADMIN_OVERRIDE,
-    )
-    return result.new_score, result.new_score - current
+        return result.new_score, result.new_score - current
+
+    return await _run_job(async_dal, dal, job)
 
 
 def _validate_thresholds(
@@ -808,25 +920,30 @@ async def set_soft_ban(
     user_id: int,
     expires_at: datetime | None,
     actor_user_id: int | None,
+    lock: MemberLock | None = None,
 ) -> None:
-    """Manually soft-ban a member (cannot WIN in this community; stays a member)."""
+    """Manually soft-ban a member (cannot WIN in this community; stays a member).
+
+    ONE transaction: ``lock`` (target lock + owner/scope check) first, then the SQL write.
+    """
     _ensure_reputation_tables(dal)
     if expires_at is not None and expires_at <= datetime.now(UTC):
         raise bad_request("expiresAt must be in the future")
-    uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
-    if uuid is None:
-        raise not_found("Member not found")
-    actor = await _admin_actor(async_dal, dal, actor_user_id)
-    try:
-        await async_dal.executesql_async(
+
+    def job() -> None:
+        if lock is not None:
+            lock()
+        uuid = _member_uuid_sync(dal, community_id=community_id, hub_user_id=user_id)
+        if uuid is None:
+            raise not_found("Member not found")
+        actor = _admin_actor_sync(dal, actor_user_id)
+        _execute_sync(
+            dal,
             "SELECT reputation_set_soft_ban(%s, %s, %s::uuid, %s::smallint, %s, %s)",
             [tenant_id, community_id, uuid, int(SoftBanReason.MANUAL), actor, expires_at],
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
-        translated = _translate_db_error(exc)
-        if translated is exc:
-            raise
-        raise translated from exc
+
+    await _run_job(async_dal, dal, job)
 
 
 async def clear_soft_ban(
@@ -837,21 +954,33 @@ async def clear_soft_ban(
     community_id: int,
     user_id: int,
     actor_user_id: int | None,
+    lock: MemberLock | None = None,
 ) -> bool:
-    """Clear a member's soft ban (floor- or manually-set). Returns whether one existed."""
+    """Clear a member's soft ban (floor- or manually-set). Returns whether one existed.
+
+    ONE transaction: ``lock`` (target lock + owner/scope check), the SQL clear, and -- when a ban
+    was cleared -- `ban_suppression.lift_membership_ban`, so a BANNED membership regains exactly
+    the access its role grants (re-join and `/auth/me` see the community again).
+    """
     _ensure_reputation_tables(dal)
-    uuid = await _member_uuid(async_dal, dal, community_id=community_id, hub_user_id=user_id)
-    if uuid is None:
-        raise not_found("Member not found")
-    actor = await _admin_actor(async_dal, dal, actor_user_id)
-    try:
-        rows = await async_dal.executesql_async(
+
+    def job() -> bool:
+        if lock is not None:
+            lock()
+        uuid = _member_uuid_sync(dal, community_id=community_id, hub_user_id=user_id)
+        if uuid is None:
+            raise not_found("Member not found")
+        actor = _admin_actor_sync(dal, actor_user_id)
+        rows = _execute_sync(
+            dal,
             "SELECT reputation_clear_soft_ban(%s, %s, %s::uuid, %s, %s)",
             [tenant_id, community_id, uuid, actor, False],
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised after typed translation
-        translated = _translate_db_error(exc)
-        if translated is exc:
-            raise
-        raise translated from exc
-    return bool(rows and rows[0][0])
+        cleared = bool(rows and rows[0][0])
+        if cleared:
+            ban_suppression.lift_membership_ban(
+                dal, community_id=community_id, hub_user_id=user_id, now=datetime.now(UTC)
+            )
+        return cleared
+
+    return await _run_job(async_dal, dal, job)

@@ -74,7 +74,17 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     for name in dal.tables:
         dal(dal[name]).count()
 
+    real_executesql = dal.executesql
+
+    def fake_sql_sync(sql: str, placeholders: list[Any] | None = None, **kw: Any) -> Any:
+        if "reputation_set_soft_ban" not in sql and "reputation_clear_soft_ban" not in sql:
+            return real_executesql(sql, placeholders=placeholders, **kw)
+        return _soft_ban_sql(sql, placeholders)
+
     async def fake_sql(sql: str, placeholders: list[Any] | None = None) -> list[list[Any]]:
+        return _soft_ban_sql(sql, placeholders)
+
+    def _soft_ban_sql(sql: str, placeholders: list[Any] | None) -> list[list[Any]]:
         args = placeholders or []
         bans = dal.bundle_reputation_soft_bans
         if "reputation_set_soft_ban" in sql:
@@ -102,6 +112,8 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         raise AssertionError(f"unexpected SQL: {sql}")
 
     monkeypatch.setattr(async_dal, "executesql_async", fake_sql)
+    # Soft-ban writes run inside the target-member lock's transaction (sync DAL).
+    monkeypatch.setattr(dal, "executesql", fake_sql_sync)
     yield async_dal
     dal.close()
 

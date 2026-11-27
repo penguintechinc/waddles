@@ -41,7 +41,6 @@ from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
 from services import floor_ban_lift
 from services.community_authz import (
-    guard_target_member,
     resolve_editor_async,
     resolve_editor_scopes_async,
 )
@@ -623,8 +622,8 @@ async def adjust_reputation(
     ctx = get_tenant_context(request)
     assert ctx is not None
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         new_score, change = await svc.adjust_reputation(
             async_dal,
@@ -634,6 +633,8 @@ async def adjust_reputation(
             ctx=ctx,
             amount=data.amount,
             set_to=data.setTo,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
@@ -668,6 +669,20 @@ async def _authorize_reputation_admin(community_id: int) -> Any:
         async_dal, dal, request, community_id=community_id, ctx=ctx
     )
     return ctx
+
+
+async def _target_lock(async_dal: Any, dal: Any, community_id: int, user_id: int) -> Any:
+    """The caller's in-transaction target lock + owner/scope check for a member write."""
+    editor_scopes, editor_bypass = await resolve_editor_async(
+        request, async_dal, dal, community_id=community_id
+    )
+    return svc.target_member_lock(
+        dal,
+        community_id=community_id,
+        user_id=user_id,
+        editor_scopes=editor_scopes,
+        editor_bypass=editor_bypass,
+    )
 
 
 @admin_bp.route("/<cuuid:community_id>/reputation/config", methods=["GET"])
@@ -810,9 +825,6 @@ async def put_reputation_soft_ban(
         expires = expires.replace(tzinfo=UTC)
     try:
         ctx = await _authorize_reputation_admin(community_id)
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
-        )
         await reputation_svc.set_soft_ban(
             async_dal,
             dal,
@@ -821,6 +833,7 @@ async def put_reputation_soft_ban(
             user_id=user_id,
             expires_at=expires,
             actor_user_id=get_optional_current_user_id(request),
+            lock=await _target_lock(async_dal, dal, community_id, user_id),
         )
     except ApiError as exc:
         logger.warning(
@@ -838,9 +851,6 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     async_dal, dal = _dal()
     try:
         ctx = await _authorize_reputation_admin(community_id)
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
-        )
         cleared = await reputation_svc.clear_soft_ban(
             async_dal,
             dal,
@@ -848,6 +858,7 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
             community_id=community_id,
             user_id=user_id,
             actor_user_id=get_optional_current_user_id(request),
+            lock=await _target_lock(async_dal, dal, community_id, user_id),
         )
     except ApiError as exc:
         logger.warning(
@@ -947,6 +958,9 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
+        )
         temp_password, expires_at = await svc.generate_temp_password(
             async_dal,
             dal,
@@ -956,6 +970,8 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
             force_oauth_link=data.forceOAuthLink,
             expires_in_hours=data.expiresInHours,
             caller_id=caller_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         return _err(exc)

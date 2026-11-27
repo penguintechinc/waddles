@@ -33,6 +33,7 @@ needing the same "invent scope, document the gap" treatment.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,7 +43,13 @@ from flask_core.tenancy import TenantContext
 from services import community_authz, community_interaction
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
-from services.member_roles import ASSIGNABLE_MEMBER_ROLES, run_write_job, set_member_role
+from services.member_roles import (
+    ASSIGNABLE_MEMBER_ROLES,
+    is_assignable_role,
+    is_owner_role,
+    run_write_job,
+    set_member_role,
+)
 from services.membership_state import not_banned
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
@@ -270,6 +277,8 @@ async def get_members(
         query &= dal.community_members.community_role_id == role_row.id
     if search:
         # `community_members.user_id` is legacy VARCHAR, so match usernames in Python-side ids.
+        # `contains` escapes LIKE metacharacters (`%`, `_`, `\`) with ESCAPE '\', so the term
+        # matches literally on every backend (pinned by the metacharacter regression test).
         candidates = await async_dal.select_async(dal(query), dal.community_members.user_id)
         ids = [int(c.user_id) for c in candidates if c.user_id and c.user_id.isdigit()]
         matched = await async_dal.select_async(
@@ -368,9 +377,6 @@ async def update_member_role(
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
     role_uuid = _parse_role_uuid(role_id)
-    caller_role = await community_authz.get_caller_community_role(
-        async_dal, dal, community_id=community_id, user_id=caller_id or -1
-    )
 
     def _job() -> None:
         member = community_authz.lock_member_for_change(
@@ -389,19 +395,26 @@ async def update_member_role(
         if role_row is None:
             # Fail closed: an undefined role is never assigned, the scope guard never skipped.
             raise bad_request("Role is not defined for this community")
-        if getattr(role_row, "role_kind", None) != KIND_ADMIN:
+        if is_owner_role(role_row):
+            # Ownership moves only through the explicit ownership-transfer flow, never here.
+            raise forbidden("The owner role is assigned only by an ownership transfer")
+        if not is_assignable_role(role_row, community_id):
+            raise forbidden("Role is not assignable")
+        role_kind = getattr(role_row, "role_kind", None)
+        if role_kind != KIND_ADMIN:
             community_authz.guard_last_admin(
                 dal, community_id=community_id, member=member, action="demote"
             )
-        # Scope-based escalation guard (never a role-name check): the caller must hold every
-        # scope of the role being assigned.
+        # Scope-based escalation guard (never a role-name check): the editor must hold every
+        # scope of the role being assigned. A global/tenant-admin bypass holds the registry, but
+        # minting an admin-kind role still needs the caller's OWN admin-kind membership here,
+        # re-read under the community lock.
         stored = (role_row.base_claims or {}).get("scopes", [])
-        target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
-        # A caller with no membership here (tenant/global admin bypass) may assign anything
-        # except an admin-kind role, which needs a member who themselves hold the full scope set.
-        enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
-        held = caller_role.scopes if caller_role is not None else frozenset()
-        if enforce and not target_scopes <= held:
+        target_scopes = effective_scopes(role_kind, stored)
+        held = editor_scopes
+        if editor_bypass and role_kind == KIND_ADMIN:
+            held = community_authz.member_scopes_sync(dal, community_id, caller_id or -1)
+        if not target_scopes <= held:
             raise forbidden("Cannot assign a role holding scopes you do not hold")
         # The name lookup must land on the very row the UUID named (a shadowing custom row of a
         # reserved name must never link the system role instead).
@@ -443,6 +456,34 @@ async def authorize_floor_ban_lift(
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
 
+def target_member_lock(
+    dal: Any,
+    *,
+    community_id: int,
+    user_id: int,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
+) -> Callable[[], Any]:
+    """In-transaction pre-step for reputation/ban writes on a member: lock + owner/scope check.
+
+    Wraps `community_authz.lock_member_for_change` with ``active_only=False`` so an inactive
+    (e.g. BANNED) target is still checked, never skipped (fail closed); a missing row is a 404.
+    """
+
+    def lock() -> Any:
+        return community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot act on the community owner",
+            active_only=False,
+        )
+
+    return lock
+
+
 async def adjust_reputation(
     async_dal: Any,
     dal: Any,
@@ -452,23 +493,18 @@ async def adjust_reputation(
     ctx: TenantContext,
     amount: float | None,
     set_to: float | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
     actor_user_id: int | None = None,
 ) -> tuple[int, int | None]:
     """Adjust (or set) a member's reputation. Returns (new_score, change_or_None).
 
-    The write goes through the bundle store's atomic `reputation_apply()` (clamp, ledger row with
-    an `admin:` actor); see `community_reputation_service.override_member_reputation`.
+    The target lock + owner/scope check and the write run in ONE transaction through the bundle
+    store's atomic `reputation_apply()` (clamp, ledger row with an `admin:` actor); see
+    `community_reputation_service.override_member_reputation`.
     """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
-
-    query = (dal.community_members.community_id == community_id) & (
-        dal.community_members.user_id == str(user_id)
-    )
-    rows = await async_dal.select_async(dal(query), dal.community_members.id)
-    if rows.first() is None:
-        raise not_found("Member not found")
-
     return await reputation_svc.override_member_reputation(
         async_dal,
         dal,
@@ -478,6 +514,13 @@ async def adjust_reputation(
         amount=amount,
         set_to=set_to,
         actor_user_id=actor_user_id,
+        lock=target_member_lock(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+        ),
     )
 
 
@@ -537,8 +580,17 @@ async def generate_temp_password(
     force_oauth_link: bool,
     expires_in_hours: int,
     caller_id: int | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
 ) -> tuple[str, datetime]:
-    """Generate a one-time temp password for a community member."""
+    """Mint a one-time temp password for an ACTIVE member of THIS community, bound to them.
+
+    The identifier (username or email) resolves to one active hub user (404 otherwise); that
+    user's active membership here is locked and the shared owner/scope target rule applied
+    (`community_authz.lock_member_for_change`: 404 non-member, 403 owner or out-scoped member);
+    the row records the member's `hub_user_id`, which `auth_service.temp_password_login`
+    enforces. Lock, check and insert run in ONE transaction.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
@@ -551,15 +603,34 @@ async def generate_temp_password(
     ).decode()
     expires_at = datetime.now(UTC) + timedelta(hours=expires_in_hours)
 
-    await async_dal.insert_async(
-        dal.hub_temp_passwords,
-        community_id=community_id,
-        user_identifier=user_identifier,
-        password_hash=password_hash,
-        expires_at=expires_at,
-        force_oauth_link=force_oauth_link,
-        created_at=datetime.now(UTC),
-    )
+    def _job() -> None:
+        users = dal.hub_users
+        target = dal(
+            ((users.username == user_identifier) | (users.email == user_identifier))
+            & (users.is_active == True)  # noqa: E712 - pydal Field comparison
+        ).select(users.id, limitby=(0, 2))
+        if len(target) != 1:
+            raise not_found("Member not found")
+        target_id = int(target.first().id)
+        community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=target_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot issue a temp password for the community owner",
+        )
+        dal.hub_temp_passwords.insert(
+            community_id=community_id,
+            hub_user_id=target_id,
+            user_identifier=user_identifier,
+            password_hash=password_hash,
+            expires_at=expires_at,
+            force_oauth_link=force_oauth_link,
+            created_at=datetime.now(UTC),
+        )
+
+    await run_write_job(async_dal, dal, _job)
     return temp_password, expires_at
 
 

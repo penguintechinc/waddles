@@ -736,8 +736,13 @@ def lock_member_for_change(
     editor_scopes: frozenset[str],
     editor_bypass: bool,
     owner_message: str,
+    active_only: bool = True,
 ) -> Any:
     """Locking form of :func:`guard_target_member` for demoting/removing a member; returns the row.
+
+    ``active_only=False`` also locks and checks an inactive (e.g. BANNED) row -- for writes such as
+    reputation or ban changes that legitimately target one -- so the owner/scope rule is never
+    skipped for a non-active target (fail closed); only a missing row is a 404.
 
     Runs inside the caller's write transaction: the target's active `community_members` row is
     read ``SELECT ... FOR UPDATE`` (sqlite serializes writers instead), so the checks and the
@@ -752,15 +757,10 @@ def lock_member_for_change(
     # so no deadlock) -- this is what makes `guard_last_admin`'s count-then-write atomic.
     dal(dal.communities.id == community_id).select(dal.communities.id, for_update=for_update)
     cm = dal.community_members
-    member = (
-        dal(
-            (cm.community_id == community_id)
-            & (cm.user_id == str(user_id))
-            & (cm.is_active == True)  # noqa: E712
-        )
-        .select(for_update=for_update)
-        .first()
-    )
+    query = (cm.community_id == community_id) & (cm.user_id == str(user_id))
+    if active_only:
+        query &= cm.is_active == True  # noqa: E712
+    member = dal(query).select(for_update=for_update).first()
     if member is None:
         raise not_found("Member not found")
     check_target_member(

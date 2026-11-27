@@ -785,10 +785,39 @@ class TempLoginResult:
     requires_oauth_link: bool
 
 
+async def _temp_password_bound_username(async_dal: Any, dal: Any, row: Any) -> str | None:
+    """The bound user's username, or None (the login then fails closed).
+
+    Requires the user active AND an active, unbanned member of the row's community.
+    """
+    users = await async_dal.select_async(
+        dal((dal.hub_users.id == int(row.hub_user_id)) & (dal.hub_users.is_active == True))  # noqa: E712
+    )
+    if not users or row.community_id is None:
+        return None
+    cm = dal.community_members
+    state = cm.membership_state
+    members = await async_dal.select_async(
+        dal(
+            (cm.community_id == int(row.community_id))
+            & (cm.user_id == str(int(row.hub_user_id)))
+            & (cm.is_active == True)  # noqa: E712
+            & ((state == None) | (state != MembershipState.BANNED))  # noqa: E711
+        ),
+        cm.id,
+    )
+    return str(users.first().username) if members else None
+
+
 async def temp_password_login(
     async_dal: Any, dal: Any, cfg: HubAPIConfig, *, identifier: str, password: str
 ) -> TempLoginResult:
-    """Temp password login."""
+    """Temp password login -- honors the row's binding to ONE hub user (alembic 0147).
+
+    Only a row bound to a hub user is accepted (legacy unbound rows fail closed), and only while
+    that user is still active and an active, non-banned member of the row's community; the
+    session names that user's own username, never the caller-supplied identifier.
+    """
     if not identifier or not password:
         raise bad_request("Identifier and password required")
 
@@ -796,6 +825,7 @@ async def temp_password_login(
         dal(
             (dal.hub_temp_passwords.user_identifier == identifier)
             & (dal.hub_temp_passwords.is_used == False)  # noqa: E712
+            & (dal.hub_temp_passwords.hub_user_id != None)  # noqa: E711
             & (dal.hub_temp_passwords.expires_at > datetime.now(UTC))
         )
     )
@@ -806,6 +836,10 @@ async def temp_password_login(
     if not await _verify_password(password, row.password_hash):
         raise unauthorized("Invalid credentials")
 
+    bound_username = await _temp_password_bound_username(async_dal, dal, row)
+    if bound_username is None:
+        raise unauthorized("Invalid credentials or expired")
+
     await async_dal.update_async(
         dal.hub_temp_passwords.id == row.id, is_used=True, used_at=datetime.now(UTC)
     )
@@ -815,7 +849,7 @@ async def temp_password_login(
         dal,
         cfg,
         user=None,
-        username_override=identifier,
+        username_override=bound_username,
         requires_oauth_link=bool(row.force_oauth_link),
         auth_method="temp_password",
     )
