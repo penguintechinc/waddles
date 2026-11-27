@@ -262,8 +262,15 @@ impl Signer {
         }
     }
 
-    fn sign(&self, msg: &[u8]) -> String {
+    /// Base64 Ed25519 signature over `msg` (shared with the Twitch unban path, which signs under
+    /// its own domain label).
+    pub(crate) fn sign(&self, msg: &[u8]) -> String {
         B64.encode(self.pair.sign(msg).as_ref())
+    }
+
+    /// The signing key id.
+    pub(crate) fn kid(&self) -> &str {
+        &self.kid
     }
 }
 

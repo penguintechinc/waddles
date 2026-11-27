@@ -24,7 +24,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Final
@@ -66,7 +66,11 @@ _COUNT_KEYS: Final = ("created", "marked_delete", "removed", "marked_stale", "re
 
 
 class EventSubType(IntEnum):
-    """The seven EventSub types the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs)."""
+    """The EventSub types hub-api keeps subscriptions for.
+
+    The seven the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs), plus
+    ``channel.unban`` for the Twitch-native unban -> Waddles lift sync (svc-ingest).
+    """
 
     CHANNEL_FOLLOW = 1
     CHANNEL_SUBSCRIBE = 2
@@ -75,6 +79,7 @@ class EventSubType(IntEnum):
     CHANNEL_RAID = 5
     STREAM_ONLINE = 6
     STREAM_OFFLINE = 7
+    CHANNEL_UNBAN = 8
 
 
 #: code -> (Twitch type string, Twitch subscription version). ``channel.follow`` is v2 (v1 is
@@ -87,7 +92,13 @@ EVENTSUB_TYPES: Final[dict[EventSubType, tuple[str, int]]] = {
     EventSubType.CHANNEL_RAID: ("channel.raid", 1),
     EventSubType.STREAM_ONLINE: ("stream.online", 1),
     EventSubType.STREAM_OFFLINE: ("stream.offline", 1),
+    EventSubType.CHANNEL_UNBAN: ("channel.unban", 1),
 }
+
+#: Types desired for EVERY eligible connection regardless of bundle ``consumes`` rules: platform
+#: sync is a core mechanism (a Twitch-side unban must lift the matching Waddles floor ban), not an
+#: app feature. svc-ingest consumes it directly; no bundle sees the event.
+CORE_TYPES: Final[frozenset[EventSubType]] = frozenset({EventSubType.CHANNEL_UNBAN})
 
 
 class SubStatus(IntEnum):
@@ -417,8 +428,8 @@ async def sync_community(
     Runs in the caller's transaction; returns per-kind transition counts.
     """
     counts = dict.fromkeys(_COUNT_KEYS, 0)
-    types = await _desired_types(conn, tenant_id, community_id)
     conns = await _eligible_connections(conn, tenant_id, community_id)
+    types = (await _desired_types(conn, tenant_id, community_id)) | CORE_TYPES
     desired = {(c, int(t)) for c in conns for t in types}
     existing = (
         await conn.execute(
@@ -763,25 +774,70 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     )
 
 
+@dataclass(slots=True, frozen=True)
+class CallbackBinding:
+    """A callback key's secret and the PUBLIC UUIDs of the tenant, community and connection.
+
+    Only ``public_id`` UUIDs cross the API boundary (numeric PKs are enumerable); the data plane
+    resolves them back to its internal numeric keys itself, from the database.
+    """
+
+    secret: str = field(repr=False)
+    tenant_public_id: str
+    community_public_id: str
+    connection_public_id: str
+
+
 async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> str:
     """Webhook secret for the ingest verifier, by opaque callback key (decrypted, never logged).
 
     DELETE_PENDING rows still resolve: a late notification for a not-yet-deleted subscription
     must still verify.
     """
+    return (await binding_for_callback_key(install_dal, callback_key)).secret
+
+
+async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> CallbackBinding:
+    """Secret AND owning ``(tenant, community, connection)`` public UUIDs of a callback key.
+
+    A delivery is only meaningful for the subscription that received it: the ingest verifier
+    binds an event to exactly this tuple (never to anything read from the payload). The ledger
+    row's tenant must own both the community and the connection -- the data plane derives the
+    tenant from the community when it resolves the UUIDs, so a disagreeing row is never served.
+    """
     if not _CALLBACK_KEY_RE.fullmatch(callback_key):
         raise UnknownSubscriptionError("unknown callback key") from None
     async with install_dal.engine.connect() as conn:
         row = (
             await conn.execute(
-                text(f"SELECT public_id, secret_enc FROM {_TABLE} WHERE callback_key = :k"),  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                text(
+                    "SELECT s.public_id, s.secret_enc, "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                    "t.public_id::text AS tenant_public_id, "
+                    "c.public_id::text AS community_public_id, "
+                    "pc.public_id::text AS connection_public_id, "
+                    "(c.tenant_id = s.tenant_id AND pc.tenant_id = s.tenant_id) AS owners_agree "
+                    f"FROM {_TABLE} s "
+                    "JOIN tenants t ON t.id = s.tenant_id "
+                    "JOIN communities c ON c.id = s.community_id "
+                    "JOIN platform_connections pc ON pc.id = s.connection_id "
+                    "WHERE s.callback_key = :k"
+                ),
                 {"k": callback_key},
             )
         ).first()
     if row is None:
         _ops.add(1, {"op": "secret", "outcome": "not_found"})
         raise UnknownSubscriptionError("unknown callback key") from None
+    if not row.owners_agree:
+        _ops.add(1, {"op": "secret", "outcome": "owner_mismatch"})
+        logger.warning("eventsub_secret_owner_mismatch op=secret code=NOT_FOUND")
+        raise UnknownSubscriptionError("unknown callback key") from None
     _ops.add(1, {"op": "secret", "outcome": "ok"})
     # Every eventsub row is sealed AAD-bound (there is no legacy layout), so pin SEAL_AAD:
     # a no-AAD ciphertext is refused rather than accepted through the migration fallback.
-    return open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD)
+    return CallbackBinding(
+        secret=open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD),
+        tenant_public_id=str(row.tenant_public_id),
+        community_public_id=str(row.community_public_id),
+        connection_public_id=str(row.connection_public_id),
+    )

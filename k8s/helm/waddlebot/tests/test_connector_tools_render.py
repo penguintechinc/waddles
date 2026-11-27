@@ -49,8 +49,14 @@ def _env(dep: dict[str, Any]) -> dict[str, Any]:
     return {e["name"]: e for e in c["env"]}
 
 
+_UNBAN = "pipeline.rustDataPlane.svcIngest.twitchUnbanSync.enabled"
+_UNBAN_OFF = ["--set", f"{_UNBAN}=false"]
+_UNBAN_ON = ["--set", f"{_UNBAN}=true"]
+
+
 def test_flag_off_renders_no_executor_wiring() -> None:
-    dep = _ingest([])
+    """Connector tools OFF and Twitch unban sync OFF: no executor wiring, no TWITCH_CLIENT_ID."""
+    dep = _ingest(_UNBAN_OFF)
     env = _env(dep)
     for name in ("CONNECTOR_TOOLS_ENABLED", "SENDER_EXEC_DIGEST_TWITCH", "TWITCH_CLIENT_ID"):
         assert name not in env, name
@@ -121,3 +127,25 @@ def test_half_configured_on_fails_render(bad: list[str]) -> None:
     res = _render(*bad)
     assert res.returncode != 0
     assert "connectorTools" in res.stderr
+
+
+def test_unban_sync_on_renders_twitch_client_id_without_executor_wiring() -> None:
+    """Twitch EventSub unban sync ON, connector tools OFF: TWITCH_CLIENT_ID from the Secret only."""
+    env = _env(_ingest(_UNBAN_ON))
+    assert "secretKeyRef" in env["TWITCH_CLIENT_ID"]["valueFrom"]
+    assert "value" not in env["TWITCH_CLIENT_ID"], "client id must come from a Secret"
+    for name in ("CONNECTOR_TOOLS_ENABLED", "SENDER_EXEC_DIGEST_TWITCH", "HOST_API_SERVER_CERT_FILE"):
+        assert name not in env, name
+
+
+def test_alpha_default_enables_unban_sync_twitch_client_id() -> None:
+    """values-alpha.yaml turns the unban sync on, so the alpha render carries TWITCH_CLIENT_ID."""
+    env = _env(_ingest([]))
+    assert "secretKeyRef" in env["TWITCH_CLIENT_ID"]["valueFrom"]
+    assert "CONNECTOR_TOOLS_ENABLED" not in env
+
+
+def test_unban_sync_without_dynamic_connections_renders_no_twitch_client_id() -> None:
+    """Unban sync ON but dynamicConnections OFF (no hub-api wiring): the feature is inert, no client id."""
+    env = _env(_ingest([*_UNBAN_ON, "--set", "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"]))
+    assert "TWITCH_CLIENT_ID" not in env

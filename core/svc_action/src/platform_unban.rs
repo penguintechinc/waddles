@@ -49,9 +49,9 @@ pub const DOMAIN: &[u8] = b"waddles.platform-unban.v1";
 /// The only platform this consumer serves.
 pub const PLATFORM: &str = "discord";
 /// Largest accepted entry, bytes.
-const MAX_ENTRY_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_ENTRY_BYTES: usize = 4 * 1024;
 /// An event's deadline may be at most this far ahead (ingest's TTL plus clock skew).
-const MAX_AHEAD_MS: u64 = 6 * 60_000;
+pub(crate) const MAX_AHEAD_MS: u64 = 6 * 60_000;
 /// How long a handled event id stays claimed (>= the maximum event lifetime).
 const SEEN_TTL_SECS: u64 = 900;
 /// Blocking-pop timeout, seconds (bounds shutdown latency).
@@ -139,7 +139,7 @@ impl VerifyKeys {
         Ok(Self(keys))
     }
 
-    fn verify(&self, kid: &str, msg: &[u8], sig_b64: &str) -> bool {
+    pub(crate) fn verify(&self, kid: &str, msg: &[u8], sig_b64: &str) -> bool {
         let (Some(key), Ok(sig)) = (self.0.get(kid), B64.decode(sig_b64)) else {
             return false;
         };
@@ -181,13 +181,21 @@ pub trait SeenStore: Send + Sync {
 /// Valkey `SET NX EX` marker store.
 pub struct ValkeySeen {
     conn: redis::aio::ConnectionManager,
+    prefix: &'static str,
 }
 
 impl ValkeySeen {
     /// Wraps a connected manager.
     #[must_use]
     pub fn new(conn: redis::aio::ConnectionManager) -> Self {
-        Self { conn }
+        Self::with_prefix(conn, SEEN_PREFIX)
+    }
+
+    /// Wraps a connected manager with a platform-specific marker prefix (so two platforms'
+    /// event ids can never collide in the single-use store).
+    #[must_use]
+    pub fn with_prefix(conn: redis::aio::ConnectionManager, prefix: &'static str) -> Self {
+        Self { conn, prefix }
     }
 }
 
@@ -208,7 +216,7 @@ impl SeenStore for ValkeySeen {
         Box::pin(async move {
             let mut conn = self.conn.clone();
             let set: Option<String> = redis::cmd("SET")
-                .arg(format!("{SEEN_PREFIX}{event_id}"))
+                .arg(format!("{}{event_id}", self.prefix))
                 .arg(1)
                 .arg("NX")
                 .arg("EX")
@@ -229,7 +237,7 @@ pub struct PlatformUnban {
     metrics: Arc<StageMetrics>,
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

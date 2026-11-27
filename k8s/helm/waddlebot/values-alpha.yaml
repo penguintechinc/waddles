@@ -314,6 +314,9 @@ pipeline:
         # Static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL must NOT be set here (fatal with the flag on).
         twitchReconcileIntervalSecs: 30
         twitchResolveTimeoutSecs: 10
+      # Twitch EventSub channel.unban sync: renders TWITCH_CLIENT_ID (needs dynamicConnections above).
+      twitchUnbanSync:
+        enabled: true
       # P6a generic outbound executor (waddles.connector-tools): OFF until the pinned connector
       # digests exist and a svc-bundles-executor dials the host-api port. To enable: set enabled: true
       # and digests.{twitch,discord,youtube} (sha256:<hex>); see core/svc_ingest/README.md.

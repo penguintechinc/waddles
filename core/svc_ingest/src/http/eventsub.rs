@@ -55,6 +55,8 @@ pub struct EventSubState {
     /// Identity-field (`actor`) DEK provider -- `crate::identity_crypto`,
     /// forwarded to `handle_webhook` unchanged.
     pub dek_provider: crate::identity_crypto::ConfiguredDekProvider,
+    /// Twitch-native unban forwarder (`channel.unban`); `None` = off.
+    pub unban: Option<crate::twitch_unban::TwitchUnban>,
 }
 
 /// Body-size cap enforced at the HTTP layer via
@@ -90,6 +92,13 @@ impl From<EventSubError> for ApiError {
             }
             EventSubError::VerificationFailed => {
                 ApiError::Forbidden("eventsub verification failed".to_string())
+            }
+            // 5xx: Twitch redelivers, so an unban is not lost to a hub-api blip.
+            EventSubError::LedgerUnavailable => {
+                ApiError::Internal(anyhow::anyhow!("eventsub ledger unavailable"))
+            }
+            EventSubError::Retryable => {
+                ApiError::Internal(anyhow::anyhow!("eventsub unban transient failure"))
             }
         }
     }
@@ -149,6 +158,8 @@ fn outcome_label(result: &Result<EventSubResponse, EventSubError>) -> &'static s
         Err(EventSubError::UnsupportedContentType) => "unsupported_content_type",
         Err(EventSubError::MalformedBody) => "malformed_body",
         Err(EventSubError::VerificationFailed) => "verification_failed",
+        Err(EventSubError::LedgerUnavailable) => "ledger_unavailable",
+        Err(EventSubError::Retryable) => "unban_retry",
     }
 }
 
@@ -220,7 +231,7 @@ async fn process(
             .and_then(|v| v.to_str().ok()),
     };
 
-    let result = twitch_eventsub::handle_webhook(
+    let result = twitch_eventsub::handle_webhook_with(
         &es.resolver,
         &es.dedup,
         &es.revocation,
@@ -234,6 +245,7 @@ async fn process(
         content_type,
         &raw_headers,
         &body,
+        es.unban.as_ref(),
     )
     .await;
 

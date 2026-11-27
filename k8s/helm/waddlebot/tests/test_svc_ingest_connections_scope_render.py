@@ -119,6 +119,8 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
         "identity:platform-user:resolve",
         # connector identity tokenizer + Discord-native unban sync mint the user UUID
         "identity:ephemeral:mint",
+        # Twitch EventSub channel.unban verifier: per-subscription secret + owning binding
+        "eventsub:secret-read",
         # svc-ingest polls BundleScheduleService.ListBundleSchedules (core/hub_client/src/
         # bundle_schedule.rs SCOPE); hub_api/grpc_internal/bundle_schedule_servicer.py requires it.
         "bundle-schedules:read",

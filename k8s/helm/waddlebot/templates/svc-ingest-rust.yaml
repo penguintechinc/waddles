@@ -35,6 +35,11 @@ instead of crash-looping at boot (svc_ingest itself also refuses to start, namin
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* Twitch EventSub `channel.unban` sync (core/svc_ingest/src/twitch_unban.rs). Effective only
+together with dynamicConnections (hub-api endpoints + machine JWT it needs): dynamicConnections OFF
+renders no TWITCH_CLIENT_ID and svc_ingest logs "twitch unban sync NOT enabled" at ERROR. */}}
+{{- $tus := .Values.pipeline.rustDataPlane.svcIngest.twitchUnbanSync | default dict }}
+{{- $twitchUnbanOn := and $tus.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -247,12 +252,6 @@ spec:
         - name: SENDER_EXEC_DIGEST_SPECTRUM
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "spectrum") | quote }}
         {{- end }}
-        # Public Helix application client id, from the operator-managed platform-credentials Secret.
-        - name: TWITCH_CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
-              key: TWITCH_CLIENT_ID
         # svc-ingest's OWN server-only cert/key (dedicated Secret, svc-ingest SAN only) -- never the
         # shared executor/stage host-api-tls material. The client identity is pinned.
         - name: HOST_API_SERVER_CERT_FILE
@@ -263,6 +262,17 @@ spec:
           value: /etc/waddlebot/svc-ingest-host-api-tls/ca.crt
         - name: HOST_API_CLIENT_IDENTITY
           value: {{ include "waddlebot.svcIngestHostApiClientIdentity" . | quote }}
+        {{- end }}
+        {{- if or $ct.enabled $twitchUnbanOn }}
+        # Public Helix application client id, from the operator-managed platform-credentials Secret.
+        # Consumed by the connector-tools executor AND the Twitch EventSub channel.unban sync
+        # (Helix ban-state re-check); rendered only when one of those two features is ON, so a
+        # pod with both OFF never sees it.
+        - name: TWITCH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: TWITCH_CLIENT_ID
         {{- end }}
         {{- if include "waddlebot.connectorRuntimeActive" . }}
         {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime }}

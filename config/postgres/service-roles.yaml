@@ -162,10 +162,14 @@ roles:
         SELECT: [id, uuid, display_name]
       community_members:
         SELECT: [id, community_id, user_uuid, user_id, display_name]
+      # public_id (alembic 0144): EventSub owner UUID -> numeric key resolution
+      # (core/svc_ingest/src/twitch_unban.rs OWNER_IDS_SQL); still no `tenants` grant.
       communities:
-        SELECT: [id, tenant_id]
+        SELECT: [id, tenant_id, public_id]
       ephemeral_pseudonyms:
         SELECT: [tenant_id, pseudonym, handle]
+      platform_connections:
+        SELECT: [id, tenant_id, public_id]
 
   waddles_svc_process:
     description: svc-process (active-bundle state via waddles_bundle_reader; per-community bundle config read-only, column-scoped)

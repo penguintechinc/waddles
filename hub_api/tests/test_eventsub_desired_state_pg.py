@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -45,6 +46,21 @@ OTHER_ID = "spiffe://penguintech.io/alpha/svc-action"
 def _key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Platform credential key (hex 32 bytes) for sealing -- a throwaway test value."""
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "ab" * 32)
+
+
+@pytest.fixture(autouse=True)
+def _no_core_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the bundle-driven tests WITHOUT the always-on core types (channel.unban).
+
+    `TestCoreUnbanSubscription` re-enables them via `core_on`.
+    """
+    monkeypatch.setattr(es, "CORE_TYPES", frozenset())
+
+
+@pytest.fixture
+def core_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the real always-on core types for one test."""
+    monkeypatch.setattr(es, "CORE_TYPES", frozenset({es.EventSubType.CHANNEL_UNBAN}))
 
 
 def _manifest(app_id: str, patterns: list[str], platform: str = "twitch") -> dict[str, Any]:
@@ -125,6 +141,21 @@ class World:
         async with self.dal.engine.begin() as c:
             await c.execute(text(stmt), params)
 
+    async def public_ids(self) -> tuple[str, str, str]:
+        """The tenant, community and connection ``public_id`` UUIDs (text) of this world."""
+        async with self.dal.engine.connect() as c:
+            row = (
+                await c.execute(
+                    text(
+                        "SELECT t.public_id::text AS tp, c.public_id::text AS cp, "
+                        "pc.public_id::text AS np FROM tenants t, communities c, "
+                        "platform_connections pc WHERE t.id = :t AND c.id = :c AND pc.id = :n"
+                    ),
+                    {"t": self.tenant, "c": self.community, "n": self.conn_id},
+                )
+            ).one()
+        return str(row.tp), str(row.cp), str(row.np)
+
 
 @pytest.fixture
 async def world(pg_dal: Any) -> World:  # noqa: F811
@@ -190,9 +221,11 @@ class TestPatternMatching:
     def test_event_patterns(self, patterns: list[str], expected: set[es.EventSubType]) -> None:
         assert es.types_for_event_patterns(patterns) == expected
 
-    def test_seven_types_with_follow_v2(self) -> None:
-        assert len(es.EVENTSUB_TYPES) == 7
+    def test_eight_types_with_follow_v2_and_core_unban(self, core_on: None) -> None:
+        assert len(es.EVENTSUB_TYPES) == 8
         assert es.EVENTSUB_TYPES[es.EventSubType.CHANNEL_FOLLOW] == ("channel.follow", 2)
+        assert es.EVENTSUB_TYPES[es.EventSubType.CHANNEL_UNBAN] == ("channel.unban", 1)
+        assert es.CORE_TYPES == {es.EventSubType.CHANNEL_UNBAN}
 
     def test_callback_url_requires_config(self) -> None:
         with pytest.raises(es.NotConfiguredError):
@@ -822,7 +855,7 @@ class TestSchemaConstraints:
         await _reconcile(world)
         row = (await world.rows())[0]
         for stmt in (
-            "UPDATE twitch_eventsub_subscriptions SET sub_type = 8 WHERE id = :i",
+            "UPDATE twitch_eventsub_subscriptions SET sub_type = 9 WHERE id = :i",
             "UPDATE twitch_eventsub_subscriptions SET status = 0 WHERE id = :i",
             "UPDATE twitch_eventsub_subscriptions SET failure_reason = 9 WHERE id = :i",
         ):
@@ -965,7 +998,15 @@ class TestContractHttp:
         assert resp.status_code == 200
         row = (await world.rows())[0]
         plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
-        assert (await resp.get_json())["secret"] == plain
+        body = await resp.get_json()
+        assert body["secret"] == plain
+        # The key is bound to the tenant/community/connection that own the subscription, by
+        # their public UUIDs only.
+        assert (
+            body["tenant_id"],
+            body["community_id"],
+            body["connection_id"],
+        ) == await world.public_ids()
         assert item["callbackKey"] == key
         assert (
             await client.get("/api/v1/internal/eventsub/secret/unknown-key-0123456789", headers=hdr)
@@ -1034,3 +1075,97 @@ class TestContractHttp:
         )
         assert plain not in caplog.text
         assert os.environ["CREDENTIAL_ENCRYPTION_KEY"] not in caplog.text
+
+    async def test_secret_dto_ids_are_uuid_strings_never_ints(
+        self, world: World, issuer: ServiceJwtIssuer
+    ) -> None:
+        """Regression (PR #1514): SecretDTO carried numeric PKs; only public_id UUIDs may cross."""
+        await world.activate(["channel.raid"])
+        client = _app(world.dal, issuer).test_client()
+        resp = await client.post("/api/v1/internal/eventsub/reconcile", json={}, headers=_h(issuer))
+        item = next(
+            w for w in (await resp.get_json())["work"] if w["communityId"] == world.community
+        )
+        resp = await client.get(
+            f"/api/v1/internal/eventsub/secret/{item['callbackKey']}",
+            headers=_h(issuer, scope=SCOPE_SECRET_READ),
+        )
+        assert resp.status_code == 200
+        body = await resp.get_json()
+        # Exact field set: nothing extra (no numeric id leaks under another name).
+        assert set(body) == {"success", "secret", "tenant_id", "community_id", "connection_id"}
+        numeric = {str(world.tenant), str(world.community), str(world.conn_id)}
+        for key in ("tenant_id", "community_id", "connection_id"):
+            value = body[key]
+            assert isinstance(value, str) and not isinstance(value, bool), key
+            assert str(uuid.UUID(value)) == value, key
+            assert value not in numeric, key
+        assert (body["tenant_id"], body["community_id"], body["connection_id"]) == (
+            await world.public_ids()
+        )
+
+    async def test_secret_refused_when_ledger_tenant_disagrees_with_owners(
+        self, world: World, issuer: ServiceJwtIssuer
+    ) -> None:
+        """A ledger row whose tenant does not own its community/connection is never served."""
+        await world.activate(["channel.raid"])
+        _summary, work, _ = await _reconcile(world)
+        key = _mine(work, world)[0].callback_key
+        other = world.tenant + 200000
+        await world.sql(
+            "INSERT INTO tenants (id, slug) VALUES (:i, :s)", i=other, s=f"es-mm-{next(SEQ)}"
+        )
+        await world.sql(
+            "UPDATE twitch_eventsub_subscriptions SET tenant_id = :t WHERE callback_key = :k",
+            t=other,
+            k=key,
+        )
+        with pytest.raises(es.UnknownSubscriptionError):
+            await es.binding_for_callback_key(world.dal, key)
+        client = _app(world.dal, issuer).test_client()
+        resp = await client.get(
+            f"/api/v1/internal/eventsub/secret/{key}", headers=_h(issuer, scope=SCOPE_SECRET_READ)
+        )
+        assert resp.status_code == 404
+
+
+class TestCoreUnbanSubscription:
+    """A bound Twitch connection gets a `channel.unban` subscription with NO bundle consuming it.
+
+    It carries its own sealed per-subscription secret; the callback key resolves to exactly the
+    tenant/community/connection that own it.
+    """
+
+    async def test_binding_creates_the_unban_subscription_with_its_own_secret(
+        self, world: World, core_on: None
+    ) -> None:
+        _summary, work, _ = await _reconcile(world)
+        rows = await world.rows()
+        assert [r.sub_type for r in rows] == [int(es.EventSubType.CHANNEL_UNBAN)]
+        assert rows[0].sub_version == 1
+        mine = _mine(work, world)
+        assert len(mine) == 1 and mine[0].twitch_type == "channel.unban"
+        assert mine[0].action is es.Action.CREATE and mine[0].connection_id == world.conn_id
+        # Its secret is sealed per row (never the plaintext column), bound by the row AAD.
+        plain = decrypt_value(rows[0].secret_enc, aad=f"eventsub:{rows[0].public_id}".encode())
+        assert plain and plain not in rows[0].secret_enc
+        bound = await es.binding_for_callback_key(world.dal, rows[0].callback_key)
+        assert bound.secret == plain
+        assert (
+            bound.tenant_public_id,
+            bound.community_public_id,
+            bound.connection_public_id,
+        ) == await world.public_ids()
+
+    async def test_two_communities_never_share_a_key_or_a_secret(
+        self, world: World, core_on: None
+    ) -> None:
+        _summary, work, _ = await _reconcile(world)
+        keys = {w.callback_key for w in work}
+        assert len(keys) == len(work), "every subscription has its own callback key"
+        rows = await world.rows()
+        assert rows[0].callback_key in keys
+
+    async def test_unknown_callback_key_has_no_binding(self, world: World) -> None:
+        with pytest.raises(es.UnknownSubscriptionError):
+            await es.binding_for_callback_key(world.dal, "unknown-key-0123456789")
