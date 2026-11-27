@@ -33,7 +33,7 @@ from services.audit_events import (
 )
 from services.community_inventory_authz import require_inventory_member
 from services.errors import ApiError
-from services.membership_state import MembershipState
+from services.membership_state import BanSource, MembershipState
 from services.schema import (
     bind_admin_tables,
     bind_auth_tables,
@@ -374,9 +374,13 @@ class TestLiftRestoresMembership:
     """
 
     @staticmethod
-    def _ban_membership(db: Any) -> int:
+    def _ban_membership(db: Any, source: BanSource) -> int:
         ban_suppression.ban_membership(
-            db.dal, community_id=db.community_id, hub_user_id=MEMBER, now=datetime.now(UTC)
+            db.dal,
+            community_id=db.community_id,
+            hub_user_id=MEMBER,
+            source=source,
+            now=datetime.now(UTC),
         )
         db.dal.commit()
         return int(_member_row(db).community_role_id)
@@ -421,7 +425,7 @@ class TestLiftRestoresMembership:
         ]
 
     async def test_floor_ban_lift_restores_membership(self, client: Any, db: Any) -> None:
-        role_id = self._ban_membership(db)
+        role_id = self._ban_membership(db, BanSource.FLOOR_BAN)
         _ban(db)
         await self._assert_banned_out(db)
         resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN))
@@ -442,7 +446,7 @@ class TestLiftRestoresMembership:
             return [[bool(n)]]
 
         monkeypatch.setattr(db.dal, "executesql", fake_sql)
-        role_id = self._ban_membership(db)
+        role_id = self._ban_membership(db, BanSource.SOFT_BAN)
         _soft_ban(db)
         await self._assert_banned_out(db)
         resp = await client.delete(
@@ -453,9 +457,70 @@ class TestLiftRestoresMembership:
         assert resp.status_code == 200, await resp.get_json()
         await self._assert_restored(db, role_id)
 
+    @staticmethod
+    def _fake_soft_ban_clear(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Route `reputation_clear_soft_ban` (a Postgres function) to a sqlite delete."""
+        real = db.dal.executesql
+
+        def fake_sql(sql: str, placeholders: list[Any] | None = None, **kw: Any) -> Any:
+            if "reputation_clear_soft_ban" not in sql:
+                return real(sql, placeholders=placeholders, **kw)
+            _tenant, community_id, user_uuid, _actor, _only_floor = placeholders or []
+            bans = db.dal.bundle_reputation_soft_bans
+            n = db.dal((bans.community_id == community_id) & (bans.user_uuid == user_uuid)).delete()
+            return [[bool(n)]]
+
+        monkeypatch.setattr(db.dal, "executesql", fake_sql)
+
+    async def test_soft_ban_clear_keeps_a_manual_ban(
+        self, client: Any, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression (PR #1542 security review, HIGH): clearing a soft ban never fails open.
+
+        Banned manually AND soft-banned: the clear removes only SOFT_BAN, the member stays
+        BANNED; removing the manual ban (the last source) then restores access.
+        """
+        self._fake_soft_ban_clear(db, monkeypatch)
+        role_id = self._ban_membership(db, BanSource.MANUAL)
+        self._ban_membership(db, BanSource.SOFT_BAN)
+        _soft_ban(db)
+        resp = await client.delete(
+            f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/soft-bans/"
+            f"{uid(MEMBER)}",
+            headers=_h(ADMIN, scope="community:admin"),
+        )
+        assert resp.status_code == 200, await resp.get_json()
+        assert int(_member_row(db).ban_sources) == int(BanSource.MANUAL)
+        await self._assert_banned_out(db)
+
+        assert (
+            ban_suppression.lift_membership_ban(
+                db.dal,
+                community_id=db.community_id,
+                hub_user_id=MEMBER,
+                source=BanSource.MANUAL,
+                now=datetime.now(UTC),
+            )
+            == 1
+        )
+        db.dal.commit()
+        await self._assert_restored(db, role_id)
+
+    async def test_floor_ban_lift_keeps_a_manual_ban(self, client: Any, db: Any) -> None:
+        """Regression (PR #1542 security review, MEDIUM): a tenant lift clears FLOOR_BAN only."""
+        self._ban_membership(db, BanSource.MANUAL)
+        self._ban_membership(db, BanSource.FLOOR_BAN)
+        _ban(db)
+        resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN))
+        assert resp.status_code == 200
+        row = _member_row(db)
+        assert int(row.membership_state) == int(MembershipState.BANNED)
+        assert int(row.ban_sources) == int(BanSource.MANUAL)
+        await self._assert_banned_out(db)
+
     async def test_refused_lift_leaves_the_membership_banned(self, client: Any, db: Any) -> None:
         """Fail closed: a refused lift (non-tenant-admin) restores nothing."""
-        self._ban_membership(db)
+        self._ban_membership(db, BanSource.FLOOR_BAN)
         _ban(db)
         resp = await client.delete(_url(db), headers=_h(ADMIN))
         assert resp.status_code == 403

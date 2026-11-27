@@ -185,11 +185,17 @@ def _member(
     active: bool = True,
     reputation: int = 742,
 ) -> int:
+    """Insert one member row; ``role="banned"`` seeds a manual ban the way 0146/0148 backfill it.
+
+    A ban is the BANNED `membership_state` + its MANUAL `ban_sources` bit, never the role name.
+    """
+    banned = role.strip().lower() == "banned"
     return int(
         _one(
             dal,
             "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
-            "role, is_active, reputation) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "role, is_active, reputation, membership_state, ban_sources) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             [
                 community_id,
                 None if user_id is None else str(user_id),
@@ -198,6 +204,8 @@ def _member(
                 role,
                 active,
                 reputation,
+                2 if banned else 1,
+                1 if banned else 0,
             ],
         )
     )
@@ -536,11 +544,12 @@ class TestReturnOnPostgres:
         assert match is not None and match.reason is bs.RestrictionReason.BAN
         row = _q(
             dal,
-            "SELECT role, is_active, user_uuid IS NOT NULL FROM community_members "
-            "WHERE community_id=%s AND user_id=%s",
+            "SELECT membership_state, ban_sources, is_active, user_uuid IS NOT NULL "
+            "FROM community_members WHERE community_id=%s AND user_id=%s",
             [target, str(returning)],
         )
-        assert row == [("banned", False, True)]  # the 0048 trigger resolved the uuid on insert
+        # BANNED (state) by the SUPPRESSION source (8); the 0048 trigger resolved the uuid
+        assert row == [(2, 8, False, True)]
 
     async def test_a_benign_return_gets_a_fresh_start(self, adal: AsyncDAL) -> None:
         dal = adal.dal
@@ -654,6 +663,8 @@ class TestReturnOnPostgres:
         banned = await bs.reapply_for_hub_user_async(adal, dal, hub_user_id=joiner)
 
         assert banned == 1
-        assert _q(dal, "SELECT role, is_active FROM community_members WHERE id=%s", [member]) == [
-            ("banned", False)
-        ]
+        assert _q(
+            dal,
+            "SELECT membership_state, ban_sources, is_active FROM community_members WHERE id=%s",
+            [member],
+        ) == [(2, 8, False)]

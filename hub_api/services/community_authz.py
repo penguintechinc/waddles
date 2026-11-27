@@ -668,14 +668,17 @@ def check_target_member(
 
     * 403 ``owner_message`` -- the member links the seeded system owner role and the editor is not
       a global or tenant admin (``editor_bypass``);
-    * 403 -- a non-bypass editor does not hold every scope the member holds.
+    * 403 -- a non-bypass editor does not hold every scope the member's role grants (ban state
+      ignored, so a BANNED admin-kind target is still out of a moderator's reach).
     """
     if editor_bypass:
         return
     role_row = _linked_role_row(dal, member)
     if is_owner_role(role_row):
         raise forbidden(owner_message)
-    if not member_role_scopes(member, role_row) <= editor_scopes:
+    # The target's ROLE scopes, ban state ignored: a BANNED target holds no live scopes, but
+    # acting on it (ban changes, reputation) must still be bounded by what its role grants.
+    if not member_role_scopes(member, role_row, ignore_ban=True) <= editor_scopes:
         raise forbidden("Cannot modify a member holding scopes you do not hold")
 
 
@@ -706,19 +709,23 @@ def _linked_role_row(dal: Any, member: Any) -> Any | None:
     return dal(dal.community_roles.id == member.community_role_id).select().first()
 
 
-def member_role_scopes(member: Any, role_row: Any) -> frozenset[str]:
+def member_role_scopes(member: Any, role_row: Any, *, ignore_ban: bool = False) -> frozenset[str]:
     """THE scope resolution for one membership row + its joined `community_roles` row (pure).
 
     Admin-kind roles resolve to the full registry; otherwise the member's `claims_cache`, falling
     back to the role's `base_claims`. No linked role row (also a LEFT JOIN miss), or a BANNED
     membership, holds no scopes (fail closed). Every effective-scope reader (authz gates,
     `/auth/me`) goes through this one helper.
+
+    ``ignore_ban=True`` resolves the scopes the linked ROLE carries regardless of ban state --
+    only for the escalation check on a TARGET (:func:`check_target_member`), where an empty
+    banned set would let any editor act on a banned admin.
     """
     if (
         member is None
         or role_row is None
         or getattr(role_row, "id", None) is None
-        or is_banned(member)
+        or (is_banned(member) and not ignore_ban)
     ):
         return frozenset()
     if _row_kind(role_row) == KIND_ADMIN:

@@ -55,7 +55,7 @@ from typing import Any, Final
 from opentelemetry import trace
 
 from services.bundle_telemetry import get_meter, get_tracer
-from services.membership_state import MembershipState, is_banned
+from services.membership_state import BAN_SOURCES_FIELD, BanSource, MembershipState, is_banned
 from services.schema import bind_erasure_reputation_tables, bind_suppression_tables
 from services.suppression_keys import (
     PlatformKekKeySource,
@@ -699,7 +699,11 @@ def _restore_unsuppressed_members(
         )
         if still is None:
             restored += lift_membership_bans_in_tenant(
-                dal, tenant_id=tenant_id, hub_user_id=hub_user_id, now=now
+                dal,
+                tenant_id=tenant_id,
+                hub_user_id=hub_user_id,
+                source=BanSource.SUPPRESSION,
+                now=now,
             )
     return restored
 
@@ -713,52 +717,110 @@ def purge_expired(dal: Any, *, now: datetime) -> int:
     )
 
 
-def ban_membership(dal: Any, *, community_id: int, hub_user_id: int, now: datetime) -> None:
-    """Upsert the hub user's membership in `community_id` as BANNED (state) + inactive.
+def membership_state_for(sources: int) -> MembershipState:
+    """THE recompute: BANNED while ANY ban source bit remains, ACTIVE only when none does.
+
+    Unknown bits count as a source (fail closed); the CHECK keeps them out of the column anyway.
+    """
+    return MembershipState.BANNED if int(sources) else MembershipState.ACTIVE
+
+
+def _sources_of(member: Any) -> int:
+    """The row's ban-source bits; a BANNED row recording none counts as MANUAL (fail closed).
+
+    Such a row predates the bitmask or was written by an unknown path: no lift of a specific
+    reason may restore it, only the manual lift.
+    """
+    sources = int(getattr(member, BAN_SOURCES_FIELD, None) or 0)
+    if not sources and is_banned(member):
+        return int(BanSource.MANUAL)
+    return sources
+
+
+def _write_sources(dal: Any, member: Any, sources: int, now: datetime) -> bool:
+    """Persist ``sources`` and the recomputed state on ``member``; True iff the state changed.
+
+    Becoming / staying BANNED also writes ``is_active=False``; only the BANNED -> ACTIVE flip
+    writes ``is_active=True``, so a lift restores exactly the access the role link grants.
+    """
+    state = membership_state_for(sources)
+    changed = is_banned(member) != (state is MembershipState.BANNED)
+    fields: dict[str, Any] = {BAN_SOURCES_FIELD: int(sources), "updated_at": now}
+    if state is MembershipState.BANNED:
+        fields.update(membership_state=state, is_active=False)
+    elif changed:
+        fields.update(membership_state=state, is_active=True)
+    dal(dal.community_members.id == member.id).update(**fields)
+    return changed
+
+
+def _member_rows(dal: Any, query: Any) -> Any:
+    """``SELECT ... FOR UPDATE`` the matching member rows (sqlite serializes writers instead).
+
+    Only the columns the ban bookkeeping reads: the bound table carries columns some deployed
+    schemas lack (e.g. `last_activity`), so a bare ``select()`` would fail there.
+    """
+    members = dal.community_members
+    return dal(query).select(
+        members.id,
+        members.community_id,
+        members.membership_state,
+        members.ban_sources,
+        for_update=dal._adapter.dbengine != "sqlite",
+    )
+
+
+def ban_membership(
+    dal: Any, *, community_id: int, hub_user_id: int, source: BanSource, now: datetime
+) -> None:
+    """THE add: record ``source`` on the hub user's membership in `community_id` (upserted BANNED).
 
     The ban is the `membership_state` column, never a role value: an existing row keeps its
     `community_role_id` link so a later lift restores access untouched. Runs inside the
     caller's transaction.
     """
     members = dal.community_members
-    existing = dal(
-        (members.community_id == community_id) & (members.user_id == str(hub_user_id))
-    ).select(members.id)
-    if existing:
-        dal(members.id == existing.first().id).update(
-            membership_state=MembershipState.BANNED, is_active=False, updated_at=now
-        )
-    else:
-        members.insert(
-            community_id=community_id,
-            user_id=str(hub_user_id),
-            membership_state=MembershipState.BANNED,
-            is_active=False,
-            joined_at=now,
-            updated_at=now,
-        )
-
-
-def lift_membership_ban(dal: Any, *, community_id: int, hub_user_id: int, now: datetime) -> int:
-    """Restore a BANNED membership to ACTIVE + `is_active=True`; returns rows restored.
-
-    Only the state/active flag change: the `community_role_id` link was never touched by the
-    ban, so the member regains exactly the access their role grants. Runs in the caller's
-    transaction; ACTIVE rows are left alone.
-    """
-    members = dal.community_members
-    return int(
-        dal(
-            (members.community_id == community_id)
-            & (members.user_id == str(hub_user_id))
-            & (members.membership_state == MembershipState.BANNED)
-        ).update(membership_state=MembershipState.ACTIVE, is_active=True, updated_at=now)
-        or 0
+    rows = _member_rows(
+        dal, (members.community_id == community_id) & (members.user_id == str(hub_user_id))
+    )
+    if rows:
+        for row in rows:
+            _write_sources(dal, row, _sources_of(row) | int(source), now)
+        return
+    members.insert(
+        community_id=community_id,
+        user_id=str(hub_user_id),
+        membership_state=MembershipState.BANNED,
+        ban_sources=int(source),
+        is_active=False,
+        joined_at=now,
+        updated_at=now,
     )
 
 
+def lift_membership_ban(
+    dal: Any, *, community_id: int, hub_user_id: int, source: BanSource, now: datetime
+) -> int:
+    """THE remove: clear ONLY ``source`` from the membership; returns rows restored to ACTIVE.
+
+    The row goes back to ACTIVE + `is_active=True` only when no other source remains (a member
+    also banned manually, by a floor ban or by suppression stays BANNED). Rows not carrying
+    ``source`` are untouched. Runs in the caller's transaction.
+    """
+    members = dal.community_members
+    rows = _member_rows(
+        dal, (members.community_id == community_id) & (members.user_id == str(hub_user_id))
+    )
+    restored = 0
+    for row in rows:
+        sources = _sources_of(row)
+        if sources & int(source):
+            restored += _write_sources(dal, row, sources & ~int(source), now)
+    return restored
+
+
 def lift_membership_bans_in_tenant(
-    dal: Any, *, tenant_id: int, hub_user_id: int, now: datetime
+    dal: Any, *, tenant_id: int, hub_user_id: int, source: BanSource, now: datetime
 ) -> int:
     """:func:`lift_membership_ban` in every community of ``tenant_id`` (a tenant-wide lift).
 
@@ -768,12 +830,17 @@ def lift_membership_bans_in_tenant(
     members, communities = dal.community_members, dal.communities
     rows = dal(
         (members.user_id == str(hub_user_id))
-        & (members.membership_state == MembershipState.BANNED)
         & (members.community_id == communities.id)
         & (communities.tenant_id == tenant_id)
     ).select(members.community_id, distinct=True)
     return sum(
-        lift_membership_ban(dal, community_id=int(r.community_id), hub_user_id=hub_user_id, now=now)
+        lift_membership_ban(
+            dal,
+            community_id=int(r.community_id),
+            hub_user_id=hub_user_id,
+            source=source,
+            now=now,
+        )
         for r in rows
     )
 
@@ -781,25 +848,24 @@ def lift_membership_bans_in_tenant(
 def reapply_for_hub_user(
     dal: Any, *, hub_user_id: int, keys: SuppressionKeySource, now: datetime
 ) -> int:
-    """Re-apply any matching suppression to the hub user's existing, non-banned memberships.
+    """Re-apply any matching suppression to the hub user's memberships not yet carrying it.
 
     For every tenant where the user has a membership, each linked identity is checked
-    against THAT tenant's list only; a match flips that tenant's membership rows to banned.
+    against THAT tenant's list only; a match adds the SUPPRESSION ban source to that tenant's
+    membership rows (an already-BANNED row keeps its other sources and gains this one).
     Called after an identity is linked (a banned person may join first and link the banned
-    account later). Returns membership rows banned. Runs inside the caller's transaction.
+    account later). Returns membership rows newly banned. Runs inside the caller's transaction.
     """
     _bind(dal)
     identities = identities_of(dal, hub_user_id)
     if not identities:
         return 0
     members = dal.community_members
-    rows = dal(
-        (members.user_id == str(hub_user_id))
-        & (
-            (members.membership_state == None)  # noqa: E711 - pydal query operator
-            | (members.membership_state != MembershipState.BANNED)
-        )
-    ).select(members.id, members.community_id)
+    rows = [
+        r
+        for r in _member_rows(dal, members.user_id == str(hub_user_id))
+        if not _sources_of(r) & BanSource.SUPPRESSION
+    ]
     if not rows:
         return 0
     tenant_by_community = tenants_of(dal, (r.community_id for r in rows))
@@ -810,13 +876,9 @@ def reapply_for_hub_user(
         )
         if match is None:
             continue
-        ids = [int(r.id) for r in rows if tenant_by_community.get(int(r.community_id)) == tenant_id]
-        banned += (
-            dal(members.id.belongs(ids)).update(
-                membership_state=MembershipState.BANNED, is_active=False, updated_at=now
-            )
-            or 0
-        )
+        hits = [r for r in rows if tenant_by_community.get(int(r.community_id)) == tenant_id]
+        for row in hits:
+            banned += _write_sources(dal, row, _sources_of(row) | BanSource.SUPPRESSION, now)
         logger.info(
             "suppression.membership_reapplied",
             extra={
@@ -824,7 +886,7 @@ def reapply_for_hub_user(
                 "result": "banned",
                 "tenant_id": tenant_id,
                 "reason": match.reason.value,
-                "rows": len(ids),
+                "rows": len(hits),
             },
         )
     return int(banned)
@@ -883,7 +945,13 @@ async def check_and_ban_membership(
                 dal, tenant_id=tenant_id, identities=identities, keys=source, now=now
             )
             if match is not None:
-                ban_membership(dal, community_id=community_id, hub_user_id=hub_user_id, now=now)
+                ban_membership(
+                    dal,
+                    community_id=community_id,
+                    hub_user_id=hub_user_id,
+                    source=BanSource.SUPPRESSION,
+                    now=now,
+                )
             return match
 
         try:

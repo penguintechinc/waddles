@@ -32,6 +32,7 @@ from services import ban_suppression as bs
 from services import data_privacy_service as privacy
 from services import suppression_keys as keys
 from services.ban_suppression import RestrictionReason
+from services.membership_state import BanSource
 from tests.test_data_privacy_erasure import (  # noqa: F401 - fixtures re-exported for this module
     TRIGGER_MESSAGE,
     OtelSink,
@@ -1137,7 +1138,11 @@ class TestStoreEdges:
         other = _member(db, community_id=_community(db, tenant_id=tenant), user_id=user)
 
         restored = bs.lift_membership_ban(
-            db.dal, community_id=community, hub_user_id=user, now=datetime.now(UTC)
+            db.dal,
+            community_id=community,
+            hub_user_id=user,
+            source=BanSource.MANUAL,
+            now=datetime.now(UTC),
         )
         db.dal.commit()
 
@@ -1148,10 +1153,102 @@ class TestStoreEdges:
         assert _member_row(db, other).membership_state == 1  # an ACTIVE row is left alone
         assert (
             bs.lift_membership_ban(
-                db.dal, community_id=community, hub_user_id=user, now=datetime.now(UTC)
+                db.dal,
+                community_id=community,
+                hub_user_id=user,
+                source=BanSource.MANUAL,
+                now=datetime.now(UTC),
             )
             == 0
         )
+
+    def test_each_lift_clears_only_its_own_source(self, db: Any) -> None:
+        """Regression (PR #1542 security review): BANNED until the LAST source is lifted."""
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="multi")
+        community = _community(db, tenant_id=tenant)
+        member = _member(db, community_id=community, user_id=user)
+        now = datetime.now(UTC)
+        for source in (BanSource.MANUAL, BanSource.SOFT_BAN, BanSource.SUPPRESSION):
+            bs.ban_membership(
+                db.dal, community_id=community, hub_user_id=user, source=source, now=now
+            )
+        db.dal.commit()
+
+        def lift(source: BanSource) -> int:
+            n = bs.lift_membership_ban(
+                db.dal, community_id=community, hub_user_id=user, source=source, now=now
+            )
+            db.dal.commit()
+            return n
+
+        assert lift(BanSource.SOFT_BAN) == 0
+        assert lift(BanSource.FLOOR_BAN) == 0  # never recorded: a no-op
+        assert lift(BanSource.SUPPRESSION) == 0
+        row = _member_row(db, member)
+        assert (row.membership_state, row.is_active) == (2, False)
+        assert row.ban_sources == int(BanSource.MANUAL)
+        assert lift(BanSource.MANUAL) == 1
+        row = _member_row(db, member)
+        assert (row.membership_state, row.is_active, row.ban_sources) == (1, True, 0)
+
+    def test_tenant_wide_lift_keeps_other_sources(self, db: Any) -> None:
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="tenantwide")
+        now = datetime.now(UTC)
+        only_floor = _community(db, tenant_id=tenant)
+        also_manual = _community(db, tenant_id=tenant)
+        for community in (only_floor, also_manual):
+            _member(db, community_id=community, user_id=user)
+            bs.ban_membership(
+                db.dal,
+                community_id=community,
+                hub_user_id=user,
+                source=BanSource.FLOOR_BAN,
+                now=now,
+            )
+        bs.ban_membership(
+            db.dal, community_id=also_manual, hub_user_id=user, source=BanSource.MANUAL, now=now
+        )
+        db.dal.commit()
+
+        restored = bs.lift_membership_bans_in_tenant(
+            db.dal, tenant_id=tenant, hub_user_id=user, source=BanSource.FLOOR_BAN, now=now
+        )
+        db.dal.commit()
+
+        assert restored == 1
+        cm = db.dal.community_members
+        state = {
+            int(r.community_id): int(r.membership_state)
+            for r in db.dal(cm.user_id == str(user)).select()
+        }
+        assert state == {only_floor: 1, also_manual: 2}
+
+    def test_unsourced_banned_row_counts_as_manual(self, db: Any) -> None:
+        """Fail closed: a BANNED row with no recorded source yields only to a MANUAL lift."""
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="legacy")
+        community = _community(db, tenant_id=tenant)
+        member = _banned_member(db, community_id=community, user_id=user)
+        now = datetime.now(UTC)
+        for source in (BanSource.SOFT_BAN, BanSource.FLOOR_BAN, BanSource.SUPPRESSION):
+            assert (
+                bs.lift_membership_ban(
+                    db.dal, community_id=community, hub_user_id=user, source=source, now=now
+                )
+                == 0
+            )
+        bs.ban_membership(
+            db.dal, community_id=community, hub_user_id=user, source=BanSource.SOFT_BAN, now=now
+        )
+        db.dal.commit()
+        assert _member_row(db, member).ban_sources == int(BanSource.MANUAL | BanSource.SOFT_BAN)
+
+    def test_recompute_is_banned_while_any_source_remains(self) -> None:
+        assert bs.membership_state_for(0) == bs.MembershipState.ACTIVE
+        for bits in (1, 2, 4, 8, 15, 16):
+            assert bs.membership_state_for(bits) == bs.MembershipState.BANNED
 
     def test_lookups_validate_their_inputs(self, db: Any) -> None:
         with pytest.raises(keys.SuppressionInputError):

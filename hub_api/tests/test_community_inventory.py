@@ -831,12 +831,19 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         from datetime import UTC, datetime
 
         from services.ban_suppression import lift_membership_ban
+        from services.membership_state import BanSource
 
         dal, cid = community_db
         denied = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, BANNED))
         assert denied.status_code == 403
         assert (
-            lift_membership_ban(dal, community_id=cid, hub_user_id=BANNED, now=datetime.now(UTC))
+            lift_membership_ban(
+                dal,
+                community_id=cid,
+                hub_user_id=BANNED,
+                source=BanSource.MANUAL,
+                now=datetime.now(UTC),
+            )
             == 1
         )
         dal.commit()

@@ -640,13 +640,74 @@ class TestAuthorityIsRoleRowNeverRoleName:
         assert (await self._role(automation_db, uid)).scopes == frozenset()
         assert member_scopes_sync(dal, COMMUNITY_ID, uid) == frozenset()
 
+    def test_banned_admin_kind_target_is_out_of_a_moderators_reach(
+        self, automation_db: Any
+    ) -> None:
+        """Regression (PR #1542 review): the escalation check reads the target's ROLE scopes.
+
+        A BANNED member holds no live scopes; comparing against that empty set let any editor
+        act on a banned admin. `lock_member_for_change(active_only=False)` must still refuse a
+        moderator, and still admit an editor holding every scope of the target's role.
+        """
+        from services.community_authz import lock_member_for_change
+        from services.errors import ApiError
+        from services.scope_registry import SCOPE_REPUTATION_MANAGE, effective_scopes
+
+        dal = automation_db.dal
+        admin_uid = self._seed(dal, username="banned-boss", role_name="boss", kind=1, state=2)
+        custom_uid = self._seed(
+            dal,
+            username="banned-helper",
+            role_name="helper",
+            scopes=["community:moderate", SCOPE_REPUTATION_MANAGE],
+            state=2,
+        )
+        moderator = frozenset({"community:moderate", SCOPE_REPUTATION_MANAGE})
+
+        def lock(uid: int, scopes: frozenset[str]) -> Any:
+            return lock_member_for_change(
+                dal,
+                community_id=COMMUNITY_ID,
+                user_id=uid,
+                editor_scopes=scopes,
+                editor_bypass=False,
+                owner_message="owner",
+                active_only=False,
+            )
+
+        with pytest.raises(ApiError) as exc:
+            lock(admin_uid, moderator)
+        assert exc.value.status_code == 403
+        assert lock(admin_uid, effective_scopes(1, None)).id is not None  # a full admin may
+        assert lock(custom_uid, moderator).id is not None  # role scopes within the editor's
+        with pytest.raises(ApiError):
+            lock(custom_uid, frozenset({"community:moderate"}))
+
+    def test_ban_never_grants_live_scopes(self) -> None:
+        """`ignore_ban` is the escalation-check view only; the live resolution stays empty."""
+        from types import SimpleNamespace
+
+        from services.community_authz import member_role_scopes
+
+        member = SimpleNamespace(membership_state=2, claims_cache=None)
+        role = SimpleNamespace(id=1, role_kind=0, base_claims={"scopes": ["a:b"]})
+        assert member_role_scopes(member, role) == frozenset()
+        assert member_role_scopes(member, role, ignore_ban=True) == frozenset({"a:b"})
+
     async def test_lift_restores_the_role_scopes(self, automation_db: Any) -> None:
         from services.ban_suppression import lift_membership_ban
+        from services.membership_state import BanSource
         from services.scope_registry import SCOPE_COMMUNITY_ADMIN
 
         dal = automation_db.dal
         uid = self._seed(dal, username="lifted-admin", role_name="boss", kind=1, state=2)
-        lift_membership_ban(dal, community_id=COMMUNITY_ID, hub_user_id=uid, now=datetime.now(UTC))
+        lift_membership_ban(
+            dal,
+            community_id=COMMUNITY_ID,
+            hub_user_id=uid,
+            source=BanSource.MANUAL,
+            now=datetime.now(UTC),
+        )
         dal.commit()
         assert SCOPE_COMMUNITY_ADMIN in (await self._role(automation_db, uid)).scopes
 

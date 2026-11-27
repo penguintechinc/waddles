@@ -35,6 +35,7 @@ from flask_core.reputation_tiers import REPUTATION_TIERS, reputation_tier
 from services import ban_suppression
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found
 from services.member_roles import run_write_job
+from services.membership_state import BanSource
 from services.schema import (
     bind_auth_tables,
     bind_erasure_reputation_tables,
@@ -959,8 +960,9 @@ async def clear_soft_ban(
     """Clear a member's soft ban (floor- or manually-set). Returns whether one existed.
 
     ONE transaction: ``lock`` (target lock + owner/scope check), the SQL clear, and -- when a ban
-    was cleared -- `ban_suppression.lift_membership_ban`, so a BANNED membership regains exactly
-    the access its role grants (re-join and `/auth/me` see the community again).
+    was cleared -- `ban_suppression.lift_membership_ban` for the SOFT_BAN source only: the
+    membership regains its role's access only if no other ban source (manual, floor ban,
+    suppression) remains.
     """
     _ensure_reputation_tables(dal)
 
@@ -979,7 +981,11 @@ async def clear_soft_ban(
         cleared = bool(rows and rows[0][0])
         if cleared:
             ban_suppression.lift_membership_ban(
-                dal, community_id=community_id, hub_user_id=user_id, now=datetime.now(UTC)
+                dal,
+                community_id=community_id,
+                hub_user_id=user_id,
+                source=BanSource.SOFT_BAN,
+                now=datetime.now(UTC),
             )
         return cleared
 

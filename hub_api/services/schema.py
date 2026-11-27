@@ -418,6 +418,9 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         # Int-enum standing (`services.membership_state.MembershipState`, alembic 0146): a ban is
         # a membership STATE (2), never a role name; authority lives on `community_role_id`.
         Field("membership_state", "integer", default=1),
+        # Why the row is BANNED (`membership_state.BanSource` bitmask, alembic 0148): BANNED while
+        # any bit remains; each lift clears only its own bit (`ban_suppression`).
+        Field("ban_sources", "integer", default=0),
         Field("joined_at", "datetime"),
         # Gap (4): platformController.js's getUsers()/getUser()/getStats()
         # all reference `community_members.last_activity`/`created_at`, but
