@@ -281,6 +281,8 @@ class CommunityMembershipDTO:
     name: str
     displayName: str
     role: str
+    roleId: str | None
+    scopes: list[str]
     licenseTier: Annotated[
         int,
         PydanticField(
@@ -777,6 +779,8 @@ async def me() -> MeResponse:
                     name=c.name,
                     displayName=c.display_name,
                     role=c.role,
+                    roleId=c.role_id,
+                    scopes=list(c.scopes),
                     licenseTier=c.license_tier,
                 )
                 for c in result.communities

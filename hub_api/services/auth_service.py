@@ -52,8 +52,11 @@ from quart import has_request_context
 from config import HubAPIConfig
 from services import session_service
 from services.audit_http import record_session_issued, record_session_revoked
+from services.community_authz import member_role_scopes
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
+from services.membership_state import MembershipState
+from services.scope_registry import all_scopes
 from services.session_cookie import issue_refresh_cookie
 
 logger = logging.getLogger(__name__)
@@ -972,6 +975,10 @@ class CommunityMembership:
     license_tier: int = 1
     #: `communities.public_id` UUID: the only community id that crosses the API boundary.
     public_id: str = ""
+    #: `community_roles.public_id` of the member's role (None when the member has no role row).
+    role_id: str | None = None
+    #: Effective scopes (sorted): full registry for global/tenant admins, else the role's scopes.
+    scopes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1085,10 +1092,17 @@ async def get_current_user(
         for r in identity_rows
     ]
 
+    is_global = await is_global_admin(async_dal, dal, user_id=row.id)
+    admin_tenants = {
+        int(r.tenant_id)
+        for r in await async_dal.select_async(dal(dal.tenant_admins.user_id == user_id))
+    }
+    state = dal.community_members.membership_state
     community_rows = await async_dal.select_async(
         dal(
             (dal.community_members.user_id == str(user_id))
             & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
+            & ((state == None) | (state != MembershipState.BANNED))  # noqa: E711
             & (dal.communities.id == dal.community_members.community_id)
             & (dal.communities.is_active == True)  # noqa: E712 - pydal Field comparison
         ),
@@ -1097,7 +1111,11 @@ async def get_current_user(
         dal.communities.name,
         dal.communities.display_name,
         dal.communities.tenant_id,
-        dal.community_members.role,
+        dal.community_members.ALL,
+        dal.community_roles.ALL,
+        left=dal.community_roles.on(
+            dal.community_members.community_role_id == dal.community_roles.id
+        ),
     )
     tiers = await _community_tier_codes(
         async_dal,
@@ -1109,14 +1127,29 @@ async def get_current_user(
             if r.communities.tenant_id is not None
         },
     )
+
+    def _role(r: Any) -> Any:
+        """The joined `community_roles` row, or None when the member has no role row."""
+        role_row = r.community_roles
+        return role_row if role_row is not None and role_row.id else None
+
+    def _scopes(r: Any) -> tuple[str, ...]:
+        """Effective scopes of one membership row (admins hold the full registry)."""
+        tenant_id = r.communities.tenant_id
+        if is_global or (tenant_id is not None and int(tenant_id) in admin_tenants):
+            return tuple(sorted(all_scopes()))
+        return tuple(sorted(member_role_scopes(r.community_members, _role(r))))
+
     communities = [
         CommunityMembership(
             id=r.communities.id,
             name=r.communities.name,
             display_name=r.communities.display_name or r.communities.name,
-            role=r.community_members.role,
+            role=(_role(r).name if _role(r) else None) or "member",
             license_tier=tiers.get(int(r.communities.id), 1),
             public_id=_require_public_id(r.communities.public_id),
+            role_id=str(_role(r).public_id) if _role(r) else None,
+            scopes=_scopes(r),
         )
         for r in community_rows
     ]
@@ -1126,7 +1159,7 @@ async def get_current_user(
         email=row.email,
         username=row.username,
         avatar_url=row.avatar_url,
-        is_super_admin=await is_global_admin(async_dal, dal, user_id=row.id),
+        is_super_admin=is_global,
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
         has_password=row.password_hash is not None,

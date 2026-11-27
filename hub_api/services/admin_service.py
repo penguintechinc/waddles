@@ -39,10 +39,11 @@ from typing import Any
 import bcrypt
 from flask_core.tenancy import TenantContext
 
-from services import community_authz
+from services import community_authz, community_interaction
 from services import community_reputation_service as reputation_svc
-from services.errors import bad_request, forbidden, not_found
+from services.errors import bad_request, conflict, forbidden, not_found
 from services.member_roles import ASSIGNABLE_MEMBER_ROLES
+from services.membership_state import MembershipState
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
 
@@ -220,6 +221,55 @@ async def update_module_config(
 # ── Member management ───────────────────────────────────────────────────
 
 
+def _not_banned(dal: Any) -> Any:
+    """Query term: membership is not BANNED (a NULL state is ACTIVE)."""
+    state = dal.community_members.membership_state
+    return (state == None) | (state != MembershipState.BANNED)  # noqa: E711 - pydal Field
+
+
+async def _role_by_public_id(
+    async_dal: Any, dal: Any, *, community_id: int, role_uuid: str
+) -> Any | None:
+    """The `community_roles` row with this public UUID in THIS community (None if absent)."""
+    try:
+        role_uuid = str(uuid.UUID(role_uuid))
+    except (ValueError, AttributeError, TypeError):
+        raise bad_request("roleId must be a UUID") from None
+    rows = await async_dal.select_async(
+        dal(
+            (dal.community_roles.community_id == community_id)
+            & (dal.community_roles.public_id == role_uuid)
+        )
+    )
+    return rows.first()
+
+
+async def _guard_last_admin(
+    async_dal: Any, dal: Any, *, community_id: int, target: Any, action: str
+) -> None:
+    """409 when `target` is the last active admin-kind member (never a role-name check)."""
+    if target.community_role_id is None:
+        return
+    admin_roles = await async_dal.select_async(
+        dal(
+            (dal.community_roles.community_id == community_id)
+            & (dal.community_roles.role_kind == KIND_ADMIN)
+        ),
+        dal.community_roles.id,
+    )
+    admin_role_ids = [r.id for r in admin_roles]
+    if target.community_role_id not in admin_role_ids:
+        return
+    admin_count = await async_dal.count_async(
+        (dal.community_members.community_id == community_id)
+        & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
+        & _not_banned(dal)
+        & dal.community_members.community_role_id.belongs(admin_role_ids)
+    )
+    if admin_count <= 1:
+        raise conflict(f"Cannot {action} the last community admin")
+
+
 async def get_members(
     async_dal: Any,
     dal: Any,
@@ -229,32 +279,57 @@ async def get_members(
     page: int,
     limit: int,
     search: str,
-    role: str | None,
+    role_id: str | None,
 ) -> tuple[list[Any], int, int]:
-    """Get community members."""
+    """Active, non-banned community members (search + role filter applied before pagination)."""
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
     page = max(1, page)
     limit = min(100, max(1, limit))
     offset = (page - 1) * limit
 
-    query = (dal.community_members.community_id == community_id) & (
-        dal.community_members.is_active == True  # noqa: E712 - pydal Field comparison
+    query = (
+        (dal.community_members.community_id == community_id)
+        & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
+        & _not_banned(dal)
     )
-    if role:
-        query &= dal.community_members.role == role
+    if role_id:
+        role_row = await _role_by_public_id(
+            async_dal, dal, community_id=community_id, role_uuid=role_id
+        )
+        if role_row is None:
+            return [], 0, 0
+        query &= dal.community_members.community_role_id == role_row.id
+    if search:
+        # `community_members.user_id` is legacy VARCHAR, so match usernames in Python-side ids.
+        candidates = await async_dal.select_async(dal(query), dal.community_members.user_id)
+        ids = [int(c.user_id) for c in candidates if c.user_id and c.user_id.isdigit()]
+        matched = await async_dal.select_async(
+            dal(
+                dal.hub_users.id.belongs(ids)
+                & dal.hub_users.username.contains(search, case_sensitive=False)
+            ),
+            dal.hub_users.id,
+        )
+        query &= dal.community_members.user_id.belongs([str(u.id) for u in matched])
 
     total = await async_dal.count_async(query)
     reputation_svc._ensure_reputation_tables(dal)  # noqa: SLF001 - same-package binder
     scores = dal.bundle_reputation_scores
+    roles = dal.community_roles
     rows = await async_dal.select_async(
         dal(query),
         dal.community_members.ALL,
         scores.balance,
-        left=scores.on(
-            (scores.community_id == dal.community_members.community_id)
-            & (scores.user_uuid == dal.community_members.user_uuid)
-        ),
+        roles.name,
+        roles.public_id,
+        left=[
+            scores.on(
+                (scores.community_id == dal.community_members.community_id)
+                & (scores.user_uuid == dal.community_members.user_uuid)
+            ),
+            roles.on(dal.community_members.community_role_id == roles.id),
+        ],
         orderby=~scores.balance.coalesce(reputation_svc.DEFAULT_SCORE)
         | dal.community_members.joined_at,
         limitby=(offset, offset + limit),
@@ -265,18 +340,44 @@ async def get_members(
         member = joined.community_members
         balance = joined.bundle_reputation_scores.balance
         member.reputation = int(balance) if balance is not None else reputation_svc.DEFAULT_SCORE
+        role_row = joined.community_roles
+        has_role = role_row is not None and role_row.public_id is not None
+        member.role_name = role_row.name if has_role else None
+        member.role_public_id = str(role_row.public_id) if has_role else None
         user_rows = None
         if member.user_id and member.user_id.isdigit():
             user_rows = await async_dal.select_async(dal(dal.hub_users.id == int(member.user_id)))
-        user = user_rows.first() if user_rows else None
-        if search:
-            haystack = f"{getattr(user, 'username', '') or ''} {getattr(user, 'email', '') or ''}"
-            if search.lower() not in haystack.lower():
-                continue
-        members.append((member, user))
+        members.append((member, user_rows.first() if user_rows else None))
 
     total_pages = -(-total // limit) if limit else 0
     return members, total, total_pages
+
+
+async def get_roles(
+    async_dal: Any, dal: Any, *, community_id: int, ctx: TenantContext
+) -> list[tuple[dict[str, Any], int]]:
+    """Roles of this community (priority desc) with their active, non-banned member counts."""
+    _ensure_tables(dal)
+    await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
+    roles = community_interaction.get_community_roles(dal, community_id)
+    members = dal.community_members
+    count = members.id.count()
+    rows = await async_dal.select_async(
+        dal(
+            (members.community_id == community_id)
+            & (members.is_active == True)  # noqa: E712 - pydal Field comparison
+            & _not_banned(dal)
+        ),
+        members.community_role_id,
+        count,
+        groupby=members.community_role_id,
+    )
+    counts = {r.community_members.community_role_id: r[count] for r in rows}
+    by_id = {
+        str(r.public_id): r.id
+        for r in await async_dal.select_async(dal(dal.community_roles.community_id == community_id))
+    }
+    return [(role, int(counts.get(by_id.get(role["id"]), 0))) for role in roles]
 
 
 async def update_member_role(
@@ -286,15 +387,12 @@ async def update_member_role(
     community_id: int,
     user_id: int,
     ctx: TenantContext,
-    role: str,
+    role_id: str,
     caller_id: int | None,
 ) -> None:
-    """Update a member's role."""
+    """Assign the community role `role_id` (a `community_roles.public_id` UUID) to a member."""
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
-
-    if role not in VALID_MEMBER_ROLES:
-        raise bad_request("Invalid role")
 
     target_rows = await async_dal.select_async(
         dal(
@@ -306,16 +404,18 @@ async def update_member_role(
     target = target_rows.first()
     if target is None:
         raise not_found("Member not found")
-    if target.role == "community-owner":
-        raise forbidden("Cannot change owner role")
 
-    role_rows = await async_dal.select_async(
-        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
+    role_row = await _role_by_public_id(
+        async_dal, dal, community_id=community_id, role_uuid=role_id
     )
-    role_row = role_rows.first()
     if role_row is None:
         # Fail closed: an undefined role is never assigned, and the scope guard below never skipped.
         raise bad_request("Role is not defined for this community")
+    if getattr(role_row, "role_kind", None) != KIND_ADMIN:
+        await _guard_last_admin(
+            async_dal, dal, community_id=community_id, target=target, action="demote"
+        )
+    role = role_row.name
     community_role_id = role_row.id
     # Scope-based escalation guard (never a role-name check): the caller must hold every scope
     # of the role being assigned.
@@ -432,8 +532,9 @@ async def remove_member(
     target = rows.first()
     if target is None:
         raise not_found("Member not found")
-    if target.role == "community-owner":
-        raise forbidden("Cannot remove owner")
+    await _guard_last_admin(
+        async_dal, dal, community_id=community_id, target=target, action="remove"
+    )
 
     await async_dal.update_async(
         query,

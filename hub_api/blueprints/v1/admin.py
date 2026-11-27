@@ -198,12 +198,11 @@ class ReputationDTO:
 class MemberDTO:
     """Community member DTO."""
 
-    id: int
     userId: str | None
     username: str | None
-    email: str | None
     avatarUrl: str | None
-    role: str | None
+    roleId: str | None
+    roleName: str | None
     reputation: ReputationDTO
     joinedAt: str | None
 
@@ -231,7 +230,27 @@ class MembersResponse:
 class UpdateRoleRequest:
     """Request DTO for update-member-role."""
 
-    role: str
+    roleId: str
+
+
+@dataclass(slots=True, frozen=True)
+class RoleDTO:
+    """Community role summary DTO (`id` is the role's public UUID)."""
+
+    id: str
+    name: str
+    displayName: str | None
+    roleKind: int
+    priority: int
+    memberCount: int
+
+
+@dataclass(slots=True, frozen=True)
+class RolesResponse:
+    """Response DTO for list-roles."""
+
+    success: bool
+    roles: list[RoleDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -485,7 +504,7 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
     page = int(request.args.get("page", "1"))
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
-    role = request.args.get("role")
+    role_id = request.args.get("roleId")
     try:
         rows, total, total_pages = await svc.get_members(
             async_dal,
@@ -495,19 +514,19 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
             page=page,
             limit=limit,
             search=search,
-            role=role,
+            role_id=role_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     user_uuids = await lookup_user_public_ids((member.user_id for member, _ in rows))
     members = [
         MemberDTO(
-            id=member.id,
             userId=public_id_for(user_uuids, member.user_id),
             username=getattr(user, "username", None),
-            email=getattr(user, "email", None),
             avatarUrl=getattr(user, "avatar_url", None),
-            role=member.role,
+            roleId=member.role_public_id,
+            roleName=member.role_name,
             reputation=_reputation_dto(member.reputation),
             joinedAt=_iso(member.joined_at),
         )
@@ -519,6 +538,36 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
         pagination=PaginationDTO(
             page=max(1, page), limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
+    )
+
+
+@admin_bp.route("/<cuuid:community_id>/roles", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_member_scope(SCOPE_MEMBERS_VIEW)  # type: ignore[misc]
+@validate_response(RolesResponse)
+async def get_roles(community_id: int) -> RolesResponse | tuple[dict[str, object], int]:
+    """List the community's roles (priority desc) with member counts (read-only)."""
+    async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None
+    try:
+        roles = await svc.get_roles(async_dal, dal, community_id=community_id, ctx=ctx)
+    except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
+        return _err(exc)
+    return RolesResponse(
+        success=True,
+        roles=[
+            RoleDTO(
+                id=r["id"],
+                name=r["name"],
+                displayName=r["display_name"],
+                roleKind=int(r["role_kind"]),
+                priority=int(r["priority"] or 0),
+                memberCount=n,
+            )
+            for r, n in roles
+        ],
     )
 
 
@@ -545,7 +594,7 @@ async def update_member_role(
             community_id=community_id,
             user_id=user_id,
             ctx=ctx,
-            role=data.role,
+            role_id=data.roleId,
             caller_id=caller_id,
         )
     except ApiError as exc:
