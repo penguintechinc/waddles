@@ -10,6 +10,7 @@ Skipped (never failed) where the `docker` CLI is unavailable -- treat a SKIP as 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -89,11 +90,21 @@ class _World:
                 [self.tenant_id],
             )
         )
-        for name, prio in (("member", 0), ("vip", 5), ("moderator", 8), ("community-admin", 10)):
+        # Authority is the role row: only `community-owner` is admin-kind (protected); moderator and
+        # community-admin hold scopes; member/vip hold none (baseline).
+        for name, prio, kind, scopes in (
+            ("member", 0, 0, []),
+            ("vip", 5, 0, []),
+            ("moderator", 8, 0, ["community:moderate"]),
+            ("community-admin", 10, 0, ["community:moderate", "community:manage"]),
+            ("community-owner", 20, 1, []),
+        ):
             pg.q(
                 dal,
-                "INSERT INTO community_roles (community_id, name, priority) VALUES (%s, %s, %s)",
-                [self.cid, name, prio],
+                "INSERT INTO community_roles "
+                "(community_id, name, priority, role_kind, base_claims) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [self.cid, name, prio, kind, json.dumps({"scopes": scopes})],
             )
 
     def pairing(
@@ -140,9 +151,10 @@ class _World:
         )
         pg.q(
             self.dal,
-            "INSERT INTO community_members (community_id, user_id, role, is_active) "
-            "VALUES (%s, %s, %s, true)",
-            [self.cid, str(hub_id), role],
+            "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+            "is_active) VALUES (%s, %s, %s, (SELECT id FROM community_roles "
+            "WHERE community_id = %s AND name = %s), true)",
+            [self.cid, str(hub_id), role, self.cid, role],
         )
         return hub_id
 
@@ -349,7 +361,11 @@ async def test_revoke_skips_grant_an_admin_changed_since(
     uid = world.member("800010", "member")
     await _platform_pass(world, pairing, {"800010": {VIP_DISCORD_ROLE}, "800099": set()})
     pg.q(
-        world.dal, "UPDATE community_members SET role = 'moderator' WHERE user_id = %s", [str(uid)]
+        world.dal,
+        "UPDATE community_members SET role = 'moderator', community_role_id = "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'moderator') "
+        "WHERE user_id = %s",
+        [world.cid, str(uid)],
     )
     await _platform_pass(world, pairing, {"800010": set(), "800099": set()})
     assert world.role_of(uid) == "moderator"
@@ -703,9 +719,11 @@ def test_remediation_queues_by_default_and_demotes_with_apply(world: _World) -> 
     )
     pg.q(
         world.dal,
-        "INSERT INTO community_members (community_id, user_id, role, is_active) "
-        "VALUES (%s, %s, 'community-admin', true)",
-        [world.cid, str(unlinked)],
+        "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+        "is_active) VALUES (%s, %s, 'community-admin', "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'community-admin'), "
+        "true)",
+        [world.cid, str(unlinked), world.cid],
     )  # hand-made admin with no Discord link -> not attributable to sync
 
     review = remediate_purged_bindings(world.dal)

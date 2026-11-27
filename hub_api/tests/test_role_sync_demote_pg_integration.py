@@ -18,6 +18,7 @@ Skipped (never failed) where the `docker` CLI is unavailable, like every other P
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -131,11 +132,21 @@ class _World:
         )
 
     def roles(self, community_id: int | None = None, *names: str) -> None:
-        for name in names or (BASELINE, "member", "community-admin", "vip"):
+        for name in names or (BASELINE, "member", "community-admin", "vip", "community-owner"):
             pg.q(
                 self.dal,
-                "INSERT INTO community_roles (community_id, name, priority) VALUES (%s, %s, 0)",
-                [community_id or self.community_id, name],
+                "INSERT INTO community_roles "
+                "(community_id, name, priority, role_kind, base_claims) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [
+                    community_id or self.community_id,
+                    name,
+                    {"vip": 1, "community-admin": 3, "community-owner": 4}.get(name, 0),
+                    1 if name == "community-owner" else 0,  # only the owner is admin-kind
+                    json.dumps(
+                        {"scopes": ["community:manage"] if name == "community-admin" else []}
+                    ),
+                ],
             )
 
     def pairing(self, *, enable_demote: bool, mp: pytest.MonkeyPatch) -> Any:
@@ -198,9 +209,17 @@ class _World:
             )
         pg.q(
             self.dal,
-            "INSERT INTO community_members (community_id, user_id, role, is_active) "
-            "VALUES (%s, %s, %s, %s)",
-            [community_id or self.community_id, str(hub_id), role, active],
+            "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+            "is_active) VALUES (%s, %s, %s, (SELECT id FROM community_roles "
+            "WHERE community_id = %s AND name = %s), %s)",
+            [
+                community_id or self.community_id,
+                str(hub_id),
+                role,
+                community_id or self.community_id,
+                role,
+                active,
+            ],
         )
         if granted and self.pairing_id and role in ("member", "vip"):
             pg.q(
@@ -488,9 +507,10 @@ async def test_discord_to_hub_user_to_member_resolution_guards(
     elsewhere = world.member("800005", "member")
     pg.q(
         world.dal,
-        "INSERT INTO community_members (community_id, user_id, role, is_active) "
-        "VALUES (%s, %s, 'member', true)",
-        [other, str(elsewhere)],
+        "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+        "is_active) VALUES (%s, %s, 'member', "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'member'), true)",
+        [other, str(elsewhere), other],
     )
     world.member("800006", "member", community_id=other)  # linked, but only in c2
     discord = _Discord([(f"80000{i}", []) for i in range(1, 7)])

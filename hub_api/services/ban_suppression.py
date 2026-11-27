@@ -23,7 +23,7 @@ data subject keeps the right to object / human review. Counsel to verify; see
 `docs/compliance/suppression-LIA.md`.
 
 **What counts as an active restriction.** Waddles persists exactly one such state: a
-`community_members` row whose `role` is `banned` (written by the reputation policy
+`community_members` row whose `membership_state` is BANNED (written by the reputation policy
 enforcer's auto-ban). Platform-side timeouts / mutes (`moderation_enforce_action`) are
 enforced on the platform and never stored here, so there is nothing to carry. A ban of
 a hub-linked member suppresses every identity linked to that hub user; a ban of a
@@ -55,6 +55,7 @@ from typing import Any, Final, TypeVar
 from opentelemetry import trace
 
 from services.bundle_telemetry import get_meter, get_tracer
+from services.membership_state import MembershipState, is_banned
 from services.schema import bind_erasure_reputation_tables, bind_suppression_tables
 from services.suppression_keys import (
     PlatformKekKeySource,
@@ -70,8 +71,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-#: `community_members.role` value the reputation policy enforcer writes on an auto-ban.
-BANNED_ROLE: Final = "banned"
 
 #: Optional ceiling (days) on how long ANY suppression row lives, applied when a row is written.
 #: Unset = a ban with no expiry is kept until lifted (the design default); set it to bound
@@ -206,11 +205,6 @@ def _stronger(a: RestrictionReason, b: RestrictionReason) -> RestrictionReason:
     return RestrictionReason.BAN if RestrictionReason.BAN in (a, b) else a
 
 
-def _is_banned_role(role: Any) -> bool:
-    """True for the persisted ban state (`community_members.role == 'banned'`)."""
-    return isinstance(role, str) and role.strip().lower() == BANNED_ROLE
-
-
 def _bind(dal: Any) -> None:
     """Idempotently bind every table this module touches (no-op when already bound)."""
     bind_suppression_tables(dal)
@@ -255,6 +249,7 @@ def subject_member_rows(
         members.platform,
         members.platform_user_id,
         members.role,
+        members.membership_state,
         members.is_active,
         members.user_uuid,
     )
@@ -432,7 +427,7 @@ def collect_active_restrictions(
     suppression code instead of silently cancelling the ban.
     """
     _bind(dal)
-    banned = [m for m in members if _is_banned_role(m.role)]
+    banned = [m for m in members if is_banned(m)]
     tenant_by_community = tenants_of(dal, (m.community_id for m in banned)) if banned else {}
     merged: dict[tuple[int, str, str], ActiveRestriction] = {}
     for member in banned:
@@ -683,11 +678,11 @@ def purge_expired(dal: Any, *, now: datetime) -> int:
 
 
 def ban_membership(dal: Any, *, community_id: int, hub_user_id: int, now: datetime) -> None:
-    """Upsert the hub user's membership in `community_id` as banned + inactive.
+    """Upsert the hub user's membership in `community_id` as BANNED (state) + inactive.
 
-    This re-applies the restriction in the same form the reputation policy enforcer writes
-    an auto-ban, so every existing reader (member lists, authz) treats it as one. Runs
-    inside the caller's transaction.
+    The ban is the `membership_state` column, never a role value: an existing row keeps its
+    `community_role_id` link so a later lift restores access untouched. Runs inside the
+    caller's transaction.
     """
     members = dal.community_members
     existing = dal(
@@ -695,17 +690,35 @@ def ban_membership(dal: Any, *, community_id: int, hub_user_id: int, now: dateti
     ).select(members.id)
     if existing:
         dal(members.id == existing.first().id).update(
-            role=BANNED_ROLE, is_active=False, updated_at=now
+            membership_state=MembershipState.BANNED, is_active=False, updated_at=now
         )
     else:
         members.insert(
             community_id=community_id,
             user_id=str(hub_user_id),
-            role=BANNED_ROLE,
+            membership_state=MembershipState.BANNED,
             is_active=False,
             joined_at=now,
             updated_at=now,
         )
+
+
+def lift_membership_ban(dal: Any, *, community_id: int, hub_user_id: int, now: datetime) -> int:
+    """Restore a BANNED membership to ACTIVE + `is_active=True`; returns rows restored.
+
+    Only the state/active flag change: the `community_role_id` link was never touched by the
+    ban, so the member regains exactly the access their role grants. Runs in the caller's
+    transaction; ACTIVE rows are left alone.
+    """
+    members = dal.community_members
+    return int(
+        dal(
+            (members.community_id == community_id)
+            & (members.user_id == str(hub_user_id))
+            & (members.membership_state == MembershipState.BANNED)
+        ).update(membership_state=MembershipState.ACTIVE, is_active=True, updated_at=now)
+        or 0
+    )
 
 
 def reapply_for_hub_user(
@@ -725,7 +738,10 @@ def reapply_for_hub_user(
     members = dal.community_members
     rows = dal(
         (members.user_id == str(hub_user_id))
-        & ((members.role == None) | (members.role != BANNED_ROLE))  # noqa: E711
+        & (
+            (members.membership_state == None)  # noqa: E711 - pydal query operator
+            | (members.membership_state != MembershipState.BANNED)
+        )
     ).select(members.id, members.community_id)
     if not rows:
         return 0
@@ -739,7 +755,9 @@ def reapply_for_hub_user(
             continue
         ids = [int(r.id) for r in rows if tenant_by_community.get(int(r.community_id)) == tenant_id]
         banned += (
-            dal(members.id.belongs(ids)).update(role=BANNED_ROLE, is_active=False, updated_at=now)
+            dal(members.id.belongs(ids)).update(
+                membership_state=MembershipState.BANNED, is_active=False, updated_at=now
+            )
             or 0
         )
         logger.info(

@@ -53,17 +53,19 @@ def community_db(tenant_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         role_kind=1,
         base_claims={"scopes": []},
     )
-    for uid, role, active, uuid_, role_id in [
-        (MEMBER, "member", True, "uuid-member", None),
-        (ADMIN, "community-owner", True, "uuid-admin", owner_role),
-        (BANNED, "banned", False, "uuid-banned", None),
-        (SOFT_BANNED, "member", True, "uuid-soft", None),
+    # The banned member stays is_active=True so ONLY the BANNED membership_state can deny them.
+    for uid, role, state, uuid_, role_id in [
+        (MEMBER, "member", 1, "uuid-member", None),
+        (ADMIN, "community-owner", 1, "uuid-admin", owner_role),
+        (BANNED, "member", 2, "uuid-banned", None),
+        (SOFT_BANNED, "member", 1, "uuid-soft", None),
     ]:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(uid),
             role=role,
-            is_active=active,
+            is_active=True,
+            membership_state=state,
             user_uuid=uuid_,
             community_role_id=role_id,
         )
@@ -821,6 +823,25 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         dal, cid = community_db
         resp = await _call(client, method, _url(dal, cid, suffix), _hdr(auth_headers, who), body)
         assert resp.status_code == 403
+
+    async def test_lifted_ban_restores_member_access(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Banned (state) is denied; `lift_membership_ban` writes ACTIVE back and access returns."""
+        from datetime import UTC, datetime
+
+        from services.ban_suppression import lift_membership_ban
+
+        dal, cid = community_db
+        denied = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, BANNED))
+        assert denied.status_code == 403
+        assert (
+            lift_membership_ban(dal, community_id=cid, hub_user_id=BANNED, now=datetime.now(UTC))
+            == 1
+        )
+        dal.commit()
+        allowed = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, BANNED))
+        assert allowed.status_code == 200
 
     async def test_expired_soft_ban_no_longer_blocks(
         self, client: Any, auth_headers: Any, community_db: Any

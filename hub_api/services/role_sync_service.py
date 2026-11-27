@@ -56,14 +56,15 @@ protection category.
 
 **Privilege hardening (migration 0104).** Inbound bindings may only target `vip`/`member`
 (service 422 + DB CHECK) so a Discord Manage-Roles holder cannot self-promote. Grants only ever
-RAISE a member (`_ROLE_RANK`) and never overwrite a role an admin set; every grant is recorded in
+RAISE a member (`community_roles.priority`) and never overwrite a role an admin set; every grant
+is recorded in
 `role_sync_community_grants` and the opt-in demote pass revokes only those (restoring
 `prior_role`). The Twitch -> Discord pass ledgers its Discord role adds in
 `role_sync_discord_grants` and removes only those. Twitch moderators propagate only when the
 pairing sets `propagate_moderators` (default off). The `waddles.role_sync` flag remains the
 kill switch for every path.
 
-**`community-owner` is sacrosanct.** Never assignable via a
+**admin-kind roles (`community-owner`) are sacrosanct.** Never assignable via a
 `community_role` binding (`services/guild_pairing.py`'s own
 `VALID_COMMUNITY_ROLES` excludes it) and never overwritten by this
 worker even if somehow already set -- mirrors `admin_service.
@@ -132,6 +133,7 @@ import httpx
 from pydal import Field
 
 from services.bundle_telemetry import bundle_span, get_meter
+from services.community_authz import _parse_claims_scopes
 from services.credential_resolver import (
     CredentialResolver,
     DefaultCredentialResolver,
@@ -139,6 +141,7 @@ from services.credential_resolver import (
 )
 from services.guild_pairing import INBOUND_COMMUNITY_ROLES, list_bindings
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
+from services.scope_registry import KIND_ADMIN
 from services.sync_worker_dal import open_worker_dal
 
 try:
@@ -170,7 +173,6 @@ _DEFAULT_DEMOTE_BASELINE_ROLE = "community-member"
 #: <= `_DEMOTE_MAX_FRACTION` of the linked holders of sync-managed roles.
 _DEMOTE_ABS_FLOOR = 3
 _DEMOTE_MAX_FRACTION = 0.5
-_OWNER_ROLE = "community-owner"
 
 
 def _demote_enabled_for(pairing_id: int) -> bool:
@@ -738,18 +740,46 @@ def _community_role_priorities(dal: Any, community_id: int) -> dict[str, int]:
     return {row.name: int(row.priority or 0) for row in rows}
 
 
-#: Grant-only ordering. A sync grant may only RAISE a member along this ladder; it never lowers
-#: or sideways-overwrites. Baseline roles (rank 0) are the only roles sync may replace without
-#: having granted them itself.
-_ROLE_RANK: dict[str, int] = {
-    "member": 0,
-    "community-member": 0,
-    "vip": 1,
-    "moderator": 2,
-    "community-admin": 3,
-    _OWNER_ROLE: 4,
-}
-_BASELINE_ROLES = frozenset({"member", "community-member"})
+def _role_row_by_name(dal: Any, community_id: int, name: str) -> Any | None:
+    """Resolve a binding/ledger role NAME (a config identifier) to its `community_roles` row."""
+    bind_auth_tables(dal)
+    return (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+
+
+def _member_role_row(dal: Any, member: Any) -> Any | None:
+    """The `community_roles` row a member is linked to via `community_role_id`, or None."""
+    role_id = getattr(member, "community_role_id", None)
+    if not role_id:
+        return None
+    bind_auth_tables(dal)
+    return dal(dal.community_roles.id == int(role_id)).select().first()
+
+
+def _is_owner_row(role_row: Any) -> bool:
+    """Owner/protected = an admin-kind role (`role_kind`), never a name match; never touched."""
+    return role_row is not None and getattr(role_row, "role_kind", None) == KIND_ADMIN
+
+
+def _is_baseline_row(role_row: Any) -> bool:
+    """Baseline = no role link, or a non-admin role whose stored scopes are empty.
+
+    The only roles sync may replace without having granted them itself. Decided from the role's
+    kind and scopes, never its name.
+    """
+    if role_row is None:
+        return True
+    if _is_owner_row(role_row):
+        return False
+    return not _parse_claims_scopes(getattr(role_row, "base_claims", None))
+
+
+def _role_rank(role_row: Any) -> int:
+    """Grant-only ordering key: `community_roles.priority`; a missing role row ranks below all."""
+    return -1 if role_row is None else int(getattr(role_row, "priority", None) or 0)
 
 
 def _active_member(dal: Any, community_id: int, hub_user_id: int) -> Any | None:
@@ -802,13 +832,13 @@ def _apply_community_role(
     above baseline is only touched when the ledger shows role-sync itself granted that role.
     Privileged targets are refused even if a binding somehow names one (DB CHECK is the other
     guard). Returns `"applied"` / `"unchanged"` / `"not_a_member"` / `"owner_protected"` /
-    `"privileged_refused"` / `"admin_set_untouched"` / `"no_downgrade"`.
+    `"privileged_refused"` / `"admin_set_untouched"` / `"no_downgrade"` / `"role_missing"`.
     """
     member = _active_member(dal, community_id, hub_user_id)
     if member is None:
         return "not_a_member"
-    current = str(member.role)
-    if current == _OWNER_ROLE:
+    current_row = _member_role_row(dal, member)
+    if _is_owner_row(current_row):
         return "owner_protected"
     if desired_role not in INBOUND_COMMUNITY_ROLES:
         logger.error(
@@ -817,15 +847,31 @@ def _apply_community_role(
             pairing_id,
         )
         return "privileged_refused"
-    if current == desired_role:
+    desired_row = _role_row_by_name(dal, community_id, desired_role)
+    if desired_row is None:
+        logger.error(
+            "role_sync.desired_role_missing community_id=%s pairing_id=%s",
+            community_id,
+            pairing_id,
+        )
+        return "role_missing"
+    if current_row is not None and int(current_row.id) == int(desired_row.id):
         return "unchanged"
     grant = _community_grant(dal, community_id, hub_user_id)
-    sync_owned = grant is not None and grant.granted_role == current
-    if current not in _BASELINE_ROLES and not sync_owned:
+    granted_row = (
+        _role_row_by_name(dal, community_id, grant.granted_role) if grant is not None else None
+    )
+    sync_owned = (
+        current_row is not None
+        and granted_row is not None
+        and int(current_row.id) == int(granted_row.id)
+    )
+    if not _is_baseline_row(current_row) and not sync_owned:
         return "admin_set_untouched"
-    if _ROLE_RANK.get(desired_role, 0) <= _ROLE_RANK.get(current, 0):
+    if _role_rank(desired_row) <= _role_rank(current_row):
         return "no_downgrade"
 
+    current = str(current_row.name) if current_row is not None else _demote_baseline_role()
     prior = grant.prior_role if sync_owned and grant is not None else current
     g = dal.role_sync_community_grants
     try:
@@ -868,20 +914,21 @@ def _revoke_community_grant(
     g = dal.role_sync_community_grants
     member = _active_member(dal, community_id, hub_user_id)
     try:
-        if member is None or str(member.role) != grant.granted_role:
+        granted_row = _role_row_by_name(dal, community_id, grant.granted_role)
+        if (
+            member is None
+            or granted_row is None
+            or int(member.community_role_id or 0) != int(granted_row.id)
+        ):
             dal(g.id == grant.id).delete()
             dal.commit()
             return "not_a_member" if member is None else "not_owned"
         restore = grant.prior_role or baseline_role
-        if restore != baseline_role and (
-            dal(
-                (dal.community_roles.community_id == community_id)
-                & (dal.community_roles.name == restore)
-            ).count()
-            == 0
-        ):
+        restore_row = _role_row_by_name(dal, community_id, restore)
+        if restore != baseline_role and restore_row is None:
             restore = baseline_role  # prior role no longer exists in this community
-        if _ROLE_RANK.get(restore, 0) > _ROLE_RANK.get(grant.granted_role, 0):
+            restore_row = _role_row_by_name(dal, community_id, restore)
+        if _role_rank(restore_row) > _role_rank(granted_row):
             restore = baseline_role  # defensive: a revoke never raises anyone
         _set_member_role(dal, member, community_id, restore)
         dal(g.id == grant.id).delete()
@@ -943,7 +990,7 @@ def _run_demote_pass(
             grant is not None
             and int(grant.pairing_id) == pairing_id
             and grant.granted_role in managed_roles
-            and _current_role(dal, community_id, uid) == grant.granted_role
+            and _holds_role_named(dal, community_id, uid, grant.granted_role)
         ):
             would_demote.append(uid)
     population = len(would_demote) + linked_managed_holders
@@ -980,19 +1027,18 @@ def _run_demote_pass(
     return demoted
 
 
-def _current_role(dal: Any, community_id: int, hub_user_id: int) -> str | None:
-    """Active member's current `community_members.role`, or None."""
-    bind_auth_tables(dal)
-    row = (
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(hub_user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712 - pydal idiom
-        )
-        .select()
-        .first()
+def _holds_role_named(dal: Any, community_id: int, hub_user_id: int, role_name: str) -> bool:
+    """True iff the active member's `community_role_id` is the role row named `role_name`.
+
+    The name is only a config/ledger identifier resolved to a row; the match is by role id.
+    """
+    member = _active_member(dal, community_id, hub_user_id)
+    role_row = _role_row_by_name(dal, community_id, role_name)
+    return (
+        member is not None
+        and role_row is not None
+        and int(member.community_role_id or 0) == int(role_row.id)
     )
-    return None if row is None else str(row.role)
 
 
 #: Opt-out kill switch (critical-rules.md core-mechanism pattern). Unseen/OFF = pre-0104
@@ -1340,7 +1386,7 @@ async def reconcile_pairing_discord_to_platform(
     `twitch_to_discord`-only pairings are a no-op here (handled instead by
     `reconcile_pairing()`). Discord guild role membership is authoritative;
     this never calls Discord's add/remove-role API (see module docstring's
-    structural loop-prevention argument) -- only `community_members.role`
+    structural loop-prevention argument) -- only `community_members.community_role_id`
     is ever written.
 
     Needs no Twitch credentials/broadcaster token at all (unlike

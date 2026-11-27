@@ -531,3 +531,150 @@ class TestCommunityBelongsToTenant:
             )
             is False
         )
+
+
+class TestAuthorityIsRoleRowNeverRoleName:
+    """Effective scopes come from the member's `community_roles` row + membership_state only.
+
+    `community_members.role` is a display string: a role NAME (even `community-owner`) never
+    grants authority, and a BANNED membership_state strips every scope (role link untouched).
+    """
+
+    @staticmethod
+    def _seed(
+        dal: Any,
+        *,
+        username: str,
+        role_name: str | None,
+        kind: int = 0,
+        scopes: list[str] | None = None,
+        state: int = 1,
+        member_role_string: str = "member",
+    ) -> int:
+        """Insert one hub user + (optional) role row + active member row; returns the user id."""
+        user_id = dal.hub_users.insert(username=username)
+        role_id = (
+            dal.community_roles.insert(
+                community_id=COMMUNITY_ID,
+                name=role_name,
+                role_kind=kind,
+                base_claims={"scopes": scopes or []},
+            )
+            if role_name
+            else None
+        )
+        dal.community_members.insert(
+            community_id=COMMUNITY_ID,
+            user_id=str(user_id),
+            role=member_role_string,
+            is_active=True,
+            membership_state=state,
+            community_role_id=role_id,
+        )
+        dal.commit()
+        return int(user_id)
+
+    async def _role(self, automation_db: Any, user_id: int) -> Any:
+        """The caller's resolved `CommunityRole` in the test community."""
+        from services.community_authz import get_caller_community_role
+
+        return await get_caller_community_role(
+            automation_db, automation_db.dal, community_id=COMMUNITY_ID, user_id=user_id
+        )
+
+    async def test_admin_kind_role_holds_admin_scope_whatever_its_name(
+        self, automation_db: Any
+    ) -> None:
+        from services.scope_registry import SCOPE_COMMUNITY_ADMIN
+
+        uid = self._seed(automation_db.dal, username="boss", role_name="boss", kind=1)
+        role = await self._role(automation_db, uid)
+        assert role.name == "boss"
+        assert SCOPE_COMMUNITY_ADMIN in role.scopes
+
+    async def test_custom_role_with_scope_is_allowed_exactly_that_scope(
+        self, automation_db: Any
+    ) -> None:
+        uid = self._seed(
+            automation_db.dal, username="mod", role_name="helper", scopes=["community:moderate"]
+        )
+        role = await self._role(automation_db, uid)
+        assert "community:moderate" in role.scopes
+        assert "community:admin" not in role.scopes
+
+    async def test_role_named_community_owner_without_admin_kind_holds_nothing(
+        self, automation_db: Any
+    ) -> None:
+        """NAME spoof: a custom, scope-less role called community-owner is not an owner."""
+        uid = self._seed(
+            automation_db.dal,
+            username="spoof",
+            role_name="community-owner",
+            kind=0,
+            member_role_string="community-owner",
+        )
+        role = await self._role(automation_db, uid)
+        assert role.name == "community-owner"
+        assert role.scopes == frozenset()
+
+    async def test_member_role_string_without_a_role_row_holds_nothing(
+        self, automation_db: Any
+    ) -> None:
+        uid = self._seed(
+            automation_db.dal,
+            username="legacy-owner",
+            role_name=None,
+            member_role_string="community-owner",
+        )
+        role = await self._role(automation_db, uid)
+        assert role.name == "member"  # the display string is never consulted
+        assert role.scopes == frozenset()
+
+    async def test_banned_state_strips_scopes_even_for_an_admin_kind_role(
+        self, automation_db: Any
+    ) -> None:
+        from services.community_authz import member_scopes_sync
+
+        dal = automation_db.dal
+        uid = self._seed(dal, username="banned-admin", role_name="boss", kind=1, state=2)
+        assert (await self._role(automation_db, uid)).scopes == frozenset()
+        assert member_scopes_sync(dal, COMMUNITY_ID, uid) == frozenset()
+
+    async def test_lift_restores_the_role_scopes(self, automation_db: Any) -> None:
+        from services.ban_suppression import lift_membership_ban
+        from services.scope_registry import SCOPE_COMMUNITY_ADMIN
+
+        dal = automation_db.dal
+        uid = self._seed(dal, username="lifted-admin", role_name="boss", kind=1, state=2)
+        lift_membership_ban(dal, community_id=COMMUNITY_ID, hub_user_id=uid, now=datetime.now(UTC))
+        dal.commit()
+        assert SCOPE_COMMUNITY_ADMIN in (await self._role(automation_db, uid)).scopes
+
+    async def test_membership_scoped_role_comes_from_the_role_row_not_the_string(
+        self, automation_db: Any
+    ) -> None:
+        dal = automation_db.dal
+        tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+        community_id = dal.communities.insert(name="scoped-c", tenant_id=tenant_row.id)
+        user_id = dal.hub_users.insert(username="scoped-spoof")
+        role_id = dal.community_roles.insert(
+            community_id=community_id, name="viewer", role_kind=0, base_claims={"scopes": []}
+        )
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id=str(user_id),
+            role="community-owner",  # display string only
+            is_active=True,
+            community_role_id=role_id,
+        )
+        dal.commit()
+        membership = await resolve_community_membership_scoped(
+            automation_db,
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            tenant_id=tenant_row.id,
+            scopes_claim=frozenset(),
+        )
+        assert membership is not None
+        assert (membership.role, membership.is_admin) == ("viewer", False)

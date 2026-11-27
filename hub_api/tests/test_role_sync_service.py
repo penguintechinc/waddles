@@ -620,11 +620,49 @@ _DISCORD_PLATFORM_USER = "800010"
 _DISCORD_UNLINKED_USER = "800099"
 
 
+#: name -> (priority, role_kind, scopes) used to seed a `community_roles` row on first use. Only
+#: the owner is admin-kind (protected); baseline/vip hold no scopes; moderator/admin hold some.
+_SEED_ROLES: dict[str, tuple[int, int, list[str]]] = {
+    "member": (0, 0, []),
+    "community-member": (0, 0, []),
+    "vip": (1, 0, []),
+    "moderator": (2, 0, ["community:moderate"]),
+    "community-admin": (3, 0, ["community:moderate", "community:manage"]),
+    "community-owner": (4, 1, []),
+}
+
+
+def _ensure_role(dal: Any, community_id: int, name: str, priority: int | None = None) -> int:
+    """Id of `name`'s `community_roles` row in the community, seeding/updating it as needed."""
+    seed_priority, kind, scopes = _SEED_ROLES.get(name, (0, 0, []))
+    prio = seed_priority if priority is None else priority
+    row = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    if row is not None:
+        if priority is not None:
+            dal(dal.community_roles.id == row.id).update(priority=prio)
+        return int(row.id)
+    return int(
+        dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            priority=prio,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+    )
+
+
 def _add_community_member(dal: Any, *, community_id: int, hub_user_id: int, role: str) -> None:
+    role_id = _ensure_role(dal, community_id, role)
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(hub_user_id),
         role=role,
+        community_role_id=role_id,
         is_active=True,
         joined_at=datetime.now(UTC),
         created_at=datetime.now(UTC),
@@ -646,7 +684,7 @@ def _get_member_role(dal: Any, *, community_id: int, hub_user_id: int) -> str:
 
 
 def _add_community_role(dal: Any, *, community_id: int, name: str, priority: int = 0) -> None:
-    dal.community_roles.insert(community_id=community_id, name=name, priority=priority)
+    _ensure_role(dal, community_id, name, priority)
     dal.commit()
 
 
@@ -668,6 +706,8 @@ def _make_platform_pairing(
         ownership_verified=True,
     )
     update_pairing(dal, community_id, created.id, sync_enabled=True)
+    _ensure_role(dal, community_id, target)  # the binding's target must resolve to a role row
+    dal.commit()
     create_binding(
         dal,
         community_id,
@@ -836,6 +876,80 @@ class TestDiscordToPlatformDirection:
         assert result.users_skipped_owner_protected == 1
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "community-owner"
 
+    async def _reconcile_member_with_role_row(
+        self, guild_pairing_db: Any, *, name: str, kind: int, scopes: list[str]
+    ) -> tuple[Any, int, Any]:
+        """Seed a vip target + one member linked to a custom role row; run one reconcile."""
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
+        pairing = _make_platform_pairing(dal, community_id, target="vip")
+        _link_identity(
+            dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
+        )
+        _ensure_role(dal, community_id, "vip")
+        role_id = dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            priority=0,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id="1",
+            role=name,
+            community_role_id=role_id,
+            is_active=True,
+            joined_at=datetime.now(UTC),
+            created_at=datetime.now(UTC),
+        )
+        dal.commit()
+        discord_client = _FakeDiscordClient(
+            {},
+            guild_members=[
+                svc.DiscordGuildMember(
+                    user_id=_DISCORD_PLATFORM_USER, role_ids=frozenset({_MEMBER_ROLE_DISCORD})
+                )
+            ],
+        )
+        result = await svc.reconcile_pairing_discord_to_platform(
+            dal,
+            pairing,
+            credential_resolver=_FakeCredentialResolver(),
+            make_discord_client=lambda token: discord_client,
+        )
+        return result, community_id, dal
+
+    async def test_admin_kind_role_is_protected_whatever_its_name(
+        self, guild_pairing_db: Any
+    ) -> None:
+        result, community_id, dal = await self._reconcile_member_with_role_row(
+            guild_pairing_db, name="boss", kind=1, scopes=[]
+        )
+        assert result.users_skipped_owner_protected == 1
+        assert result.community_roles_applied == 0
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "boss"
+
+    async def test_role_named_community_owner_without_admin_kind_is_not_protected(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """NAME spoof: a custom, scope-less role called community-owner is just a baseline role."""
+        result, community_id, dal = await self._reconcile_member_with_role_row(
+            guild_pairing_db, name="community-owner", kind=0, scopes=[]
+        )
+        assert result.users_skipped_owner_protected == 0
+        assert result.community_roles_applied == 1
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+
+    async def test_scoped_custom_role_named_member_is_not_baseline(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """NAME spoof: holding scopes makes a role non-baseline even when it is called `member`."""
+        result, community_id, dal = await self._reconcile_member_with_role_row(
+            guild_pairing_db, name="member", kind=0, scopes=["community:moderate"]
+        )
+        assert result.community_roles_applied == 0
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
+
     async def test_unlinked_discord_member_is_skipped_not_errored(
         self, guild_pairing_db: Any
     ) -> None:
@@ -988,6 +1102,8 @@ class TestBidirectionalBatch:
         _link_identity(
             dal, hub_user_id=2, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
         )
+        _ensure_role(dal, community_id, "vip")
+        dal.commit()
         _add_community_member(dal, community_id=community_id, hub_user_id=2, role="member")
 
         twitch = _FakeTwitchClient(tiers={_TWITCH_SUB_USER: 1})

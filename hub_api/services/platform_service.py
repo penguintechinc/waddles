@@ -28,6 +28,7 @@ from services import session_service
 from services.audit_events import AuditAction, AuditCategory
 from services.errors import bad_request, not_found
 from services.platform_account import guard_platform_account
+from services.scope_registry import KIND_ADMIN
 
 #: Roles assignable through `PUT /platform/users/{id}/role`. Clearing a role is NOT a role value:
 #: removal is `DELETE /platform/users/{id}` (deactivate), so a null/empty role is never valid.
@@ -97,7 +98,13 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
         ),
         dal.community_members.ALL,
         dal.communities.ALL,
-        left=dal.communities.on(dal.community_members.community_id == dal.communities.id),
+        dal.community_roles.name,
+        left=[
+            dal.communities.on(dal.community_members.community_id == dal.communities.id),
+            dal.community_roles.on(
+                dal.community_members.community_role_id == dal.community_roles.id
+            ),
+        ],
     )
     if not memberships:
         raise not_found("User not found")
@@ -133,7 +140,7 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
             {
                 "community_id": row.community_members.community_id,
                 "community_name": row.communities.name if row.communities else None,
-                "role": row.community_members.role,
+                "role": row.community_roles.name,
                 "reputation_score": score_by_member.get(
                     (row.community_members.community_id, row.community_members.user_uuid),
                     reputation_svc.DEFAULT_SCORE,
@@ -250,15 +257,21 @@ async def get_community(async_dal: Any, dal: Any, *, community_id: int) -> dict[
         raise not_found("Community not found")
     community = rows.first()
 
+    # "Owner" = the first active member holding an admin-kind role (role_kind, never a role name).
     owner_rows = await async_dal.select_async(
         dal(
             (dal.community_members.community_id == community_id)
-            & (dal.community_members.role == "community-owner")
             & (dal.community_members.is_active == True)  # noqa: E712
+            & (dal.community_roles.role_kind == KIND_ADMIN)
         ),
+        dal.community_members.ALL,
+        left=dal.community_roles.on(
+            dal.community_members.community_role_id == dal.community_roles.id
+        ),
+        orderby=dal.community_members.id,
         limitby=(0, 1),
     )
-    owner = owner_rows.first() if owner_rows else None
+    owner = owner_rows.first().community_members if owner_rows else None
 
     module_count = await async_dal.count_async(
         dal.hub_module_installations.community_id == community_id

@@ -155,10 +155,8 @@ async def get_caller_community_role(
     if not rows:
         return None
     cm, cr = rows[0].community_members, rows[0].community_roles
-    base_claims = cr.base_claims if cr is not None else None
-    stored = base_claims.get("scopes", []) if isinstance(base_claims, dict) else []
-    scopes = effective_scopes(_row_kind(cr), stored)
-    role_name = (cr.name if cr is not None and cr.name else None) or cm.role or "member"
+    scopes = member_role_scopes(cm, cr)
+    role_name = (cr.name if cr is not None and cr.name else None) or "member"
     priority = (cr.priority if cr is not None and cr.priority is not None else 0) or 0
     return CommunityRole(name=role_name, priority=priority, scopes=frozenset(scopes))
 
@@ -407,15 +405,8 @@ async def resolve_community_membership_scoped(
 
     row = rows[0]
     member, role_row = row.community_members, row.community_roles
-    kind = _row_kind(role_row)
-    if kind == KIND_ADMIN:
-        # Admin-kind scopes are computed from the registry, never from a stored/cached list.
-        scopes = effective_scopes(kind, None)
-    else:
-        scopes = _parse_claims_scopes(member.claims_cache)
-        if not scopes and role_row is not None:
-            scopes = _parse_claims_scopes(role_row.base_claims)
-    role_name = (role_row.name if role_row is not None else None) or member.role
+    scopes = member_role_scopes(member, role_row)
+    role_name = (role_row.name if role_row is not None else None) or "member"
     return CommunityMembership(
         role=role_name, scopes=scopes, is_admin=bool(scopes & ADMIN_SCOPES), bypass=False
     )
@@ -685,7 +676,7 @@ def resolve_caller_standing_sync(request: Any, dal: Any, *, community_id: int) -
 
     Backs the read-route guards in `services.route_guards`. Global admins (`users:admin` on the
     token) and tenant admins of the community's tenant are admin-equivalent. Everyone else is a
-    member only with an ACTIVE `community_members` row whose role is not `banned`; they are
+    member only with an ACTIVE `community_members` row that is not in the BANNED state; they are
     admin only when that role carries an admin scope (admin kind computed from the registry).
     The token's own `scope` claim never counts -- viewer's universal `*:read` is exactly what
     the guarded routes must not trust. The caller must have already proven the community
@@ -719,8 +710,7 @@ def resolve_caller_standing_sync(request: Any, dal: Any, *, community_id: int) -
     )
     if member is None:
         return CallerStanding(is_member=False, is_admin=False, bypass=False)
-    role = member.role if "role" in dal.community_members.fields else None
-    if isinstance(role, str) and role.strip().lower() == "banned":
+    if is_banned(member):
         return CallerStanding(is_member=False, is_admin=False, bypass=False)
     if _soft_banned(dal, community_id, getattr(member, "user_uuid", None)):
         return CallerStanding(is_member=False, is_admin=False, bypass=False)

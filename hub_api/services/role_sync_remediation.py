@@ -10,7 +10,7 @@ ledger, so this is the closest available evidence) -- and:
 - default (review): enqueues each into `role_sync_remediation_queue` (status 0 = pending) for an
   admin to review; nothing about the member changes.
 - `apply=True`: demotes each still-matching member to the baseline role and marks the queue
-  row resolved (status 1). `community-owner` is never touched.
+  row resolved (status 1). admin-kind (owner) roles are never touched.
 
 Idempotent (unique `(purged_binding_id, hub_user_id)`); logs carry ids and counts only.
 """
@@ -24,13 +24,13 @@ from typing import Any
 
 from services.role_sync_service import _set_member_role
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
+from services.scope_registry import KIND_ADMIN
 
 logger = logging.getLogger(__name__)
 
 STATUS_PENDING = 0
 STATUS_DEMOTED = 1
 STATUS_DISMISSED = 2
-_OWNER_ROLE = "community-owner"
 
 
 @dataclass(slots=True)
@@ -46,10 +46,20 @@ class RemediationReport:
 def _candidates(dal: Any, purged: Any) -> list[Any]:
     """Active members of the purged binding's community holding its role, with a Discord link."""
     bind_auth_tables(dal)
+    role_row = (
+        dal(
+            (dal.community_roles.community_id == purged.community_id)
+            & (dal.community_roles.name == purged.community_role)
+        )
+        .select()
+        .first()
+    )
+    if role_row is None or role_row.role_kind == KIND_ADMIN:
+        return []  # role gone, or an admin-kind (owner) role: never remediated
     m = dal.community_members
     rows = dal(
         (m.community_id == purged.community_id)
-        & (m.role == purged.community_role)
+        & (m.community_role_id == role_row.id)
         & (m.is_active == True)  # noqa: E712 - pydal idiom
     ).select()
     ident = dal.hub_user_identities
@@ -58,8 +68,6 @@ def _candidates(dal: Any, purged: Any) -> list[Any]:
         try:
             hub_user_id = int(row.user_id)
         except (TypeError, ValueError):
-            continue
-        if row.role == _OWNER_ROLE:
             continue
         linked = dal((ident.hub_user_id == hub_user_id) & (ident.platform == "discord")).count()
         if linked:
@@ -90,7 +98,7 @@ def remediate_purged_bindings(
                         purged_binding_id=purged.id,
                         community_id=purged.community_id,
                         hub_user_id=hub_user_id,
-                        role_at_review=member.role,
+                        role_at_review=purged.community_role,
                         status=STATUS_PENDING,
                         created_at=datetime.now(UTC),
                     )
