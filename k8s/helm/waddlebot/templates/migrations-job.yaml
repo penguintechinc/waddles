@@ -1,53 +1,23 @@
-# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks) -- "post-install,pre-upgrade"
-# Helm hook Job: the schema ALWAYS comes from this Job, fresh install included. The prior
-# design in this PR moved fresh-install schema creation into hub-api's own startup path
-# (SQLAlchemy create_all()+stamp) to dodge this Job racing the in-chart Postgres Deployment
-# (a plain/regular resource Helm only creates AFTER the whole pre-install hook phase
-# finishes -- "Database not ready after 60s", confirmed on alpha 2026-10-01). That dodge
-# traded one bug for a worse one: `flask_core.models.db.metadata` only covers ~14-21 of the
-# 100+ tables the full migration chain creates, so create_all()+stamp left legacy
-# raw-SQL-only tables (`commands`, `platform_integrations`, ...) missing, and the FIRST
-# `helm upgrade` after install then failed (`run-alembic.sh`'s own required-table check:
-# "migration completed with required tables missing"). See
-# hub_api/tests/test_bootstrap_schema_drift.py and hub_api/bootstrap.py's module docstring.
+# fix/db-migrate-fresh-install-ordering -- "pre-upgrade" ONLY (was "post-install,pre-upgrade").
 #
-# Fix: this Job now also runs post-install, not just pre-upgrade. By the time ANY
-# post-install hook fires, Helm has already created every regular resource in the release,
-# including templates/infrastructure/postgres.yaml -- so Postgres exists (the object is
-# created; this Job's entrypoint, migrations/run-alembic.sh, already has its own 60s
-# wait-for-DB retry loop for the pod itself finishing startup). "pre-install" is
-# deliberately never added back -- only "post-install,pre-upgrade" -- since pre-install
-# fires BEFORE regular resources exist and would reintroduce the original race.
+# Fresh install: the schema now comes from hub-api's `db-migrate` initContainer
+# (templates/_db_migrate.tpl). As a post-install hook this Job deadlocked every fresh install
+# under `helm upgrade --install --wait`: hub-api `/ready` waits for the alembic head revision,
+# --wait waits for hub-api, and post hooks only run after --wait completes.
 #
-# Hook-weight ordering within the post-install phase (Helm runs a phase's hooks strictly by
-# ascending weight, waiting for each to complete before the next starts): this Job's
-# dedicated SA/Secret (migrations-job-rbac.yaml, secrets.yaml; weight -10) -> this Job
-# (weight -5) -> core-bundle-seeder (weight 5, needs  [bucket init = hub-api initContainer]
-# both the schema AND hub-api `/ready`). hub-api's own startup (hub_api/bootstrap.py) only
-# OBSERVES `alembic_version` (never creates/alters schema) and polls until this Job has run
-# -- see that module's docstring for its state machine.
+# Upgrade: this Job still migrates BEFORE any regular resource is updated (pre-upgrade, weight
+# -5: after the provision-secrets hook at -8, before postgres-handover), so no new-version
+# workload ever sees the old schema. "pre-install" is never added: in-chart Postgres is a
+# regular resource that does not exist yet during the pre-install hook phase.
 #
-# Every other Deployment/Job in this chart that needs the schema waits on hub-api's own
-# `/ready` endpoint (waddlebot.waitForHubApiInitContainer, _helpers.tpl) rather than racing
-# this Job or re-running migrations itself per-pod.
+# Both call sites run the SAME container (waddlebot.dbMigrate.container): migrate_locked.py holds
+# a session-level pg_advisory_lock around run-alembic.sh, so this Job and N hub-api replicas'
+# initContainers serialize; whoever runs second finds the schema at head and only re-asserts the
+# idempotent role/grant reconciles.
 #
-# Install-order note (why this doesn't deadlock): scripts/alpha-deploy.sh's `helm upgrade
-# --install` deliberately never passes `--wait`/`--atomic` -- see that script's comment at
-# the HELM_ARGS definition. With `--wait`, Helm blocks on every created Deployment reaching
-# Ready BEFORE running post-install hooks, but hub-api (and the 40 other workloads gated on
-# its `/ready`) can only become Ready AFTER this Job runs -- a `--wait` install would
-# deadlock on its own timeout. Without `--wait`, Helm creates the Deployment objects (pods
-# scheduled, not required to be Ready) and immediately proceeds to the post-install hook
-# phase; alpha-deploy.sh does its own explicit `kubectl wait --for=condition=complete
-# job/db-migrate` before waiting on Deployment rollouts, which is race-free by construction.
-#
-# T8 landed on release/v3.0.X: migrations now run through
-# config/postgres/migrations/083_discord_twitch_demo_convergence.sql (seeds both
-# discord.default + twitch.default 3-stage app_ids + `global` tenant activation). This Job
-# runs the migrations image's entrypoint (migrations/run-alembic.sh -> `alembic upgrade
-# head`) against the whole config/postgres/migrations/ directory the image COPYs in
-# (migrations/Dockerfile), never a hardcoded file list or number, so it already covers 083
-# with no further Helm change.
+# Credentials: the dedicated <fullname>-db-migrate-secret (provision-secrets hook, weight -8)
+# carries the migrator DATABASE_URL and the role passwords run-alembic.sh reconciles. The hook
+# ServiceAccount (migrations-job-rbac.yaml, weight -10) has no token automount.
 {{- if .Values.pipeline.migrationsJob.enabled }}
 apiVersion: batch/v1
 kind: Job
@@ -58,24 +28,8 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-5"
-    # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
-    # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,
-    # weight -10), not the shared "waddlebot" SA -- see that file for why the shared SA
-    # was an ordering bug here too.
-    #
-    # fix/helm-migrations-fresh-install -- envFrom below now pulls the dedicated
-    # {{ include "waddlebot.fullname" . }}-db-migrate-secret hook Secret (templates/
-    # secrets.yaml, weight -10), not the shared waddlebot-secrets Secret. That Secret is
-    # a plain/regular resource consumed by ~20 other Deployments -- Helm applies regular
-    # resources only AFTER every pre-install/pre-upgrade hook has run, so it was never
-    # guaranteed to exist yet when this Job's pod is admitted on a true first install
-    # (CreateContainerConfigError). The dedicated hook Secret carries only DATABASE_URL,
-    # the one value this image's entrypoint (migrations/run-alembic.sh, alembic/env.py)
-    # actually reads, and is guaranteed to derive the identical DB password as
-    # waddlebot-secrets -- see secrets.yaml's comment on that Secret for the
-    # no-divergence guarantee.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
@@ -92,44 +46,8 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-      - name: db-migrate
-        # Same image reference as waddlebot.dbMigrateInitContainer (_helpers.tpl) — one
-        # migrations image, two call sites (this pre-install/pre-upgrade Job + the per-pod
-        # initContainer). Replace once migrations has its own pinned CI-built digest.
-        #
-        # fix/alpha-helm-deploy -- this used to hardcode
-        # "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
-        # with no empty-registry guard and a literal "migrations" repo name that didn't
-        # match dbMigrateInitContainer's .Values.modules.migrations.image, so an empty
-        # global.imageRegistry rendered the malformed "/migrations:alpha". Reuse the exact
-        # same guard + repository source as dbMigrateInitContainer so both call sites can
-        # never drift apart again.
-        {{- $registry := .Values.global.imageRegistry | default "" }}
-        {{- $repository := .Values.modules.migrations.image | default "migrations" }}
-        {{- $tag := include "waddlebot.resolveImageTag" (dict "root" . "image" $repository "explicit" .Values.modules.migrations.imageTag) }}
-        {{- if $registry }}
-        image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
-        {{- else }}
-        image: "{{ $repository }}:{{ $tag }}"
-        {{- end }}
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 10 }}
-        envFrom:
-        - secretRef:
-            name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
-        # feature/transit-tls-core (F1): DATABASE_URL already carries sslmode=verify-full&sslrootcert; the libpq env
-        # is the belt-and-braces for any code path that rebuilds the DSN.
-        env:
-        {{- include "waddlebot.transitTls.pgClientEnv" . | nindent 8 }}
-        resources:
-          {{- toYaml .Values.pipeline.migrationsJob.resources | nindent 10 }}
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+      {{- include "waddlebot.dbMigrate.container" . | nindent 6 }}
       volumes:
-      - name: tmp
-        emptyDir: {}
+      {{- include "waddlebot.dbMigrate.volume" . | nindent 6 }}
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
 {{- end }}

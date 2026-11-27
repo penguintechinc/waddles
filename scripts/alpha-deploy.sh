@@ -532,8 +532,11 @@ fi
 #
 # DELIBERATELY NO --wait/--atomic on HELM_ARGS below (USER DECISION,
 # 2026-10-01, fix/chart-fresh-install-hooks) -- this is load-bearing, not an
-# oversight; do not add either flag here. db-migrate (templates/
-# migrations-job.yaml) now runs post-install, and every one of the 40 other
+# oversight; do not add either flag here. [fix/db-migrate-fresh-install-ordering,
+# 2026-11-27: the deadlock below no longer exists -- fresh-install migration is now
+# hub-api's db-migrate initContainer and the Job is pre-upgrade only -- but the
+# no-wait behaviour of this script is kept; history follows.] db-migrate (templates/
+# migrations-job.yaml) ran post-install, and every one of the 40 other
 # workloads in this chart (including hub-api itself, via its own `/ready`
 # readinessProbe) only becomes Ready AFTER that hook has run. With --wait (or
 # --atomic, which implies it), Helm blocks on every just-created Deployment
@@ -623,7 +626,8 @@ info "helm release ${RELEASE} is 'deployed' at revision ${HELM_RELEASE_REVISION}
 #
 # This is consistent with the #526 (fix/chart-fresh-install-hooks) design:
 # Helm hooks are a synchronous barrier -- `helm upgrade --install` does not
-# return until db-migrate (helm.sh/hook: post-install,pre-upgrade) has
+# return until db-migrate (helm.sh/hook: pre-upgrade; fresh installs migrate in
+# hub-api's db-migrate initContainer, covered by the rollout wait below) has
 # finished, and a hook failure leaves the release in a non-"deployed" status
 # (or makes the `helm upgrade` command itself exit non-zero). The
 # "Verifying helm release status" check immediately above this comment

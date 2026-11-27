@@ -39,11 +39,8 @@ _IDS = ["base", "alpha", "dal2alpha"]
 # Every post-install hook resource must be listed here with why it may run after `--wait`.
 # A new entry means: prove no Deployment needs it to become Ready, or move it before boot.
 _KNOWN_POST_HOOKS: dict[str, str] = {
-    # KNOWN fresh-install boot dependency (follow-up): hub-api /ready waits for alembic head,
-    # which only this post-install Job produces -> `--wait` can still deadlock on an empty DB.
-    "waddlebot-db-migrate": "schema migrate (KNOWN boot dependency, follow-up)",
-    "waddlebot-db-migrate-secret": "db-migrate hook credentials",
-    "db-migrate": "schema migrate (KNOWN boot dependency, follow-up)",
+    # db-migrate is NOT here: it is hub-api's initContainer + a pre-upgrade-only Job
+    # (fix/db-migrate-fresh-install-ordering, test_db_migrate_init_ordering_render.py).
     "core-bundle-seeder": "seeds first-party bundles; hub-api boots without it",
     "hub-admin-seed": "seeds the first admin; hub-api boots without it",
     "bundle-signing-backfill": "operator-run one-off; default disabled",
@@ -150,9 +147,8 @@ def test_tetragon_scopes_bucket_init_allowlist_to_its_container() -> None:
     tps = {d["metadata"]["name"]: d["spec"] for d in docs if d["kind"] == "TracingPolicyNamespaced"}
     main = tps["waddlebot-hub-api-exec-allowlist"]
     init = tps[f"waddlebot-hub-api-{_INIT}-exec-allowlist"]
-    assert main["containerSelector"]["matchExpressions"] == [
-        {"key": "name", "operator": "NotIn", "values": [_INIT]}
-    ]
+    (excluded,) = main["containerSelector"]["matchExpressions"]  # other init containers may share it
+    assert excluded["key"] == "name" and excluded["operator"] == "NotIn" and _INIT in excluded["values"]
     assert init["containerSelector"]["matchExpressions"] == [{"key": "name", "operator": "In", "values": [_INIT]}]
     main_vals = [v for m in main["kprobes"][0]["selectors"][0]["matchArgs"] for v in m["values"]]
     assert "/bin/sh" not in main_vals and "/usr/local/bin/aws" not in main_vals

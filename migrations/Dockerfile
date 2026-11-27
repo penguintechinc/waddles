@@ -43,6 +43,9 @@ COPY scripts/db/ scripts/db/
 
 # Copy migration runner
 COPY migrations/run-alembic.sh ./run.sh
+# Advisory-lock wrapper: chart call sites (hub-api initContainer + pre-upgrade Job) run
+# `python3 /app/migrate_locked.py /app/run.sh` so concurrent replicas never race the run.
+COPY migrations/migrate_locked.py ./migrate_locked.py
 # Create non-root user
 RUN chmod +x ./run.sh && \
     useradd --create-home --shell /bin/bash appuser

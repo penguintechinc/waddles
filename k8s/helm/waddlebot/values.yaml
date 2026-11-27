@@ -1527,7 +1527,25 @@ pipeline:
   # waddlebot.dbMigrateInitContainer already used by svc-ingest/svc-process/svc-action/
   # hub-api/svc-core.
   migrationsJob:
+    # Renders BOTH the hub-api `db-migrate` initContainer (fresh install + every rollout) and the
+    # pre-upgrade hook Job (templates/_db_migrate.tpl). Both run migrate_locked.py, which holds a
+    # Postgres advisory lock around run-alembic.sh so replicas never race.
     enabled: true
+    dbWaitSeconds: 120        # bounded wait for Postgres before failing loud (kubelet/Job retries)
+    lockTimeoutSeconds: 900   # max wait for another replica's migration run (Postgres lock_timeout)
+    # Tetragon execve allowlist for the hub-api db-migrate initContainer, scoped by
+    # containerSelector to THAT container only (hub-api's own allowlist never gains a shell).
+    # Paths as resolved in the migrations image (python:3.13-slim-bookworm; merged /usr).
+    execBinaries:
+      - /usr/local/bin/python3
+      - /usr/local/bin/python3.13
+      - /usr/local/bin/alembic
+      - /bin/sh
+      - /usr/bin/sh
+      - /bin/dash
+      - /usr/bin/dash
+      - /usr/bin/sleep
+      - /bin/sleep
     resources:
       requests:
         cpu: "100m"
