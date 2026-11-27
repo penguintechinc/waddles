@@ -31,6 +31,7 @@ import httpx
 
 from config import HubAPIConfig
 from services import ban_suppression, identity_audit, login_providers, session_service
+from services import email_verification as ev
 from services.auth_service import SessionUser, create_session_token
 from services.errors import ApiError, bad_request, conflict, not_found
 from services.global_identity import is_global_admin
@@ -325,7 +326,12 @@ async def _exchange_code(
 
 
 async def _find_or_create_user_from_oauth(
-    async_dal: Any, dal: Any, *, platform: str, user_data: dict[str, Any]
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    user_data: dict[str, Any],
+    cfg: HubAPIConfig | None = None,
 ) -> Any:
     """Resolve the hub user for an OAuth login. Never adopts an existing row by email.
 
@@ -344,6 +350,12 @@ async def _find_or_create_user_from_oauth(
     already proven who they are via their own session. See
     `hub_api/PORTING.md` for the writeup; this is a real, exploitable gap
     in the current Node source, not just a hypothetical one.
+
+    Signup-domain policy (`services/email_verification.py`; applied when `cfg` is passed, i.e. on
+    the real login callback): while the signup allowlist is set, a NEW OAuth user must have a
+    provider email in an allowed domain (else `email_domain_not_allowed`, nothing created), is
+    created pending and mailed a verification link, and gets no session
+    (`email_verification_required`) until verified. A pending account stays blocked.
     """
     identity_rows = await async_dal.select_async(
         dal(
@@ -366,6 +378,8 @@ async def _find_or_create_user_from_oauth(
         # `.hub_users` -- nesting only happens when >1 table's fields are
         # requested together (confirmed empirically; see PORTING.md).
         u = identity_rows[0]
+        if cfg is not None and _is_pending_verification(u) and await ev.enforced():
+            raise _verification_required()
         return SessionUser(
             id=u.id,
             email=u.email,
@@ -384,12 +398,16 @@ async def _find_or_create_user_from_oauth(
             "platform from your account settings instead."
         )
 
+    needs_verification = cfg is not None and await _oauth_signup_needs_verification(
+        async_dal, dal, email=user_data.get("email")
+    )
     new_id = await async_dal.insert_async(
         dal.hub_users,
         email=email.lower(),
         username=user_data["username"],
         avatar_url=user_data.get("avatar_url"),
         is_active=True,
+        email_verified=False,
         created_at=datetime.now(UTC),
     )
     user = SessionUser(
@@ -415,7 +433,49 @@ async def _find_or_create_user_from_oauth(
     # re-check suppression now that the platform id is known (ban-evasion: an erased, banned
     # user signing up again with the same platform account).
     await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user.id)
+    if needs_verification and cfg is not None:
+        await ev.issue_and_send(async_dal, dal, cfg, user_id=int(new_id), email=email.lower())
+        raise _verification_required()
     return user
+
+
+def _is_pending_verification(row: Any) -> bool:
+    """A user created pending (token issued, never verified) -- legacy rows have no token."""
+    return not bool(row.email_verified) and bool(row.email_verification_token)
+
+
+def _verification_required() -> ApiError:
+    """403 telling the browser to check its inbox; no session is minted."""
+    return ApiError(
+        "Check your inbox: verify your email address to finish signing up.",
+        403,
+        ev.ERR_REQUIRED,
+        {"requiresVerification": True},
+    )
+
+
+async def _oauth_signup_needs_verification(async_dal: Any, dal: Any, *, email: str | None) -> bool:
+    """Domain policy for a NEW OAuth user; raises before anything is created when refused.
+
+    Unrestricted platform (empty allowlist) or kill switch ON: no verification. Restricted: the
+    provider must supply a (provider-verified) email in an allowed domain, and SMTP must be
+    configured -- otherwise the signup is refused loudly, never auto-verified.
+    """
+    from services.auth_service import get_hub_settings_map
+
+    domains = ev.allowed_domains(await get_hub_settings_map(async_dal, dal))
+    if not domains or not await ev.enforced():
+        return False
+    if not email or not ev.domain_allowed(email.lower(), domains):
+        ev.verification_events.add(1, {"event": "oauth_signup", "outcome": "domain_refused"})
+        raise ApiError(
+            "Sign-up is restricted to specific email domains. Use an account whose verified "
+            "email is in an allowed domain.",
+            403,
+            ev.ERR_DOMAIN,
+        )
+    ev.require_configured()
+    return True
 
 
 async def oauth_callback(
@@ -464,7 +524,7 @@ async def oauth_callback(
         )
         raise bad_request("OAuth provider rejected the login") from exc
     user = await _find_or_create_user_from_oauth(
-        async_dal, dal, platform=platform, user_data=user_data
+        async_dal, dal, platform=platform, user_data=user_data, cfg=cfg
     )
 
     return await create_session_token(

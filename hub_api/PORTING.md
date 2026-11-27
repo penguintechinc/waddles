@@ -329,11 +329,9 @@ fail-first regression tests.
   -- ported as an honest `501`, not a faithful reproduction of a
   guaranteed-broken code path. Confirm with product whether this route
   can be retired from the v1 contract entirely.
-- Email delivery (Node's `sendVerificationEmail()`) is not wired --
-  hub-api has no SMTP/email client dependency yet. Verification tokens
-  are generated and stored regardless, so `verify_email()` is fully
-  functional once a caller has the token; only the "send it" transport
-  leg is missing.
+- Email delivery (Node's `sendVerificationEmail()`) is wired: `services/email_service.py` (SMTP)
+  + `services/email_verification.py` (hashed single-use tokens, domain policy). See
+  `docs/email-verification.md`.
 - `userManagementController.js`'s `getUserDeletionRequest()` queries
   `data_deletion_requests`, a table owned by the Privacy/Compliance group
   (M3) and not bound in `services/schema.py` -- still uses a raw-SQL

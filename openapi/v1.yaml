@@ -16552,14 +16552,29 @@ paths:
           description: Response DTO for tenant login info endpoints.
       summary: Tenant login info.
   /api/v1/auth/verify-email:
-    get:
+    post:
       description: ''
-      operationId: get_verify_email
+      operationId: post_verify_email
       parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /verify-email` (token in the body,
+                never in a URL/log).
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyEmailRequest
+              type: object
       responses:
         default:
           description: Undocumented response
-      summary: Verify email.
+      summary: Consume the emailed single-use token (webui `/verify-email` posts it)
+        and sign in.
   /api/v1/captcha/challenge:
     get:
       description: ''

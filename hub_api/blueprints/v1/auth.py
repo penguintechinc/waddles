@@ -48,6 +48,12 @@ from services.current_user import (
     get_optional_current_user_id,
 )
 from services.dto_response import jsonify_dto
+from services.email_verification import (
+    ERR_DOMAIN,
+    ERR_NOT_CONFIGURED,
+    ERR_REQUIRED,
+    ERR_SEND_FAILED,
+)
 from services.errors import ApiError
 from services.login_providers import ERR_PROVIDER_DISABLED
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY, _client_ip
@@ -86,12 +92,25 @@ def _callback_base_url() -> str:
     return _cfg().identity_callback_base_url
 
 
+#: Typed OAuth-login failures the webui login page renders specifically (bounded codes only).
+_LOGIN_REDIRECT_ERRORS = (
+    binding.ERR_BINDING,
+    binding.ERR_STATE,
+    ERR_PROVIDER_DISABLED,
+    ERR_REQUIRED,
+    ERR_DOMAIN,
+    ERR_SEND_FAILED,
+    ERR_NOT_CONFIGURED,
+)
+
+
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     """Convert an `ApiError` into the flask_core `error_response()` JSON envelope."""
     # flask_core is `follow_imports = "skip"` (pyproject.toml) -- error_response()
     # is typed Any from mypy's perspective, cast to the real, stable shape.
     return cast(
-        tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
+        tuple[dict[str, object], int],
+        error_response(exc.message, exc.status_code, exc.code, exc.details),
     )
 
 
@@ -140,7 +159,7 @@ class VerificationRequiredResponse:
 
 @dataclass(slots=True, frozen=True)
 class RegisterSuccessResponse:
-    """Response DTO for `POST /register` and `GET /verify-email`'s full-success branch."""
+    """Response DTO for `POST /register` and `POST /verify-email`'s full-success branch."""
 
     success: bool
     token: str
@@ -480,14 +499,22 @@ async def register(data: RegisterRequest) -> tuple[Any, int]:
     return set_session_cookie(response, result.token), status
 
 
-@auth_bp.route("/verify-email", methods=["GET"])
+@dataclass(slots=True, frozen=True)
+class VerifyEmailRequest:
+    """Request DTO for `POST /verify-email` (token in the body, never in a URL/log)."""
+
+    token: str
+
+
+@auth_bp.route("/verify-email", methods=["POST"])
+@validate_request(VerifyEmailRequest)
 # NOT @validate_response -- same crash class as register() above (this
 # route also inserts nothing itself, but auth_service.verify_email()'s own
 # update_async + hub_sessions insert_async chain hits the same pattern).
-async def verify_email() -> tuple[Any, int]:
-    """Verify email."""
+async def verify_email(data: VerifyEmailRequest) -> tuple[Any, int]:
+    """Consume the emailed single-use token (webui `/verify-email` posts it) and sign in."""
     async_dal, dal = _dal()
-    token = request.args.get("token", "")
+    token = data.token
     try:
         result = await auth_service.verify_email(async_dal, dal, _cfg(), token=token)
     except ApiError as exc:
@@ -519,7 +546,7 @@ async def resend_verification(
     """Resend verification."""
     async_dal, dal = _dal()
     try:
-        await auth_service.resend_verification(async_dal, dal, email=data.email)
+        await auth_service.resend_verification(async_dal, dal, _cfg(), email=data.email)
     except ApiError as exc:
         return _err(exc)
     return MessageResponse(success=True, message="Verification email sent")
@@ -928,11 +955,7 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         )
     except ApiError as exc:
         logger.warning("auth.oauth_callback.refused type=%s code=%s", type(exc).__name__, exc.code)
-        error = (
-            exc.code
-            if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)
-            else "oauth_failed"
-        )
+        error = exc.code if exc.code in _LOGIN_REDIRECT_ERRORS else "oauth_failed"
         return redirect(f"{frontend_origin}/login?error={error}")
 
     exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(

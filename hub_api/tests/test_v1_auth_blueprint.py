@@ -150,7 +150,19 @@ class TestRegister:
         )
         assert response.status_code == 403
 
-    async def test_register_success_returns_token_and_user(self, client: Any, auth_db: Any) -> None:
+    async def test_register_success_returns_token_and_user(
+        self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy immediate-session signup: only with `waddles.disable-email-verification` ON.
+
+        The enforced (default) path is covered end to end in test_email_verification.py.
+        """
+        from services import email_verification
+
+        async def kill_switch_on(*_a: Any, **_k: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(email_verification, "enforced", kill_switch_on)
         _seed_settings(auth_db, signup_enabled="true", email_configured="true")
         response = await client.post(
             "/api/v1/auth/register",

@@ -221,8 +221,15 @@ class TestLoginIssuesSessionCredentials:
         assert access not in stored and refresh not in stored and nonce not in stored
 
     async def test_registration_also_delivers_the_refresh_cookie(
-        self, browser: Any, auth_db: Any
+        self, browser: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Immediate-session signup (kill switch `waddles.disable-email-verification` ON)."""
+        from services import email_verification
+
+        async def kill_switch_on(*_a: Any, **_k: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(email_verification, "enforced", kill_switch_on)
         for key, value in (("signup_enabled", "true"), ("email_configured", "true")):
             auth_db.dal.hub_settings.insert(setting_key=key, setting_value=value)
         auth_db.dal.commit()
