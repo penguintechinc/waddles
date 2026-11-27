@@ -26,7 +26,7 @@ has an ACTIVE factor:
 | `GET /api/v1/auth/verify-email` | yes: the address is marked verified, but the session waits for the factor (202) |
 | `POST /api/v1/auth/temp-password` | yes when the identifier names an account; after MFA the SAME pending-link temp session is minted (`sub` 0), never the full account session |
 | Passkey login | the passkey is itself the strong factor (`amr` from `services/auth_amr.py`) |
-| OAuth / SSO callback | see "Federated sign-in" below |
+| OAuth / SSO callback | yes: redirect to the webui MFA step with the pending token in the URL fragment (see "Federated sign-in") |
 
 ## Endpoints (signed in, own account)
 
@@ -82,18 +82,40 @@ There is no bypass flag.
 
 ## Federated sign-in (OAuth / SSO)
 
-Sessions from an OAuth provider (Discord, Twitch, Google, ...) or tenant SSO (OIDC / SAML) are
-minted by `services/oauth_service.py::oauth_callback` / `services/sso_service.py::_finish_login`.
-Policy: **the IdP is trusted to authenticate the user**, including its own MFA.
+OAuth provider sign-ins (Discord, Twitch, Google, ...; `services/oauth_service.py::oauth_callback`)
+and tenant SSO sign-ins (OIDC / Google Workspace / SAML; `services/sso_service.py::_finish_login`)
+call the SAME `auth_service._require_mfa_if_enrolled` gate as the password path, right after the
+identity is resolved. An account with an ACTIVE local factor gets **no session and no exchange
+code**; one flow, one verify endpoint:
 
-Target rule (not yet enforced -- tracked as a follow-up): when the IdP's `amr` does not assert
-MFA (`mfa`/`otp`/`hwk`...) and the account has a locally enrolled ACTIVE factor, the callback must
-issue the MFA-pending state instead of a session and require the local factor. Not implemented in
-this change because both callbacks hand the session to the webui through a one-time exchange
-code + redirect: requiring the local factor needs a new callback outcome (redirect carrying an
-`mfaToken`), webui handling of it, and `amr` plumbing (plain OAuth2 providers return no `amr`).
-Until then a federated sign-in does not prompt for the local factor; the local factor still
-gates every factor change (re-auth requires an MFA-completed sign-in, see above).
+```
+GET  /api/v1/auth/oauth/<platform>/callback      (or SSO /callback, /acs)
+  -> 302/303 <frontend>/auth/mfa#pending=<token>&methods=totp,recovery&expiresIn=600
+     no session / refresh cookie, no exchange code; Cache-Control: no-store,
+     Referrer-Policy: no-referrer. The token is in the FRAGMENT only (never sent to a server,
+     so never in access logs or Referer) and the webui scrubs it from the address bar.
+webui /auth/mfa  -> POST /api/v1/auth/mfa/login/verify { mfaToken, method, code }
+  -> 200 session + cookies, then the same finish as the password path (refresh user, dashboard)
+```
+
+| Detail | Behaviour |
+|---|---|
+| Challenge `auth_method` | `oauth_<platform>` / `sso_<protocol>` -- stored on the challenge, on the audit events (`mfa.challenge_issued`, `mfa.verified`) and the session's `auth_method` (`..._mfa`) |
+| Tenant | SSO challenges carry the connection's tenant; the post-MFA session is minted for it (OAuth: `default`, as before) |
+| `amr` after verify | `otp`+`mfa` (TOTP/email) or `mfa` (recovery) -- no `pwd`, the first factor was federated |
+| Rate limits, lockout, single use, expiry | identical to the password path (same challenge row, same verify route) |
+| Kill switch `waddles.disable-mfa` | never removes the step: enrolled users are always challenged |
+| Not enrolled | unchanged: exchange-code redirect to `/auth/callback` |
+| SSO telemetry | `sso.login` counter outcome `mfa_required` (not a failure) |
+
+### Trusting the IdP's MFA (OIDC only, opt-in, default off)
+
+A tenant may set `tenants.config.ssoTrustIdpMfa = true`. Then, for an OIDC / Google SSO sign-in
+whose ID token `amr` contains `mfa`, `otp`, `hwk` or `swk`, the IdP's MFA stands in for the local
+factor: the session is minted directly with `amr` = those values + `mfa` and `auth_method`
+`sso_<protocol>_idp_mfa`, and an `mfa.verified` audit event (method `idp_amr`) is recorded so the
+skip is never silent. Off (the default), absent or malformed `amr`, SAML (no `amr`), and OAuth
+providers (plain OAuth2, no `amr`) always require the local factor.
 
 ## Email transport dependency
 

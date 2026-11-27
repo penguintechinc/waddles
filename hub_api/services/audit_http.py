@@ -375,6 +375,7 @@ async def record_mfa_event(
     method: str,
     reason: str | None = None,
     tenant_slug: str | None = None,
+    auth_method: str | None = None,
 ) -> None:
     """Audit one account-MFA event (challenge issued, code verified/failed, method changed).
 
@@ -390,6 +391,9 @@ async def record_mfa_event(
     details: dict[str, Any] = {"method": method}
     if reason is not None:
         details["reason"] = reason
+    if auth_method is not None:
+        # Closed first-factor label (`password`, `oauth_<platform>`, `sso_<protocol>`, ...).
+        details["auth_method"] = auth_method
     try:
         known = (
             await service.find_tenant(tenant_id=None, tenant_slug=tenant_slug)

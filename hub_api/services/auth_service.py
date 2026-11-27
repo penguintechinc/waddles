@@ -741,6 +741,27 @@ class MfaRequiredError(Exception):
         self.challenge = challenge
 
 
+#: Webui route that finishes a federated (OAuth / SSO) sign-in held at the MFA step.
+MFA_STEP_PATH: Final = "/auth/mfa"
+
+
+def mfa_pending_redirect_url(frontend_origin: str, challenge: mfa_service.LoginChallenge) -> str:
+    """Webui MFA-step URL for a federated sign-in, the pending token in the URL FRAGMENT.
+
+    A fragment is never sent to a server, so the token stays out of access/proxy logs and the
+    `Referer` header (a query string would leak into both). `methods` is non-secret UI state
+    (which factor tabs to offer); `expiresIn` lets the page show the expiry without a round trip.
+    """
+    fragment = urlencode(
+        {
+            "pending": challenge.token,
+            "methods": ",".join(challenge.methods),
+            "expiresIn": str(challenge.expires_in),
+        }
+    )
+    return f"{frontend_origin.rstrip('/')}{MFA_STEP_PATH}#{fragment}"
+
+
 async def _require_mfa_if_enrolled(
     async_dal: Any,
     dal: Any,

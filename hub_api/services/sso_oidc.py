@@ -438,6 +438,19 @@ def _identity_from_claims(claims: dict[str, Any]) -> ExternalIdentity:
         email_verified=_truthy(claims.get("email_verified")),
         display_name=name,
         hosted_domain=hosted,
+        amr=_amr_values(claims.get("amr")),
+    )
+
+
+_MAX_AMR_VALUES: Final = 16
+
+
+def _amr_values(raw: Any) -> tuple[str, ...]:
+    """The ID token's `amr` as short lower-case strings; anything malformed reads as none."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        v.strip().lower() for v in raw[:_MAX_AMR_VALUES] if isinstance(v, str) and 0 < len(v) <= 32
     )
 
 

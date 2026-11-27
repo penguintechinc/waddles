@@ -12,6 +12,7 @@ const PUBLIC_ROUTE_PREFIXES = [
   '/register',
   '/forgot-password',
   '/auth/callback',
+  '/auth/mfa',
   '/communities',
   '/live',
   '/users',

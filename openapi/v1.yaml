@@ -16496,7 +16496,16 @@ paths:
 
         `POST /exchange` (`exchange_oauth_code` below), delivered over the
 
-        response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.'
+        response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.
+
+
+        Account MFA: when the user has an active local factor, no session and no exchange
+        code are
+
+        minted; the redirect goes to the webui MFA step (`/auth/mfa#pending=...`)
+        with the opaque
+
+        single-use pending token in the URL fragment, completed via `/api/v1/auth/mfa/login/verify`.'
       operationId: get_oauth_callback__get_api_v1_auth_oauth_platform_callback
       parameters:
       - in: path
@@ -16831,7 +16840,12 @@ paths:
         for a tenant.'
   /api/v1/auth/sso/{public_id}/acs:
     post:
-      description: ''
+      description: '
+
+        A user with an active local MFA factor is redirected to the webui MFA step
+        with a pending
+
+        token in the URL fragment instead of a session.'
       operationId: post_sso_saml_acs
       parameters:
       - in: path
@@ -16845,7 +16859,13 @@ paths:
       summary: '`POST /<id>/acs` -- SAML Assertion Consumer Service (HTTP-POST binding).'
   /api/v1/auth/sso/{public_id}/callback:
     get:
-      description: ''
+      description: '
+
+        A user with an active local MFA factor is redirected to the webui MFA step
+        with a pending
+
+        token in the URL fragment instead of a session (unless the tenant trusts the
+        IdP''s MFA `amr`).'
       operationId: get_sso_oidc_callback
       parameters:
       - in: path

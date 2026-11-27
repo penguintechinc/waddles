@@ -125,6 +125,20 @@ _AMR: Final[dict[str, list[str]]] = {
     METHOD_RECOVERY: ["pwd", "mfa"],
 }
 
+#: `auth_method` prefixes of federated first factors (OAuth provider / tenant SSO): no password.
+FEDERATED_AUTH_PREFIXES: Final = ("oauth_", "sso_")
+
+
+def amr_for(auth_method: str, method: str) -> list[str]:
+    """RFC 8176 `amr` for a login completed with `method` after the `auth_method` first factor.
+
+    A federated first factor (OAuth/SSO) proved no password, so `pwd` is dropped for it.
+    """
+    amr = list(_AMR[method])
+    if auth_method.startswith(FEDERATED_AUTH_PREFIXES):
+        amr = [v for v in amr if v != "pwd"]
+    return amr
+
 
 def _unavailable() -> ApiError:
     """503 when a backing store (limiter, key service) cannot answer -- fail closed."""
@@ -1071,6 +1085,7 @@ async def start_login_challenge(
         outcome=AuditOutcome.SUCCESS,
         method=methods[0],
         tenant_slug=tenant_slug,
+        auth_method=auth_method,
     )
     logger.info("mfa.challenge_issued user_id=%d auth_method=%s", user_id, auth_method)
     return LoginChallenge(token=token, methods=methods, expires_in=CHALLENGE_TTL_SECONDS)
@@ -1165,6 +1180,7 @@ async def complete_login(
     )
     if consumed != 1:
         raise _challenge_invalid()
+    auth_method = str(challenge.auth_method or "password")
     verify_counter.add(1, {"method": method, "purpose": "login", "outcome": "ok"})
     await record_mfa_event(
         user_id=user_id,
@@ -1173,14 +1189,17 @@ async def complete_login(
         outcome=AuditOutcome.SUCCESS,
         method=method,
         tenant_slug=slug,
+        auth_method=auth_method,
     )
-    logger.info("mfa.login.verified user_id=%d method=%s", user_id, method)
+    logger.info(
+        "mfa.login.verified user_id=%d method=%s auth_method=%s", user_id, method, auth_method
+    )
     return CompletedLogin(
         user_id=user_id,
         tenant_id=int(challenge.tenant_id) if challenge.tenant_id is not None else None,
         tenant_slug=slug,
-        auth_method=str(challenge.auth_method or "password"),
-        amr=list(_AMR[method]),
+        auth_method=auth_method,
+        amr=amr_for(auth_method, method),
     )
 
 

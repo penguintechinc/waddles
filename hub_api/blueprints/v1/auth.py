@@ -30,7 +30,7 @@ from flask_core.api_utils import error_response
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
 from flask_core.authz import parse_scope_claim
 from pydantic import Field as PydanticField
-from quart import Blueprint, after_this_request, current_app, redirect, request
+from quart import Blueprint, Response, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
@@ -954,6 +954,10 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
     the URL; the frontend immediately redeems it for the real JWT via
     `POST /exchange` (`exchange_oauth_code` below), delivered over the
     response BODY, never the URL. See `hub_api/PORTING.md` Gotcha #8.
+
+    Account MFA: when the user has an active local factor, no session and no exchange code are
+    minted; the redirect goes to the webui MFA step (`/auth/mfa#pending=...`) with the opaque
+    single-use pending token in the URL fragment, completed via `/api/v1/auth/mfa/login/verify`.
     """
     async_dal, dal = _dal()
     code = request.args.get("code")
@@ -985,6 +989,10 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             else "oauth_failed"
         )
         return redirect(f"{frontend_origin}/login?error={error}")
+    except auth_service.MfaRequiredError as mfa:
+        # Enrolled account: no session, no exchange code -- hand off to the webui MFA step.
+        logger.info("auth.oauth_callback.mfa_required platform=%s", platform)
+        return _mfa_pending_redirect(frontend_origin, mfa, LOGIN_BINDING_COOKIE)
 
     exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(
         async_dal, dal, token=token, platform=platform
@@ -997,6 +1005,24 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         exchange_nonce,
         oauth_service.EXCHANGE_CODE_TTL_SECONDS,
     )
+    return page
+
+
+def _mfa_pending_redirect(
+    frontend_origin: str, mfa: auth_service.MfaRequiredError, binding_cookie: str
+) -> Response:
+    """302 to the webui MFA step for a federated sign-in held at the second factor.
+
+    The pending token rides in the URL fragment only (`auth_service.mfa_pending_redirect_url`);
+    `no-store` + `no-referrer` keep the redirect out of caches and outbound `Referer` headers.
+    The SSO callbacks do the same with their path-scoped binder cookie (`blueprints/v1/sso.py`).
+    """
+    page = cast(
+        Response, redirect(auth_service.mfa_pending_redirect_url(frontend_origin, mfa.challenge))
+    )
+    binding.clear_binding_cookie(page, binding_cookie)
+    page.headers["Cache-Control"] = "no-store"
+    page.headers["Referrer-Policy"] = "no-referrer"
     return page
 
 

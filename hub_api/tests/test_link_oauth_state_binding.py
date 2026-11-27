@@ -11,6 +11,7 @@ forged, state/cookie pair from different flows.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
@@ -91,7 +92,9 @@ def sessions(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     minted = AsyncMock(return_value="jwt")
     monkeypatch.setattr(oauth_service, "create_session_token", minted)
     monkeypatch.setattr(
-        oauth_service, "_find_or_create_user_from_oauth", AsyncMock(return_value=object())
+        oauth_service,
+        "_find_or_create_user_from_oauth",
+        AsyncMock(return_value=SimpleNamespace(id=0)),  # no MFA factor
     )
     monkeypatch.setattr(
         oauth_service, "create_oauth_exchange_code", AsyncMock(return_value=("xc", "n"))
