@@ -81,7 +81,7 @@ from quart import Request
 from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
-from services.member_roles import is_owner_role
+from services.member_roles import COMMUNITY_OWNER_ROLE, is_owner_role, role_by_name_query
 from services.schema import bind_community_authz_tables
 from services.scope_registry import (
     KIND_ADMIN,
@@ -677,6 +677,38 @@ def _linked_role_scopes(member: Any, role_row: Any | None) -> frozenset[str]:
     return _parse_claims_scopes(member.claims_cache) or _parse_claims_scopes(role_row.base_claims)
 
 
+#: 409 code + message when a change would leave a community with no active owner.
+LAST_OWNER_CODE = "LAST_OWNER"
+LAST_OWNER_MESSAGE = (
+    "Cannot demote or remove the community's last owner; transfer ownership to another member first"
+)
+
+
+def _lock_owner_rows(dal: Any, community_id: int) -> tuple[int | None, list[Any]]:
+    """Lock the community's active owner member rows (``FOR UPDATE``, id order); return them.
+
+    Returns ``(owner_role_id, rows)``. Owners are members LINKED to the seeded system owner role.
+    Taken BEFORE the target row in a fixed (id) order, so concurrent owner changes in one
+    community serialize without deadlocking; after a wait, Postgres re-checks the WHERE against
+    the committed row, so an owner demoted meanwhile drops out of the set. Rows changed earlier
+    in the SAME transaction (e.g. a transfer's promote) are visible, so promote-then-demote counts.
+    """
+    role = (
+        dal(role_by_name_query(dal, community_id, COMMUNITY_OWNER_ROLE))
+        .select(dal.community_roles.id)
+        .first()
+    )
+    if role is None:
+        return None, []
+    cm = dal.community_members
+    rows = dal(
+        (cm.community_id == community_id)
+        & (cm.community_role_id == role.id)
+        & (cm.is_active == True)  # noqa: E712
+    ).select(cm.id, orderby=cm.id, for_update=dal._adapter.dbengine != "sqlite")
+    return int(role.id), list(rows)
+
+
 def lock_member_for_change(
     dal: Any,
     *,
@@ -685,20 +717,24 @@ def lock_member_for_change(
     editor_scopes: frozenset[str],
     editor_bypass: bool,
     owner_message: str,
+    removes_ownership: bool = True,
 ) -> Any:
-    """THE owner/escalation guard for demoting or removing a member; returns the locked row.
+    """THE owner/escalation/last-owner guard for demoting or removing a member; returns the row.
 
-    Runs inside the caller's write transaction: the target's active `community_members` row is
-    read ``SELECT ... FOR UPDATE`` (sqlite serializes writers instead), so the checks and the
-    caller's write see one consistent row and a concurrent demote/remove of the same member
-    waits, then re-checks. Decided on the target's LINKED role row (`community_role_id`), never
-    the legacy role string:
+    Runs inside the caller's write transaction: the community's owner rows, then the target's
+    active `community_members` row, are read ``SELECT ... FOR UPDATE`` (sqlite serializes writers
+    instead), so the checks and the caller's write see one consistent state and a concurrent
+    demote/remove waits, then re-checks. Decided on the target's LINKED role row
+    (`community_role_id`), never the legacy role string:
 
     * 404 -- the target is not an active member;
     * 403 ``owner_message`` -- the target links the seeded system owner role and the editor is
       not a global or tenant admin (``editor_bypass``);
+    * 409 ``LAST_OWNER`` -- the target is an owner, the change strips that (``removes_ownership``,
+      the default: demote, remove, ban, deactivate) and no OTHER active owner remains;
     * 403 -- a non-bypass editor does not hold every scope the target holds.
     """
+    owner_role_id, owners = _lock_owner_rows(dal, community_id)
     cm = dal.community_members
     member = (
         dal(
@@ -711,6 +747,11 @@ def lock_member_for_change(
     )
     if member is None:
         raise not_found("Member not found")
+    target_is_owner = owner_role_id is not None and member.community_role_id == owner_role_id
+    if target_is_owner and not editor_bypass:
+        raise forbidden(owner_message)
+    if target_is_owner and removes_ownership and not any(r.id != member.id for r in owners):
+        raise ApiError(LAST_OWNER_MESSAGE, 409, LAST_OWNER_CODE)
     if editor_bypass:
         return member
     role_row = _linked_role_row(dal, member)

@@ -326,12 +326,25 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_owner_and_appointee(admin_db, community_id)
         _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        # a co-owner remains, so the last-owner guard (409 LAST_OWNER) does not fire
+        _seed_linked(admin_db, community_id=community_id, user_id=44, role="community-owner")
         response = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}/role",
             headers=_headers(),  # `users:admin` = global admin bypass
             json={"role": "member"},
         )
         assert response.status_code == 200
+
+    async def test_global_admin_cannot_demote_sole_owner(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}/role",
+            headers=_headers(),
+            json={"role": "member"},
+        )
+        assert response.status_code == 409
+        assert (await response.get_json())["error"]["code"] == "LAST_OWNER"
 
     async def test_moderator_cannot_change_admin_it_does_not_outscope(
         self, client: Any, admin_db: Any
@@ -641,15 +654,28 @@ class TestMembers:
         assert dal.communities[community_id].member_count == 2
 
     async def test_global_admin_may_remove_owner(self, client: Any, admin_db: Any) -> None:
-        community_id = _seed_community(admin_db, member_count=2)
+        community_id = _seed_community(admin_db, member_count=3)
         _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=44, role="community-owner")
         response = await client.delete(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}",
             headers=_headers(),  # `users:admin` = global admin bypass
             json={},
         )
         assert response.status_code == 200
-        assert admin_db.dal.communities[community_id].member_count == 1
+        assert admin_db.dal.communities[community_id].member_count == 2
+
+    async def test_global_admin_cannot_remove_sole_owner(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db, member_count=2)
+        _seed_owner_and_appointee(admin_db, community_id)
+        response = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}",
+            headers=_headers(),
+            json={},
+        )
+        assert response.status_code == 409
+        assert (await response.get_json())["error"]["code"] == "LAST_OWNER"
+        assert admin_db.dal.communities[community_id].member_count == 2
 
     async def test_remove_member_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)

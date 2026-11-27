@@ -42,6 +42,11 @@ Migration `0145_community_role_backfill` repaired communities created before thi
   removed only by a global or tenant admin. Any other caller also needs every scope the target
   holds. The check and the write run in one transaction under a row lock
   (`community_authz.lock_member_for_change`). The platform view finds the owner the same way.
+- **Last-owner guard.** A community never ends up with zero owners. Demoting, removing, banning or
+  deactivating an owner is refused with `409 LAST_OWNER` (even for a global or tenant admin) unless
+  another active owner remains; transfer ownership first. The same guard locks the community's
+  owner rows `FOR UPDATE` before the target, so parallel demotions of the last two owners leave
+  exactly one, and a transfer that promotes the new owner before demoting the old one passes.
 
 ## Role management rules
 

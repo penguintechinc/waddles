@@ -11,6 +11,7 @@ Skipped (never failed) where the `docker` CLI is unavailable, like every other P
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import threading
 from collections.abc import Iterator
@@ -20,8 +21,10 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from flask_core.database import AsyncDAL
+from flask_core.tenancy import TenantContext
 
 from services import (
+    admin_service,
     community_authz,
     community_interaction,
     free_tier_caps,
@@ -36,7 +39,7 @@ pytestmark = pytest.mark.skipif(
     not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-CREATOR, APPOINTEE, JOINER, LEGACY = 5101, 5102, 5103, 5104
+CREATOR, APPOINTEE, JOINER, LEGACY, CO_OWNER = 5101, 5102, 5103, 5104, 5105
 FULL = effective_scopes(KIND_ADMIN, None)
 
 
@@ -120,6 +123,31 @@ def _guard(dal: Any, community_id: int, user_id: int, **kw: Any) -> Any:
         dal.rollback()
 
 
+def _add_co_owner(dal: Any, community_id: int, user_id: int = CO_OWNER) -> None:
+    """Link a second member to the system owner role and commit."""
+    member_roles.set_member_role(
+        dal,
+        community_id=community_id,
+        role=member_roles.COMMUNITY_OWNER_ROLE,
+        user_id=user_id,
+        add=True,
+    )
+    dal.commit()
+
+
+def _owner_ids(dal: Any, community_id: int) -> list[str]:
+    """Active members linked to the system owner role (sorted user ids)."""
+    rows = pg.q(
+        dal,
+        "SELECT m.user_id FROM community_members m "
+        "JOIN community_roles r ON r.id = m.community_role_id "
+        "WHERE m.community_id = %s AND m.is_active AND r.is_system AND r.name = %s "
+        "ORDER BY m.user_id",
+        [community_id, member_roles.COMMUNITY_OWNER_ROLE],
+    )
+    return [r[0] for r in rows]
+
+
 def _load_migration_0145() -> Any:
     """The 0145 revision module (its `backfill_links` is the batched data-repair path)."""
     path = (
@@ -165,6 +193,7 @@ class TestOwnerProtection:
 
     async def test_global_or_tenant_admin_may_change_the_owner(self, adal: AsyncDAL) -> None:
         community_id, _ = await _create_with_appointee(adal)
+        _add_co_owner(adal.dal, community_id)  # the last-owner guard needs another owner
         locked = _guard(
             adal.dal, community_id, CREATOR, editor_scopes=frozenset(), editor_bypass=True
         )
@@ -345,3 +374,118 @@ class TestUnlinkedLegacyString:
         # and the unlinked string is never treated as the owner by the guard
         locked = _guard(dal, community_id, LEGACY, editor_scopes=frozenset(), editor_bypass=False)
         assert locked.user_id == str(LEGACY)
+
+
+class TestLastOwner:
+    """Decision (b): a community is never left with zero owners, even by a global admin."""
+
+    @staticmethod
+    async def _demote(a: AsyncDAL, community_id: int, tenant_id: int, user_id: int) -> None:
+        await admin_service.update_member_role(
+            a,
+            a.dal,
+            community_id=community_id,
+            user_id=user_id,
+            ctx=TenantContext(tenant_id=tenant_id, tenant_slug="acme"),
+            role=member_roles.COMMUNITY_MEMBER_ROLE,
+            caller_id=None,
+            editor_scopes=frozenset(),
+            editor_bypass=True,
+        )
+
+    async def test_global_admin_cannot_demote_or_remove_the_sole_owner(
+        self, adal: AsyncDAL
+    ) -> None:
+        dal = adal.dal
+        community_id, tenant_id = await _create_with_appointee(adal)
+        with pytest.raises(ApiError) as exc:
+            await self._demote(adal, community_id, tenant_id, CREATOR)
+        assert (exc.value.status_code, exc.value.code) == (409, "LAST_OWNER")
+        assert "transfer ownership" in exc.value.message
+        with pytest.raises(ApiError) as exc:
+            await admin_service.remove_member(
+                adal,
+                dal,
+                community_id=community_id,
+                user_id=CREATOR,
+                ctx=TenantContext(tenant_id=tenant_id, tenant_slug="acme"),
+                caller_id=None,
+                reason=None,
+                editor_scopes=frozenset(),
+                editor_bypass=True,
+            )
+        assert (exc.value.status_code, exc.value.code) == (409, "LAST_OWNER")
+        assert _owner_ids(dal, community_id) == [str(CREATOR)]
+
+    async def test_with_two_owners_demoting_one_succeeds(self, adal: AsyncDAL) -> None:
+        dal = adal.dal
+        community_id, tenant_id = await _create_with_appointee(adal)
+        _add_co_owner(dal, community_id)
+        await self._demote(adal, community_id, tenant_id, CREATOR)
+        assert _owner_ids(dal, community_id) == [str(CO_OWNER)]
+
+    async def test_non_stripping_change_to_sole_owner_passes(self, adal: AsyncDAL) -> None:
+        community_id, _ = await _create_with_appointee(adal)
+        locked = _guard(
+            adal.dal,
+            community_id,
+            CREATOR,
+            editor_scopes=frozenset(),
+            editor_bypass=True,
+            removes_ownership=False,
+        )
+        assert locked.user_id == str(CREATOR)
+
+    async def test_transfer_promote_then_demote_in_one_transaction(self, adal: AsyncDAL) -> None:
+        """Promote the new owner first; the old owner's demotion then sees >=1 other owner."""
+        dal = adal.dal
+        community_id, _ = await _create_with_appointee(adal)
+        try:
+            member_roles.set_member_role(
+                dal,
+                community_id=community_id,
+                role=member_roles.COMMUNITY_OWNER_ROLE,
+                user_id=APPOINTEE,
+            )
+            community_authz.lock_member_for_change(
+                dal,
+                community_id=community_id,
+                user_id=CREATOR,
+                editor_scopes=frozenset(),
+                editor_bypass=True,
+                owner_message="owner",
+            )
+            member_roles.set_member_role(
+                dal,
+                community_id=community_id,
+                role=member_roles.COMMUNITY_ADMIN_ROLE,
+                user_id=CREATOR,
+            )
+            dal.commit()
+        except Exception:
+            dal.rollback()
+            raise
+        assert _owner_ids(dal, community_id) == [str(APPOINTEE)]
+
+    async def test_parallel_demotions_of_last_two_owners_leave_exactly_one(
+        self, adal: AsyncDAL, pg_db: pg.PgTestDatabase
+    ) -> None:
+        community_id, tenant_id = await _create_with_appointee(adal)
+        _add_co_owner(adal.dal, community_id)
+        conns = [pg.open_dal(pg_db), pg.open_dal(pg_db)]
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._demote(c, community_id, tenant_id, uid)
+                    for c, uid in zip(conns, (CREATOR, CO_OWNER), strict=True)
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            for c in conns:
+                c.dal.close()
+        errors = [r for r in results if isinstance(r, BaseException)]
+        assert len(errors) == 1, results
+        assert isinstance(errors[0], ApiError)
+        assert (errors[0].status_code, errors[0].code) == (409, "LAST_OWNER")
+        assert len(_owner_ids(adal.dal, community_id)) == 1
