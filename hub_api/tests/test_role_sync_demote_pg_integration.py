@@ -9,7 +9,7 @@ Postgres container. What this locks down for the demo:
 
 - the 4 guards (member read non-empty, provably complete, baseline exists, owner/unmanaged skip),
 - the circuit breaker boundaries (`> 3` AND `> 50%`),
-- the baseline-missing abort is LOGGED at WARNING (never a silent no-op),
+- the baseline-missing abort is LOGGED at ERROR (never a silent no-op),
 - 4xx/5xx/transport Discord failures demote nobody and log type-only (no response body, no PII),
 - the demote logs carry ids/counts only -- never a Discord user id or hub username.
 
@@ -31,6 +31,7 @@ from flask_core.database import AsyncDAL
 from services import role_sync_service as svc
 from services.credential_resolver import PlatformCredentials
 from services.guild_pairing import create_binding, create_pairing, update_pairing
+from services.member_roles import SYSTEM_ROLE_NAMES
 from tests import demo_pg_support as pg
 
 pytestmark = pytest.mark.skipif(
@@ -40,7 +41,9 @@ pytestmark = pytest.mark.skipif(
 GUILD_ID = "123456789012345678"  # gitleaks:allow - fake snowflake
 MEMBER_DISCORD_ROLE = "444444444444444499"
 ADMIN_DISCORD_ROLE = "333333333333333399"
-BASELINE = "community-member"
+#: The seeded system role a demotion falls back to (`member_roles.COMMUNITY_MEMBER_ROLE`);
+#: the MANAGED role the Discord bindings map onto is `vip` (inbound sync grants only vip/member).
+BASELINE = "member"
 LOGGER = "services.role_sync_service"
 
 
@@ -132,15 +135,16 @@ class _World:
         )
 
     def roles(self, community_id: int | None = None, *names: str) -> None:
-        for name in names or (BASELINE, "member", "community-admin", "vip", "community-owner"):
+        for name in names or (BASELINE, "community-admin", "vip", "community-owner"):
             pg.q(
                 self.dal,
                 "INSERT INTO community_roles "
-                "(community_id, name, priority, role_kind, base_claims) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                "(community_id, name, is_system, priority, role_kind, base_claims) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
                 [
                     community_id or self.community_id,
                     name,
+                    name in SYSTEM_ROLE_NAMES,  # reserved names resolve to the system row only
                     {"vip": 1, "community-admin": 3, "community-owner": 4}.get(name, 0),
                     1 if name == "community-owner" else 0,  # only the owner is admin-kind
                     json.dumps(
@@ -166,7 +170,7 @@ class _World:
             created.id,
             sync_scope="community_role",
             discord_role_id=MEMBER_DISCORD_ROLE,
-            community_role="member",
+            community_role="vip",
         )
         create_binding(
             self.dal,
@@ -209,19 +213,18 @@ class _World:
             )
         pg.q(
             self.dal,
-            "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
-            "is_active) VALUES (%s, %s, %s, (SELECT id FROM community_roles "
+            "INSERT INTO community_members (community_id, user_id, community_role_id, "
+            "is_active) VALUES (%s, %s, (SELECT id FROM community_roles "
             "WHERE community_id = %s AND name = %s), %s)",
             [
                 community_id or self.community_id,
                 str(hub_id),
-                role,
                 community_id or self.community_id,
                 role,
                 active,
             ],
         )
-        if granted and self.pairing_id and role in ("member", "vip"):
+        if granted and self.pairing_id and role == "vip":
             pg.q(
                 self.dal,
                 "INSERT INTO role_sync_community_grants "
@@ -232,10 +235,13 @@ class _World:
         return hub_id
 
     def role_of(self, hub_id: int, community_id: int | None = None) -> str:
+        """Name of the role row the member is LINKED to (its authority); "None" when unlinked."""
         return str(
             pg.scalar(
                 self.dal,
-                "SELECT role FROM community_members WHERE community_id = %s AND user_id = %s",
+                "SELECT r.name FROM community_members m "
+                "LEFT JOIN community_roles r ON r.id = m.community_role_id "
+                "WHERE m.community_id = %s AND m.user_id = %s",
                 [community_id or self.community_id, str(hub_id)],
             )
         )
@@ -274,10 +280,10 @@ async def test_demote_end_to_end_with_pagination_and_pii_free_logs(
     monkeypatch.setattr(svc, "_DISCORD_MEMBER_PAGE_SIZE", 2)
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    keep = world.member("800001", "member")  # still holds the mapped role
-    gone1 = world.member("800002", "member")  # lost it -> demote
+    keep = world.member("800001", "vip")  # still holds the mapped role
+    gone1 = world.member("800002", "vip")  # lost it -> demote
     gone2 = world.member("800003", "vip", username="alice_secret")  # lost it -> demote
-    world.member("800004", "member", link=False)  # unlinked discord id -> untouched
+    world.member("800004", "vip", link=False)  # unlinked discord id -> untouched
     discord = _Discord(
         [
             ("800001", [MEMBER_DISCORD_ROLE]),
@@ -291,7 +297,7 @@ async def test_demote_end_to_end_with_pagination_and_pii_free_logs(
         result = await _run(world, pairing, discord)
 
     assert result.error is None and result.community_roles_demoted == 2
-    assert [world.role_of(u) for u in (keep, gone1, gone2)] == ["member", BASELINE, BASELINE]
+    assert [world.role_of(u) for u in (keep, gone1, gone2)] == ["vip", BASELINE, BASELINE]
     # 5 members at 2/page -> 3 requests, the later ones carry the `after` cursor
     assert len(discord.requests) == 3
     assert discord.requests[0].url.params.get("after") is None
@@ -318,19 +324,19 @@ async def test_demote_end_to_end_with_pagination_and_pii_free_logs(
 async def test_baseline_missing_aborts_loudly_not_silently(
     world: _World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The demo landmine: community has no `community-member` role -> abort, WARNING emitted."""
-    world.roles(None, "member", "community-admin")  # NOTE: no default baseline role
+    """The demo landmine: community has no baseline `member` role -> abort, ERROR emitted."""
+    world.roles(None, "vip", "community-admin")  # NOTE: no default baseline role
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800002", "member")
+    victim = world.member("800002", "vip")
     discord = _Discord([("800002", [])])
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         result = await _run(world, pairing, discord)
 
     assert result.error is None and result.community_roles_demoted == 0
-    assert world.role_of(victim) == "member"
+    assert world.role_of(victim) == "vip"
     hits = _msgs(caplog, "role_sync.demote_aborted_baseline_missing")
     assert len(hits) == 1
-    assert hits[0].levelno == logging.WARNING
+    assert hits[0].levelno == logging.ERROR  # an operator-actionable abort, never silent
     assert f"pairing_id={pairing.id}" in hits[0].getMessage()
     assert f"baseline={BASELINE}" in hits[0].getMessage()
     assert not _msgs(caplog, "role_sync.demote_pass ")  # never claims a pass happened
@@ -340,9 +346,9 @@ async def test_baseline_missing_aborts_loudly_not_silently(
 async def test_baseline_env_override_resolves_and_blank_falls_back(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    world.roles(None, "member", "community-admin", "guest")
+    world.roles(None, "vip", "community-admin", "guest")
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800002", "member")
+    victim = world.member("800002", "vip")
     discord = _Discord([("800002", [])])
 
     monkeypatch.setenv(svc.DEMOTE_BASELINE_ROLE_ENV, "  ")  # blank -> default (absent here)
@@ -381,11 +387,11 @@ async def test_circuit_breaker_boundaries(
     victims = []
     for i in range(would_demote):
         did = f"7000{i:02d}"
-        victims.append(world.member(did, "member"))
+        victims.append(world.member(did, "vip"))
         members.append((did, []))
     for i in range(other_holders):
         did = f"7100{i:02d}"
-        world.member(did, "member")
+        world.member(did, "vip")
         members.append((did, [MEMBER_DISCORD_ROLE]))
     members.sort(key=lambda m: int(m[0]))
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
@@ -396,7 +402,7 @@ async def test_circuit_breaker_boundaries(
     if expected == 0:
         assert len(tripped) == 1 and tripped[0].levelno == logging.ERROR
         assert f"would_demote={would_demote}" in tripped[0].getMessage()
-        assert {world.role_of(v) for v in victims} == {"member"}
+        assert {world.role_of(v) for v in victims} == {"vip"}
     else:
         assert not tripped
         assert {world.role_of(v) for v in victims} == {BASELINE}
@@ -412,11 +418,11 @@ async def test_incomplete_page_cap_demotes_nobody(
     monkeypatch.setattr(svc, "_MAX_PAGES", 2)  # list truncated: a 3rd page exists
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     discord = _Discord([("800001", []), ("800002", [MEMBER_DISCORD_ROLE]), ("800003", [])])
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         result = await _run(world, pairing, discord)
-    assert result.community_roles_demoted == 0 and world.role_of(victim) == "member"
+    assert result.community_roles_demoted == 0 and world.role_of(victim) == "vip"
     hit = _msgs(caplog, "role_sync.demote_aborted_unknown_member_read")
     assert len(hit) == 1 and "complete=False" in hit[0].getMessage()
 
@@ -426,14 +432,14 @@ async def test_malformed_member_row_marks_read_incomplete(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     discord = _Discord([])
     discord.override = lambda _r: httpx.Response(
         200, json=[{"user": {"id": "800001"}, "roles": []}, {"user": {}, "roles": []}]
     )
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         result = await _run(world, pairing, discord)
-    assert result.community_roles_demoted == 0 and world.role_of(victim) == "member"
+    assert result.community_roles_demoted == 0 and world.role_of(victim) == "vip"
     assert _msgs(caplog, "role_sync.demote_aborted_unknown_member_read")
 
 
@@ -442,10 +448,10 @@ async def test_empty_guild_list_demotes_nobody(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         result = await _run(world, pairing, _Discord([]))
-    assert result.community_roles_demoted == 0 and world.role_of(victim) == "member"
+    assert result.community_roles_demoted == 0 and world.role_of(victim) == "vip"
 
 
 # --------------------------------------------------------------------------- Discord failures
@@ -475,14 +481,14 @@ async def test_discord_failure_demotes_nobody_and_logs_type_only(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member", username="bob_secret")
+    victim = world.member("800001", "vip", username="bob_secret")
     discord = _Discord([])
     discord.override = responder
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         result = await _run(world, pairing, discord)
 
     assert result.error == "DiscordSyncError" and result.community_roles_demoted == 0
-    assert world.role_of(victim) == "member"
+    assert world.role_of(victim) == "vip"
     failed = _msgs(caplog, "role_sync.platform_pairing_failed ")
     assert len(failed) == 1 and failed[0].levelno == logging.ERROR
     assert "error_type=DiscordSyncError" in failed[0].getMessage()
@@ -499,20 +505,20 @@ async def test_discord_to_hub_user_to_member_resolution_guards(
     other = world._community("c2")
     world.roles(other)
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     owner = world.member("800002", "community-owner")
     vip = world.member("800003", "vip", granted=False)  # manual role, no sync ledger row
-    left = world.member("800004", "member", active=False)  # inactive membership
+    left = world.member("800004", "vip", active=False)  # inactive membership
     # same hub user also a member of ANOTHER community: must stay untouched
-    elsewhere = world.member("800005", "member")
+    elsewhere = world.member("800005", "vip")
     pg.q(
         world.dal,
-        "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
-        "is_active) VALUES (%s, %s, 'member', "
-        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'member'), true)",
+        "INSERT INTO community_members (community_id, user_id, community_role_id, "
+        "is_active) VALUES (%s, %s, "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'vip'), true)",
         [other, str(elsewhere), other],
     )
-    world.member("800006", "member", community_id=other)  # linked, but only in c2
+    world.member("800006", "vip", community_id=other)  # linked, but only in c2
     discord = _Discord([(f"80000{i}", []) for i in range(1, 7)])
     # present+linked+mapped-role-less: 800001 (victim), 800005 (c1 row too) -> 2 demotions
     result = await _run(world, pairing, discord)
@@ -520,10 +526,10 @@ async def test_discord_to_hub_user_to_member_resolution_guards(
     assert result.community_roles_demoted == 2
     assert world.role_of(victim) == BASELINE
     assert world.role_of(elsewhere) == BASELINE
-    assert world.role_of(elsewhere, other) == "member"  # other community untouched
+    assert world.role_of(elsewhere, other) == "vip"  # other community untouched
     assert world.role_of(owner) == "community-owner"
     assert world.role_of(vip) == "vip"
-    assert world.role_of(left) == "member"
+    assert world.role_of(left) == "vip"
 
 
 async def test_grant_still_applies_and_hub_row_is_never_created(
@@ -531,7 +537,7 @@ async def test_grant_still_applies_and_hub_row_is_never_created(
 ) -> None:
     world.roles()
     pairing = world.pairing(enable_demote=True, mp=monkeypatch)
-    promoted = world.member("800001", "member", granted=False)
+    promoted = world.member("800001", BASELINE, granted=False)
     # linked hub user, but never joined this community -> skipped, no row auto-created
     ghost = int(pg.scalar(world.dal, "INSERT INTO hub_users (username) VALUES ('g') RETURNING id"))
     pg.q(
@@ -568,9 +574,9 @@ async def test_default_is_grant_only_unless_pairing_listed(
         monkeypatch.setenv(svc.DEMOTE_PAIRING_IDS_ENV, str(pairing.id + 1000))
     elif listed == "garbage":
         monkeypatch.setenv(svc.DEMOTE_PAIRING_IDS_ENV, ", ,x,")
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     result = await _run(world, pairing, _Discord([("800001", [])]))
-    assert result.community_roles_demoted == 0 and world.role_of(victim) == "member"
+    assert result.community_roles_demoted == 0 and world.role_of(victim) == "vip"
 
 
 async def test_batch_entrypoint_demotes_and_counts(
@@ -578,7 +584,7 @@ async def test_batch_entrypoint_demotes_and_counts(
 ) -> None:
     world.roles()
     world.pairing(enable_demote=True, mp=monkeypatch)
-    victim = world.member("800001", "member")
+    victim = world.member("800001", "vip")
     discord = _Discord([("800001", [])])
     summary = await svc.run_role_sync_reconcile_batch(
         world.dal,

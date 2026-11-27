@@ -120,9 +120,7 @@ def _seed_linked(admin_db: Any, *, community_id: int, user_id: int, role: str) -
         )
     else:
         role_id = int(row.id)
-    _seed_member(
-        admin_db, community_id=community_id, user_id=user_id, role=role, community_role_id=role_id
-    )
+    _seed_member(admin_db, community_id=community_id, user_id=user_id, community_role_id=role_id)
     return role_id
 
 
@@ -137,6 +135,15 @@ def _role_json(admin_db: Any, community_id: int, name: str) -> dict[str, str]:
     return {"roleId": str(row.public_id)}
 
 
+def _linked_role_name(admin_db: Any, user_id: int) -> str | None:
+    """The name of the role row a member is LINKED to (authority), or None when unlinked."""
+    dal = admin_db.dal
+    member = dal(dal.community_members.user_id == str(user_id)).select().first()
+    if member is None or member.community_role_id is None:
+        return None
+    return str(dal.community_roles[member.community_role_id].name)
+
+
 #: A community member's token: no `users:admin`, so no global-admin bypass.
 _MEMBER_SCOPE = "community:admin"
 
@@ -149,15 +156,12 @@ def _seed_owner_and_appointee(admin_db: Any, community_id: int) -> None:
     _seed_linked(admin_db, community_id=community_id, user_id=APPOINTEE, role="community-admin")
 
 
-def _seed_member(
-    admin_db: Any, *, community_id: int, user_id: int, role: str = "member", **overrides: Any
-) -> int:
+def _seed_member(admin_db: Any, *, community_id: int, user_id: int, **overrides: Any) -> int:
     dal = admin_db.dal
     fields = {
         "community_id": community_id,
         "user_id": str(user_id),
         "user_uuid": f"00000000-0000-4000-8000-{user_id:012d}",
-        "role": role,
         "reputation": 600,
         "is_active": True,
         "joined_at": datetime.now(UTC),
@@ -276,7 +280,7 @@ class TestCommunitySettings:
 class TestMembers:
     async def test_get_members_lists_active(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.get(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members", headers=_headers()
         )
@@ -427,7 +431,7 @@ class TestMembers:
         role = self._seed_role(
             admin_db, community_id, "moderator", 2, ["community:manage_channels"]
         )
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
@@ -444,7 +448,7 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         other = _seed_community(admin_db, name="other-community")
         foreign = self._seed_role(admin_db, other, "moderator", 2, [])
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         url = f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role"
         for rid in (str(uuid.uuid4()), self._rid(admin_db, foreign)):
             response = await client.put(url, headers=_headers(), json={"roleId": rid})
@@ -456,7 +460,7 @@ class TestMembers:
         self, client: Any, admin_db: Any
     ) -> None:
         community_id = _seed_community(admin_db)
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
@@ -521,9 +525,7 @@ class TestMembers:
             json=_role_json(admin_db, community_id, "member"),
         )
         assert response.status_code == 403
-        dal = admin_db.dal
-        owner = dal(dal.community_members.user_id == str(OWNER)).select().first()
-        assert owner.role == "community-owner"
+        assert _linked_role_name(admin_db, OWNER) == "community-owner"
         # control: the same caller CAN change a member it out-scopes (not a blanket deny)
         ok = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(43)}/role",
@@ -548,9 +550,7 @@ class TestMembers:
         for headers in (_headers(user_id=OWNER, scope=_MEMBER_SCOPE), _headers()):
             response = await client.put(url, headers=headers, json=owner_role)
             assert response.status_code == 403
-        dal = admin_db.dal
-        row = dal(dal.community_members.user_id == "43").select().first()
-        assert row.role == "member"
+        assert _linked_role_name(admin_db, 43) == "member"
 
     async def test_only_assignable_system_roles_or_own_custom_roles(
         self, client: Any, admin_db: Any
@@ -576,7 +576,7 @@ class TestMembers:
             url, headers=_headers(), json={"roleId": self._rid(admin_db, speaker)}
         )
         assert refused.status_code == 403
-        assert dal(dal.community_members.user_id == "43").select().first().role == "member"
+        assert _linked_role_name(admin_db, 43) == "member"
         ok = await client.put(url, headers=_headers(), json={"roleId": self._rid(admin_db, custom)})
         assert ok.status_code == 200
         row = dal(dal.community_members.user_id == "43").select().first()
@@ -606,7 +606,6 @@ class TestMembers:
             admin_db,
             community_id=community_id,
             user_id=9,
-            role="moderator",
             community_role_id=mod_role,
         )
         response = await client.put(
@@ -616,11 +615,11 @@ class TestMembers:
         )
         assert response.status_code == 403
 
-    async def test_unlinked_owner_string_grants_nothing(self, client: Any, admin_db: Any) -> None:
-        # A legacy row whose role STRING says owner but links no role row holds no scopes, so it
-        # cannot pass the route's scope gate as a caller.
+    async def test_unlinked_member_grants_nothing(self, client: Any, admin_db: Any) -> None:
+        # A member row that links no role row holds no scopes (the role string is gone, alembic
+        # 0148), so it cannot pass the route's scope gate as a caller.
         community_id = _seed_community(admin_db)
-        _seed_member(admin_db, community_id=community_id, user_id=50, role="community-owner")
+        _seed_member(admin_db, community_id=community_id, user_id=50)
         _seed_linked(admin_db, community_id=community_id, user_id=51, role="member")
         response = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(51)}/role",
@@ -653,7 +652,7 @@ class TestMembers:
     ) -> None:
         community_id = _seed_community(admin_db)
         admin_role = self._seed_role(admin_db, community_id, "community-admin", 1, [])
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         # Caller (user_id=1) is not a member of this community at all --
         # cannot promote someone to an admin-kind role.
         response = await client.put(
@@ -676,17 +675,15 @@ class TestMembers:
             admin_db,
             community_id=community_id,
             user_id=7,
-            role="moderator",
             community_role_id=mod_role,
         )
         _seed_member(
             admin_db,
             community_id=community_id,
             user_id=8,
-            role="community-admin",
             community_role_id=admin_role,
         )
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         by_mod = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(user_id=7),
@@ -719,10 +716,9 @@ class TestMembers:
             admin_db,
             community_id=community_id,
             user_id=7,
-            role="moderator",
             community_role_id=mod_role,
         )
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         headers = _headers(user_id=7, scope="community:admin")
         denied = await client.put(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
@@ -742,10 +738,8 @@ class TestMembers:
     ) -> None:
         community_id = _seed_community(admin_db)
         role = self._seed_role(admin_db, community_id, "custom", 0, ["community:manage_members"])
-        _seed_member(
-            admin_db, community_id=community_id, user_id=9, role="custom", community_role_id=role
-        )
-        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        _seed_member(admin_db, community_id=community_id, user_id=9, community_role_id=role)
+        _seed_member(admin_db, community_id=community_id, user_id=42)
         headers = _headers(user_id=9, scope="community:admin")
         removed = await client.delete(
             f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
@@ -777,21 +771,18 @@ class TestMembers:
             admin_db,
             community_id=community_id,
             user_id=7,
-            role="moderator",
             community_role_id=mod_role,
         )
         _seed_member(
             admin_db,
             community_id=community_id,
             user_id=42,
-            role="community-admin",
             community_role_id=admin_role,
         )
         _seed_member(
             admin_db,
             community_id=community_id,
             user_id=8,
-            role="community-admin",
             community_role_id=admin_role,
         )
         mod = _headers(user_id=7, scope="community:admin")
@@ -998,7 +989,6 @@ class TestTempPassword:
             admin_db,
             community_id=community_id,
             user_id=9,
-            role="moderator",
             community_role_id=mod_role,
         )
         mod = _headers(user_id=9, scope=_MEMBER_SCOPE)
@@ -1162,7 +1152,6 @@ class TestAdminDedicatedScopes:
             admin_db,
             community_id=community_id,
             user_id=user_id,
-            role="custom",
             community_role_id=role_id,
         )
 

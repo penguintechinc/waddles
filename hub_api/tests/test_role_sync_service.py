@@ -671,7 +671,8 @@ def _add_community_member(dal: Any, *, community_id: int, hub_user_id: int, role
     dal.commit()
 
 
-def _get_member_role(dal: Any, *, community_id: int, hub_user_id: int) -> str:
+def _get_member_role(dal: Any, *, community_id: int, hub_user_id: int) -> str | None:
+    """Name of the role row the member is LINKED to (its authority); None when unlinked."""
     row = (
         dal(
             (dal.community_members.community_id == community_id)
@@ -681,7 +682,9 @@ def _get_member_role(dal: Any, *, community_id: int, hub_user_id: int) -> str:
         .first()
     )
     assert row is not None
-    return str(row.role)
+    if row.community_role_id is None:
+        return None
+    return str(dal.community_roles[row.community_role_id].name)
 
 
 def _add_community_role(dal: Any, *, community_id: int, name: str, priority: int = 0) -> None:

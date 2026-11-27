@@ -107,9 +107,7 @@ def _seed_user(auth_db: Any, *, email: str, username: str, email_verified: bool 
     return user_id
 
 
-def _seed_community(
-    auth_db: Any, *, visibility: str = "public", owner_id: str | None = None
-) -> int:
+def _seed_community(auth_db: Any, *, visibility: str = "public") -> int:
     community_id: int = auth_db.dal.communities.insert(
         name=f"acme-{visibility}-{uuid.uuid4()}",
         display_name="Acme",
@@ -118,7 +116,6 @@ def _seed_community(
         is_public=True,
         join_mode="open",
         visibility=visibility,
-        owner_id=owner_id,
         config={},
     )
     auth_db.dal.commit()

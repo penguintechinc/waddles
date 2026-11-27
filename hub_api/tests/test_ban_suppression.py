@@ -120,6 +120,26 @@ def _banned_member(
     return member_id
 
 
+def _member_role(db: Any, community_id: int) -> int:
+    """The community's seeded system `member` role row (the link a ban must never rewrite)."""
+    role_id = db.dal.community_roles.insert(
+        community_id=community_id,
+        name="member",
+        is_system=True,
+        role_kind=3,
+        base_claims={"scopes": ["community:read"]},
+    )
+    db.dal.commit()
+    return int(role_id)
+
+
+def _linked_member(db: Any, *, community_id: int, user_id: int) -> tuple[int, int]:
+    """An active member LINKED to the community's `member` role; returns (member id, role id)."""
+    role_id = _member_role(db, community_id)
+    member_id = _member(db, community_id=community_id, user_id=user_id, community_role_id=role_id)
+    return member_id, role_id
+
+
 def _rows(db: Any) -> list[Any]:
     rows = db.dal(db.dal.suppression_records.id > 0).select(orderby=db.dal.suppression_records.id)
     db.dal.commit()
@@ -400,8 +420,15 @@ class TestErasureBranching:
         _link_identity(db, user_id=user, platform="discord", platform_user_id=PUID)
         community = _community(db, tenant_id=tenant)
         for role in ("moderator", "member", "community-admin", "vip"):
+            role_id = db.dal.community_roles.insert(
+                community_id=community, name=role, is_system=True, base_claims={"scopes": []}
+            )
             _member(
-                db, community_id=community, user_id=user, platform_user_id=f"id-{role}", role=role
+                db,
+                community_id=community,
+                user_id=user,
+                platform_user_id=f"id-{role}",
+                community_role_id=int(role_id),
             )
 
         await _erase(db, user)
@@ -637,7 +664,7 @@ class TestReturnRecatch:
         db.dal.commit()
         # the restriction is re-applied as STATE; the role link is never rewritten
         assert (row.membership_state, row.is_active) == (2, False)
-        assert row.role != "banned"
+        assert row.community_role_id is None  # a ban never mints a role link
 
     async def test_recatch_upgrades_an_existing_membership_instead_of_adding_a_second(
         self, db: Any
@@ -647,7 +674,7 @@ class TestReturnRecatch:
         target = _community(db, tenant_id=tenant, name="existing")
         returning = _user(db, name="existing-member")
         _link_identity(db, user_id=returning, platform="discord", platform_user_id=PUID)
-        _member(db, community_id=target, user_id=returning, role="member")
+        _linked_member(db, community_id=target, user_id=returning)
 
         assert await _check(db, community_id=target, user_id=returning) is not None
 
@@ -925,11 +952,11 @@ class TestReapplyAfterIdentityLink:
         beta = _tenant(db, "beta")
         _insert_row(db, tenant_id=acme)
         user = _user(db, name="joiner")
-        acme_member = _member(
-            db, community_id=_community(db, tenant_id=acme), user_id=user, role="member"
+        acme_member, acme_role = _linked_member(
+            db, community_id=_community(db, tenant_id=acme), user_id=user
         )
-        beta_member = _member(
-            db, community_id=_community(db, tenant_id=beta), user_id=user, role="member"
+        beta_member, _ = _linked_member(
+            db, community_id=_community(db, tenant_id=beta), user_id=user
         )
         _link_identity(db, user_id=user, platform="discord", platform_user_id=PUID)
 
@@ -938,7 +965,7 @@ class TestReapplyAfterIdentityLink:
         assert banned == 1
         acme_row = _member_row(db, acme_member)
         assert (acme_row.membership_state, acme_row.is_active) == (2, False)
-        assert acme_row.role == "member"  # the role link is untouched by a ban
+        assert acme_row.community_role_id == acme_role  # the role link is untouched by a ban
         assert _member_row(db, beta_member).membership_state == 1  # per tenant only
 
     async def test_an_already_banned_membership_is_not_recounted(self, db: Any) -> None:
@@ -972,15 +999,15 @@ class TestReapplyAfterIdentityLink:
         tenant = _tenant(db, "acme")
         _insert_row(db, tenant_id=tenant, platform_user_id="someone-else")
         user = _user(db, name="clean")
-        member = _member(
-            db, community_id=_community(db, tenant_id=tenant), user_id=user, role="member"
+        member, role_id = _linked_member(
+            db, community_id=_community(db, tenant_id=tenant), user_id=user
         )
         _link_identity(db, user_id=user, platform="discord", platform_user_id=PUID)
 
         assert (
             await bs.reapply_for_hub_user_async(db, db.dal, hub_user_id=user, keys=_source()) == 0
         )
-        assert _member_row(db, member).role == "member"
+        assert _member_row(db, member).community_role_id == role_id
 
     async def test_a_key_failure_with_live_rows_propagates(
         self, db: Any, monkeypatch: pytest.MonkeyPatch
@@ -1133,7 +1160,9 @@ class TestStoreEdges:
         user = _user(db, name="lifted")
         community = _community(db, tenant_id=tenant)
         member = _banned_member(db, community_id=community, user_id=user)
-        role_before = _member_row(db, member).role
+        role_before = _member_role(db, community)  # linked before the ban
+        db.dal(db.dal.community_members.id == member).update(community_role_id=role_before)
+        db.dal.commit()
         other = _member(db, community_id=_community(db, tenant_id=tenant), user_id=user)
 
         restored = bs.lift_membership_ban(
@@ -1144,7 +1173,7 @@ class TestStoreEdges:
         row = _member_row(db, member)
         assert restored == 1
         assert (row.membership_state, row.is_active) == (1, True)
-        assert row.role == role_before  # the role link was never touched
+        assert row.community_role_id == role_before  # the role link was never touched
         assert _member_row(db, other).membership_state == 1  # an ACTIVE row is left alone
         assert (
             bs.lift_membership_ban(

@@ -37,7 +37,7 @@ def _temp_row(auth_db: Any, *, community_id: int, hub_user_id: int | None, ident
 
 
 def _member(auth_db: Any, *, community_id: int, user_id: int, **fields: Any) -> None:
-    row = {"role": "member", "is_active": True, "joined_at": datetime.now(UTC), **fields}
+    row = {"is_active": True, "joined_at": datetime.now(UTC), **fields}
     auth_db.dal.community_members.insert(community_id=community_id, user_id=str(user_id), **row)
     auth_db.dal.commit()
 
