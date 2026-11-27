@@ -218,9 +218,10 @@ async def create_community_capped(
     """Insert a community unless the caller's tenant already holds its 1 free community.
 
     In the SAME transaction (all-or-nothing): seed the community's system roles and, when
-    ``creator_id`` is given, make that user an active member holding the system admin role -- so
-    the creator resolves the admin scopes from the moment the community exists. A failure rolls
-    everything back, so no half-created community can count toward the cap.
+    ``creator_id`` is given, make that user an active member holding the seeded system owner role
+    -- so the creator resolves the full admin-kind scopes (and owner protection) from the moment
+    the community exists. A failure rolls everything back, so no half-created community can count
+    toward the cap.
     """
 
     def _write(d: Any) -> int:
@@ -230,7 +231,7 @@ async def create_community_capped(
             member_roles.set_member_role(
                 d,
                 community_id=new_id,
-                role=member_roles.COMMUNITY_ADMIN_ROLE,
+                role=member_roles.COMMUNITY_OWNER_ROLE,
                 user_id=creator_id,
                 add=True,
             )

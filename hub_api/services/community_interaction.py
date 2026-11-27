@@ -19,7 +19,7 @@ from .community_common import ensure_community_tables, sql_bool
 from .community_public_id import lookup_public_ids_sync
 from .community_relay import relay_message
 from .errors import ApiError
-from .member_roles import COMMUNITY_MEMBER_ROLE, set_member_role
+from .member_roles import COMMUNITY_MEMBER_ROLE, SYSTEM_ROLE_NAMES, set_member_role
 from .public_ids import Scope, lookup_public_ids, parse_public_id, resolve_public_id_sync
 from .scope_registry import (
     KIND_CUSTOM,
@@ -633,6 +633,9 @@ def create_community_role(
     name = (payload.get("name") or "").strip()
     if not name:
         return None, "Role name is required"
+    if name.lower() in SYSTEM_ROLE_NAMES:
+        # A custom row holding a system name could shadow the seeded system role.
+        raise ApiError("Role name is reserved for a system role", 400, "ROLE_NAME_RESERVED")
     priority = payload.get("priority", 0)
     if priority is not None and not (0 <= priority <= 49):
         return None, "Custom role priority must be between 0 and 49"

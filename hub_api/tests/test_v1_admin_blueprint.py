@@ -96,6 +96,58 @@ def _seed_admin_actor(admin_db: Any, user_id: int = 1) -> None:
         dal.commit()
 
 
+def _seed_linked(admin_db: Any, *, community_id: int, user_id: int, role: str) -> int:
+    """Seed (once) the SYSTEM role row ``role`` and an active member LINKED to it; return its id.
+
+    The seeded admin/owner names get the admin kind (full computed scopes), others fixed.
+    """
+    dal = admin_db.dal
+    row = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
+        .select()
+        .first()
+    )
+    if row is None:
+        role_id = int(
+            dal.community_roles.insert(
+                community_id=community_id,
+                name=role,
+                is_system=True,
+                role_kind=1 if role in ("community-owner", "community-admin") else 3,
+                base_claims={"scopes": []},
+            )
+        )
+    else:
+        role_id = int(row.id)
+    _seed_member(
+        admin_db, community_id=community_id, user_id=user_id, role=role, community_role_id=role_id
+    )
+    return role_id
+
+
+def _role_json(admin_db: Any, community_id: int, name: str) -> dict[str, str]:
+    """Request body assigning the community's role row ``name`` (by its public UUID)."""
+    dal = admin_db.dal
+    row = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    return {"roleId": str(row.public_id)}
+
+
+#: A community member's token: no `users:admin`, so no global-admin bypass.
+_MEMBER_SCOPE = "community:admin"
+
+#: The owner (42) and an admin (7) the owner appointed, both linked to their system role rows.
+OWNER, APPOINTEE = 42, 7
+
+
+def _seed_owner_and_appointee(admin_db: Any, community_id: int) -> None:
+    _seed_linked(admin_db, community_id=community_id, user_id=OWNER, role="community-owner")
+    _seed_linked(admin_db, community_id=community_id, user_id=APPOINTEE, role="community-admin")
+
+
 def _seed_member(
     admin_db: Any, *, community_id: int, user_id: int, role: str = "member", **overrides: Any
 ) -> int:
@@ -429,6 +481,76 @@ class TestMembers:
         )
         assert response.status_code == 403
 
+    async def test_update_member_role_cannot_change_owner(self, client: Any, admin_db: Any) -> None:
+        # Regression (PR #1539 review): an admin the creator appointed holds every scope, yet can
+        # never demote the owner -- decided by the LINKED system owner role, not the role string.
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}/role",
+            headers=_headers(user_id=APPOINTEE, scope=_MEMBER_SCOPE),
+            json=_role_json(admin_db, community_id, "member"),
+        )
+        assert response.status_code == 403
+        dal = admin_db.dal
+        owner = dal(dal.community_members.user_id == str(OWNER)).select().first()
+        assert owner.role == "community-owner"
+        # control: the same caller CAN change a member it out-scopes (not a blanket deny)
+        ok = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(43)}/role",
+            headers=_headers(user_id=APPOINTEE, scope=_MEMBER_SCOPE),
+            json=_role_json(admin_db, community_id, "member"),
+        )
+        assert ok.status_code == 200
+
+    async def test_global_admin_may_change_owner(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}/role",
+            headers=_headers(),  # `users:admin` = global admin bypass
+            json=_role_json(admin_db, community_id, "member"),
+        )
+        assert response.status_code == 200
+
+    async def test_moderator_cannot_change_admin_it_does_not_outscope(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=43, role="member")
+        mod_role = self._seed_role(
+            admin_db, community_id, "moderator", 2, ["members:roles.manage", "community:read"]
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=9,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(APPOINTEE)}/role",
+            headers=_headers(user_id=9, scope=_MEMBER_SCOPE),
+            json=_role_json(admin_db, community_id, "member"),
+        )
+        assert response.status_code == 403
+
+    async def test_unlinked_owner_string_grants_nothing(self, client: Any, admin_db: Any) -> None:
+        # A legacy row whose role STRING says owner but links no role row holds no scopes, so it
+        # cannot pass the route's scope gate as a caller.
+        community_id = _seed_community(admin_db)
+        _seed_member(admin_db, community_id=community_id, user_id=50, role="community-owner")
+        _seed_linked(admin_db, community_id=community_id, user_id=51, role="member")
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(51)}/role",
+            headers=_headers(user_id=50, scope="community:read"),
+            json=_role_json(admin_db, community_id, "member"),
+        )
+        assert response.status_code == 403
+
     @staticmethod
     def _rid(admin_db: Any, role_id: int) -> str:
         return str(admin_db.dal.community_roles[role_id].public_id)
@@ -709,6 +831,32 @@ class TestMembers:
         )
         assert response.status_code == 403
 
+    async def test_remove_member_cannot_remove_owner(self, client: Any, admin_db: Any) -> None:
+        # Regression (PR #1539 review): the creator's appointee can never kick the owner.
+        community_id = _seed_community(admin_db, member_count=2)
+        _seed_owner_and_appointee(admin_db, community_id)
+        response = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}",
+            headers=_headers(user_id=APPOINTEE, scope=_MEMBER_SCOPE),
+            json={},
+        )
+        assert response.status_code == 403
+        dal = admin_db.dal
+        owner = dal(dal.community_members.user_id == str(OWNER)).select().first()
+        assert owner.is_active is True
+        assert dal.communities[community_id].member_count == 2
+
+    async def test_global_admin_may_remove_owner(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db, member_count=2)
+        _seed_owner_and_appointee(admin_db, community_id)
+        response = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(OWNER)}",
+            headers=_headers(),  # `users:admin` = global admin bypass
+            json={},
+        )
+        assert response.status_code == 200
+        assert admin_db.dal.communities[community_id].member_count == 1
+
     async def test_remove_member_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.delete(
@@ -925,5 +1073,103 @@ class TestAdminDedicatedScopes:
             f"/api/v1/admin/{public_id(admin_db, community_id)}/temp-password",
             headers=_headers(user_id=11, scope=""),
             json={"userId": 42},
+        )
+        assert response.status_code == 403
+
+
+class TestMemberTargetGuardParity:
+    """Every admin route that acts on another member goes through the one owner/scope rule."""
+
+    #: (rule suffix after `/<community>/`, method) for each member-targeting route.
+    ROUTES = {
+        ("members/<user_id>/role", "PUT"),
+        ("members/<user_id>/reputation", "PUT"),
+        ("members/<user_id>", "DELETE"),
+        ("reputation/soft-bans/<user_id>", "PUT"),
+        ("reputation/soft-bans/<user_id>", "DELETE"),
+    }
+
+    @staticmethod
+    def _member_target_routes(app: Quart) -> set[tuple[str, str]]:
+        found: set[tuple[str, str]] = set()
+        for rule in app.url_map.iter_rules():
+            if "user_id" not in rule.arguments or not rule.rule.startswith("/api/v1/admin/"):
+                continue
+            suffix = rule.rule.split("/", 5)[5].replace("<uuuid:user_id>", "<user_id>")
+            if not suffix.startswith(("members/", "reputation/")):
+                continue
+            for method in rule.methods - {"HEAD", "OPTIONS"}:
+                found.add((suffix, method))
+        return found
+
+    async def test_routes_enumerated_and_each_invokes_the_shared_rule(
+        self, app: Quart, client: Any, admin_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from services import community_authz
+
+        assert self._member_target_routes(app) == self.ROUTES  # a new route must be added here
+        community_id = _seed_community(admin_db, member_count=3)
+        _seed_owner_and_appointee(admin_db, community_id)
+        _seed_linked(admin_db, community_id=community_id, user_id=49, role="member")
+        bodies = {
+            "members/<user_id>/role": _role_json(admin_db, community_id, "member"),
+            "members/<user_id>/reputation": {"amount": 1},
+            "members/<user_id>": {},
+            "reputation/soft-bans/<user_id>": {},
+        }
+        calls: list[int] = []
+        original = community_authz.check_target_member
+
+        def spy(*args: Any, **kwargs: Any) -> None:
+            calls.append(1)
+            original(*args, **kwargs)
+
+        monkeypatch.setattr(community_authz, "check_target_member", spy)
+        examined = 0
+        for index, (suffix, method) in enumerate(sorted(self.ROUTES)):
+            before = len(calls)
+            target = 50 + index  # a fresh member per route (the remove route deactivates it)
+            _seed_linked(admin_db, community_id=community_id, user_id=target, role="member")
+            url = f"/api/v1/admin/{public_id(admin_db, community_id)}/" + suffix.replace(
+                "<user_id>", uid(target)
+            )
+            response = await client.open(
+                url, method=method, headers=_headers(), json=bodies[suffix]
+            )
+            assert len(calls) > before, f"{method} {suffix} skipped the shared guard"
+            assert response.status_code != 500
+            examined += 1
+        assert examined == len(self.ROUTES) == 5
+
+    @pytest.mark.parametrize(
+        "suffix", ["reputation/soft-bans/<user_id>", "members/<user_id>/reputation"]
+    )
+    async def test_appointee_cannot_act_on_owner(
+        self, client: Any, admin_db: Any, suffix: str
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        url = f"/api/v1/admin/{public_id(admin_db, community_id)}/" + suffix.replace(
+            "<user_id>", uid(OWNER)
+        )
+        body: dict[str, Any] = {"amount": 1} if suffix.endswith("reputation") else {}
+        response = await client.open(
+            url,
+            method="PUT",
+            headers=_headers(user_id=APPOINTEE, scope=_MEMBER_SCOPE),
+            json=body,
+        )
+        assert response.status_code == 403
+        # control: a global admin (bypass) is not blocked by the owner rule
+        _seed_admin_actor(admin_db)
+        ok = await client.open(url, method="PUT", headers=_headers(), json=body)
+        assert ok.status_code != 403, await ok.get_json()
+
+    async def test_appointee_cannot_clear_owner_soft_ban(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        _seed_owner_and_appointee(admin_db, community_id)
+        response = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/reputation/soft-bans/{uid(OWNER)}",
+            headers=_headers(user_id=APPOINTEE, scope=_MEMBER_SCOPE),
         )
         assert response.status_code == 403

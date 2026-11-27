@@ -2354,10 +2354,11 @@ def bypass_route_guards(monkeypatch: Any) -> Any:
 def sqlite_community_role_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
     """On sqlite DALs, stand in for the Postgres-only `seed_community_system_roles()` function.
 
-    sqlite has no stored functions, so this inserts just the two predefined rows the create/join
-    paths link members to, by NAME and KIND only (the admin kind's scopes are computed from the
-    registry; no scope list is copied here). Postgres DALs always run the real SQL function --
-    `tests/test_community_role_seeding_pg.py` proves the real path.
+    sqlite has no stored functions, so this inserts just the predefined rows the create/join
+    paths link members to (plus the admin role an owner appoints), by NAME and KIND only (the
+    admin kind's scopes are computed from the registry; no scope list is copied here). Postgres
+    DALs always run the real SQL function -- `tests/test_community_role_seeding_pg.py` proves the
+    real path.
     """
     from services import member_roles
     from services.scope_registry import KIND_ADMIN, KIND_FIXED
@@ -2370,6 +2371,7 @@ def sqlite_community_role_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
             return
         roles = dal.community_roles
         for name, kind in (
+            (member_roles.COMMUNITY_OWNER_ROLE, KIND_ADMIN),
             (member_roles.COMMUNITY_ADMIN_ROLE, KIND_ADMIN),
             (member_roles.COMMUNITY_MEMBER_ROLE, KIND_FIXED),
         ):

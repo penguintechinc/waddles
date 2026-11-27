@@ -140,7 +140,7 @@ from services.credential_resolver import (
     TransportUnavailable,
 )
 from services.guild_pairing import INBOUND_COMMUNITY_ROLES, list_bindings
-from services.member_roles import set_member_role
+from services.member_roles import COMMUNITY_MEMBER_ROLE, role_by_name_query, set_member_role
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
 from services.scope_registry import KIND_ADMIN
 from services.sync_worker_dal import open_worker_dal
@@ -167,9 +167,9 @@ _MAX_RETRY_AFTER_SECONDS = 10.0
 #: `guild_tenant_pairings.id` list. Unset/empty (the default) = grant-only, exactly the
 #: pre-existing behaviour -- no deploy demotes anyone until a pairing is listed here.
 DEMOTE_PAIRING_IDS_ENV = "ROLE_SYNC_DEMOTE_PAIRING_IDS"
-#: Role a demoted member falls back to (never null). Default `community-member`.
+#: Role a demoted member falls back to (never null). Default the seeded system baseline (`member`).
 DEMOTE_BASELINE_ROLE_ENV = "ROLE_SYNC_DEMOTE_BASELINE_ROLE"
-_DEFAULT_DEMOTE_BASELINE_ROLE = "community-member"
+_DEFAULT_DEMOTE_BASELINE_ROLE = COMMUNITY_MEMBER_ROLE
 #: Circuit breaker: one pass may demote at most this many members unless that is also
 #: <= `_DEMOTE_MAX_FRACTION` of the linked holders of sync-managed roles.
 _DEMOTE_ABS_FLOOR = 3
@@ -744,11 +744,7 @@ def _community_role_priorities(dal: Any, community_id: int) -> dict[str, int]:
 def _role_row_by_name(dal: Any, community_id: int, name: str) -> Any | None:
     """Resolve a binding/ledger role NAME (a config identifier) to its `community_roles` row."""
     bind_auth_tables(dal)
-    return (
-        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
-        .select()
-        .first()
-    )
+    return dal(role_by_name_query(dal, community_id, name)).select().first()
 
 
 def _member_role_row(dal: Any, member: Any) -> Any | None:
@@ -807,14 +803,15 @@ def _community_grant(dal: Any, community_id: int, hub_user_id: int) -> Any | Non
 def _set_member_role(dal: Any, member: Any, community_id: int, role: str) -> None:
     """Write `role` (+ its `community_role_id`) and reset the claims cache; caller commits.
 
-    Non-strict: a synced role the community never defined links no role row (no scopes), as before.
+    Strict: role-sync never writes a NULL link. Every caller pre-checks the role row exists (a
+    missing one is refused as `"role_missing"`); a `LookupError` here is a bug, never a silent
+    scope-less member.
     """
     set_member_role(
         dal,
         community_id=community_id,
         role=role,
         members=dal.community_members.id == member.id,
-        strict=False,
     )
 
 
@@ -906,7 +903,7 @@ def _revoke_community_grant(
 
     Only a grant this pairing recorded, still matching the member's current role, is undone; a
     role an admin changed since is left alone (the stale ledger row is dropped).
-    Returns `"applied"` / `"not_owned"` / `"not_a_member"`.
+    Returns `"applied"` / `"not_owned"` / `"not_a_member"` / `"role_missing"`.
     """
     grant = _community_grant(dal, community_id, hub_user_id)
     if grant is None or int(grant.pairing_id) != pairing_id:
@@ -930,6 +927,16 @@ def _revoke_community_grant(
             restore_row = _role_row_by_name(dal, community_id, restore)
         if _role_rank(restore_row) > _role_rank(granted_row):
             restore = baseline_role  # defensive: a revoke never raises anyone
+            restore_row = _role_row_by_name(dal, community_id, restore)
+        if restore_row is None:
+            # Never write a NULL link: the member keeps the granted role, the ledger row stays.
+            logger.error(
+                "role_sync.revoke_role_missing community_id=%s pairing_id=%s baseline=%s",
+                community_id,
+                pairing_id,
+                baseline_role,
+            )
+            return "role_missing"
         _set_member_role(dal, member, community_id, restore)
         dal(g.id == grant.id).delete()
         dal.commit()
@@ -968,16 +975,10 @@ def _run_demote_pass(
         )
         return 0
     bind_auth_tables(dal)
-    has_baseline = (
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.name == baseline_role)
-        )
-        .select()
-        .first()
-    )
+    # Reserved (seeded) baseline names resolve to the `is_system` row only, never a custom shadow.
+    has_baseline = _role_row_by_name(dal, community_id, baseline_role)
     if has_baseline is None:
-        logger.warning(
+        logger.error(
             "role_sync.demote_aborted_baseline_missing pairing_id=%s baseline=%s",
             pairing_id,
             baseline_role,

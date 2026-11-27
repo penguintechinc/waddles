@@ -148,19 +148,19 @@ ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
     ),
     "admin profile update": (
         "services/community_profile_service.py",
-        202,
+        185,
         "require_community_scope",
     ),
-    "admin logo upload": ("services/community_profile_service.py", 269, "require_community_scope"),
-    "admin logo delete": ("services/community_profile_service.py", 293, "require_community_scope"),
+    "admin logo upload": ("services/community_profile_service.py", 254, "require_community_scope"),
+    "admin logo delete": ("services/community_profile_service.py", 278, "require_community_scope"),
     "admin banner upload": (
         "services/community_profile_service.py",
-        317,
+        302,
         "require_community_scope",
     ),
     "admin banner delete": (
         "services/community_profile_service.py",
-        343,
+        328,
         "require_community_scope",
     ),
     "admin interaction/roles": (
@@ -168,7 +168,7 @@ ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
         282,
         "resolve_editor_scopes",
     ),
-    "admin reputation/": ("services/admin_service.py", 356, "require_community_admin"),
+    "admin reputation/": ("services/admin_service.py", 428, "require_community_admin"),
     "admin streams": ("blueprints/v1/streaming.py", 129, "scope=SCOPE_STREAM_CONFIG"),
     "bundles gateway membership": (
         "blueprints/v1/bundle_admin_gateway.py",

@@ -27,3 +27,9 @@ def is_banned(member: Any) -> bool:
     """True iff the member row is in the BANNED state (a missing/NULL column is ACTIVE)."""
     raw = getattr(member, MEMBERSHIP_STATE_FIELD, None)
     return raw is not None and int(raw) == MembershipState.BANNED
+
+
+def not_banned(dal: Any) -> Any:
+    """Query term: the `community_members` row is not BANNED (a NULL state is ACTIVE)."""
+    state = dal.community_members.membership_state
+    return (state == None) | (state != MembershipState.BANNED)  # noqa: E711 - pydal Field

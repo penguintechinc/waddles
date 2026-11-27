@@ -28,6 +28,7 @@ import pytest
 from services import role_sync_service as svc
 from services.credential_resolver import PlatformCredentials, TransportUnavailable
 from services.guild_pairing import create_binding, create_pairing, update_pairing
+from services.member_roles import SYSTEM_ROLE_NAMES
 
 _DISCORD_GUILD_ID = "123456789012345678"  # gitleaks:allow - fake snowflake, not a secret
 _TIER1_ROLE = "111111111111111111"
@@ -649,6 +650,7 @@ def _ensure_role(dal: Any, community_id: int, name: str, priority: int | None = 
         dal.community_roles.insert(
             community_id=community_id,
             name=name,
+            is_system=name in SYSTEM_ROLE_NAMES,
             priority=prio,
             role_kind=kind,
             base_claims={"scopes": scopes},
@@ -1228,7 +1230,7 @@ def _demote_setup(
 ) -> Any:
     """Pairing + baseline role + linked members `{hub_id: (discord_id, role)}`."""
     pairing = _make_platform_pairing(dal, community_id)
-    _add_community_role(dal, community_id=community_id, name="community-member")
+    _add_community_role(dal, community_id=community_id, name="member")
     if enable:
         monkeypatch.setenv(svc.DEMOTE_PAIRING_IDS_ENV, str(pairing.id))
     else:
@@ -1239,9 +1241,7 @@ def _demote_setup(
     return pairing
 
 
-def _grant(
-    dal: Any, cid: int, pairing: Any, hub_id: int, role: str, prior: str = "community-member"
-) -> None:
+def _grant(dal: Any, cid: int, pairing: Any, hub_id: int, role: str, prior: str = "member") -> None:
     """Seed a role-sync ledger row: sync itself granted `role` (replacing `prior`)."""
     dal.role_sync_community_grants.insert(
         pairing_id=pairing.id,
@@ -1278,7 +1278,7 @@ class TestGuardedDemote:
         result = await _run(dal, pairing, client)
         assert result.error is None
         assert result.community_roles_demoted == 1
-        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "community-member"
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_present_with_mapped_role_stays(
         self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -1411,3 +1411,50 @@ class TestListGuildMembersChecked:
         monkeypatch.setattr(svc, "_MAX_PAGES", 2)
         capped = await _client(2).list_guild_members_checked(guild_id=_DISCORD_GUILD_ID)
         assert capped.complete is False
+
+
+class TestNeverNullLink:
+    """Role-sync never writes a NULL role link: a missing target row is refused loudly."""
+
+    def test_undefined_target_role_is_refused_and_link_kept(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _add_community_member(dal, community_id=cid, hub_user_id=1, role="member")
+        before = dal(dal.community_members.user_id == "1").select().first().community_role_id
+        assert before is not None
+        outcome = svc._apply_community_role(
+            dal, community_id=cid, hub_user_id=1, desired_role="vip", pairing_id=1
+        )
+        assert outcome == "role_missing"
+        after = dal(dal.community_members.user_id == "1").select().first().community_role_id
+        assert after == before
+
+    def test_revoke_with_missing_baseline_keeps_grant_and_role(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        pairing = _make_platform_pairing(dal, cid)
+        _add_community_role(dal, community_id=cid, name="vip", priority=5)
+        _add_community_member(dal, community_id=cid, hub_user_id=1, role="vip")
+        dal(
+            (dal.community_roles.community_id == cid) & (dal.community_roles.name == "member")
+        ).delete()
+        dal.commit()
+        _grant(dal, cid, pairing, 1, "vip", prior="")
+        outcome = svc._revoke_community_grant(
+            dal, community_id=cid, hub_user_id=1, pairing_id=pairing.id, baseline_role="member"
+        )
+        assert outcome == "role_missing"
+        assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "vip"
+        assert dal(dal.role_sync_community_grants.hub_user_id == 1).count() == 1
+
+    def test_reserved_baseline_name_never_resolves_to_a_custom_row(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        dal.community_roles.insert(
+            community_id=cid,
+            name="member",
+            is_system=False,
+            role_kind=3,
+            base_claims={"scopes": []},
+        )
+        dal.commit()
+        assert svc._role_row_by_name(dal, cid, "member") is None

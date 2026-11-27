@@ -23,6 +23,7 @@ from services import guild_pairing as pairing_svc
 from services import role_sync_inbound_service as inbound
 from services import role_sync_service as svc
 from services.errors import ApiError
+from services.member_roles import COMMUNITY_MEMBER_ROLE
 from services.role_sync_remediation import STATUS_DEMOTED, remediate_purged_bindings
 from tests import demo_pg_support as pg
 from tests.test_role_sync_service import (
@@ -102,9 +103,16 @@ class _World:
             pg.q(
                 dal,
                 "INSERT INTO community_roles "
-                "(community_id, name, priority, role_kind, base_claims) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                [self.cid, name, prio, kind, json.dumps({"scopes": scopes})],
+                "(community_id, name, priority, role_kind, base_claims, is_system) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                [
+                    self.cid,
+                    name,
+                    prio,
+                    kind,
+                    json.dumps({"scopes": scopes}),
+                    name == COMMUNITY_MEMBER_ROLE,
+                ],
             )
 
     def pairing(
@@ -742,3 +750,19 @@ def test_remediation_queues_by_default_and_demotes_with_apply(world: _World) -> 
 def test_remediation_with_nothing_purged_reports_zero(world: _World) -> None:
     report = remediate_purged_bindings(world.dal, apply=True)
     assert report.purged_bindings_examined == 0 and report.demoted == 0
+
+
+def test_remediation_apply_refuses_when_baseline_role_missing(world: _World) -> None:
+    """No baseline row: never write a NULL link -- the member keeps the role, stays queued."""
+    pairing = world.pairing()
+    _purged(world, pairing, "community-admin")
+    promoted = world.member("800060", "community-admin")
+    pg.q(
+        world.dal,
+        "DELETE FROM community_roles WHERE community_id = %s AND name = 'member'",
+        [world.cid],
+    )
+    report = remediate_purged_bindings(world.dal, apply=True)
+    assert (report.candidates, report.demoted, report.role_missing) == (1, 0, 1)
+    assert world.role_of(promoted) == "community-admin"
+    assert pg.scalar(world.dal, "SELECT status FROM role_sync_remediation_queue") == 0

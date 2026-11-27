@@ -21,6 +21,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
+from services.member_roles import is_owner_role
 from services.tenant_key_provisioning import TenantKeyProvisioningError
 from tests.community_ids import (
     UNKNOWN_PUBLIC_ID,
@@ -112,6 +113,12 @@ def _seed_module(admin_db: Any, **overrides: Any) -> int:
     return module_id
 
 
+def _is_linked_owner(dal: Any, member: Any) -> bool:
+    """True iff the member links (`community_role_id`) the seeded system owner role row."""
+    role_row = dal(dal.community_roles.id == member.community_role_id).select().first()
+    return is_owner_role(role_row)
+
+
 class TestScopeEnforcement:
     async def test_dashboard_no_token_is_401(self, client: Any) -> None:
         response = await client.get("/api/v1/superadmin/dashboard")
@@ -194,7 +201,7 @@ class TestCommunityManagement:
     async def test_create_community_stores_canonical_owner_role(
         self, client: Any, admin_db: Any
     ) -> None:
-        # regression: owner row was written as 'owner'; every gate expects 'community-owner'
+        # regression: the creator must LINK the seeded system owner role (not just carry a string)
         response = await client.post(
             "/api/v1/superadmin/communities",
             headers=_headers(),
@@ -202,7 +209,8 @@ class TestCommunityManagement:
         )
         assert response.status_code == 201
         rows = admin_db.dal(admin_db.dal.community_members.id > 0).select()
-        assert [(r.user_id, r.role) for r in rows] == [("1", "community-owner")]
+        assert [r.user_id for r in rows] == ["1"]
+        assert _is_linked_owner(admin_db.dal, rows[0])
 
     async def test_reassign_owner_keeps_canonical_owner_role(
         self, client: Any, admin_db: Any
@@ -226,7 +234,8 @@ class TestCommunityManagement:
         )
         assert response.status_code == 200
         rows = admin_db.dal(admin_db.dal.community_members.community_id == community_id).select()
-        assert [r.role for r in rows] == ["community-owner"]
+        assert len(rows) == 1
+        assert _is_linked_owner(admin_db.dal, rows[0])
 
     async def test_create_community_missing_platform_is_400(self, client: Any) -> None:
         response = await client.post(

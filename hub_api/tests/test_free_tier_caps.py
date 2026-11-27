@@ -230,25 +230,25 @@ class TestCommunityAtomicity:
         assert admin_db.dal(admin_db.dal.community_roles.id > 0).count() == 0
         assert (await _post_community(client, "retry")).status_code == 201
 
-    async def test_success_creates_community_and_admin_member_together(
+    async def test_success_creates_community_and_owner_member_together(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
         assert (await _post_community(client, "first")).status_code == 201
         dal = admin_db.dal
-        admin_role = dal(dal.community_roles.name == member_roles.COMMUNITY_ADMIN_ROLE).select()
-        assert len(admin_role) == 1
+        owner_role = dal(dal.community_roles.name == member_roles.COMMUNITY_OWNER_ROLE).select()
+        assert len(owner_role) == 1
         members = dal(dal.community_members.id > 0).select()
         assert [(m.user_id, m.role, m.community_role_id) for m in members] == [
-            ("1", member_roles.COMMUNITY_ADMIN_ROLE, admin_role[0].id)
+            ("1", member_roles.COMMUNITY_OWNER_ROLE, owner_role[0].id)
         ]
 
-    async def test_unseeded_admin_role_fails_loudly_and_nothing_stored(
+    async def test_unseeded_owner_role_fails_loudly_and_nothing_stored(
         self, admin_db: Any, gates: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The creator must be linked to a real role row; a missing one never stores a role-less
         # (scope-less) creator.
         monkeypatch.setattr(member_roles, "seed_community_system_roles", lambda _d, _cid: None)
-        with pytest.raises(LookupError, match="community-admin"):
+        with pytest.raises(LookupError, match="community-owner"):
             await free_tier_caps.create_community_capped(
                 admin_db,
                 admin_db.dal,

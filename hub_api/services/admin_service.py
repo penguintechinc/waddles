@@ -41,9 +41,9 @@ from flask_core.tenancy import TenantContext
 
 from services import community_authz, community_interaction
 from services import community_reputation_service as reputation_svc
-from services.errors import bad_request, conflict, forbidden, not_found
-from services.member_roles import ASSIGNABLE_MEMBER_ROLES, set_member_role_async
-from services.membership_state import MembershipState
+from services.errors import bad_request, forbidden, not_found
+from services.member_roles import ASSIGNABLE_MEMBER_ROLES, run_write_job, set_member_role
+from services.membership_state import not_banned
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
 
@@ -221,53 +221,18 @@ async def update_module_config(
 # ── Member management ───────────────────────────────────────────────────
 
 
-def _not_banned(dal: Any) -> Any:
-    """Query term: membership is not BANNED (a NULL state is ACTIVE)."""
-    state = dal.community_members.membership_state
-    return (state == None) | (state != MembershipState.BANNED)  # noqa: E711 - pydal Field
-
-
-async def _role_by_public_id(
-    async_dal: Any, dal: Any, *, community_id: int, role_uuid: str
-) -> Any | None:
-    """The `community_roles` row with this public UUID in THIS community (None if absent)."""
+def _parse_role_uuid(role_uuid: str) -> str:
+    """Canonical form of a role's public UUID; 400 when it is not a UUID."""
     try:
-        role_uuid = str(uuid.UUID(role_uuid))
+        return str(uuid.UUID(role_uuid))
     except (ValueError, AttributeError, TypeError):
         raise bad_request("roleId must be a UUID") from None
-    rows = await async_dal.select_async(
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.public_id == role_uuid)
-        )
-    )
-    return rows.first()
 
 
-async def _guard_last_admin(
-    async_dal: Any, dal: Any, *, community_id: int, target: Any, action: str
-) -> None:
-    """409 when `target` is the last active admin-kind member (never a role-name check)."""
-    if target.community_role_id is None:
-        return
-    admin_roles = await async_dal.select_async(
-        dal(
-            (dal.community_roles.community_id == community_id)
-            & (dal.community_roles.role_kind == KIND_ADMIN)
-        ),
-        dal.community_roles.id,
-    )
-    admin_role_ids = [r.id for r in admin_roles]
-    if target.community_role_id not in admin_role_ids:
-        return
-    admin_count = await async_dal.count_async(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
-        & _not_banned(dal)
-        & dal.community_members.community_role_id.belongs(admin_role_ids)
-    )
-    if admin_count <= 1:
-        raise conflict(f"Cannot {action} the last community admin")
+def _role_by_public_id_query(dal: Any, *, community_id: int, role_uuid: str) -> Any:
+    """Query for the `community_roles` row with this canonical public UUID in THIS community."""
+    roles = dal.community_roles
+    return dal((roles.community_id == community_id) & (roles.public_id == role_uuid))
 
 
 async def get_members(
@@ -291,12 +256,15 @@ async def get_members(
     query = (
         (dal.community_members.community_id == community_id)
         & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
-        & _not_banned(dal)
+        & not_banned(dal)
     )
     if role_id:
-        role_row = await _role_by_public_id(
-            async_dal, dal, community_id=community_id, role_uuid=role_id
+        role_rows = await async_dal.select_async(
+            _role_by_public_id_query(
+                dal, community_id=community_id, role_uuid=_parse_role_uuid(role_id)
+            )
         )
+        role_row = role_rows.first()
         if role_row is None:
             return [], 0, 0
         query &= dal.community_members.community_role_id == role_row.id
@@ -366,7 +334,7 @@ async def get_roles(
         dal(
             (members.community_id == community_id)
             & (members.is_active == True)  # noqa: E712 - pydal Field comparison
-            & _not_banned(dal)
+            & not_banned(dal)
         ),
         members.community_role_id,
         count,
@@ -389,50 +357,60 @@ async def update_member_role(
     ctx: TenantContext,
     role_id: str,
     caller_id: int | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
 ) -> None:
-    """Assign the community role `role_id` (a `community_roles.public_id` UUID) to a member."""
+    """Assign the community role `role_id` (a `community_roles.public_id` UUID) to a member.
+
+    Owner/escalation/last-admin guards and the write run in ONE locked transaction;
+    ``editor_scopes``/``editor_bypass`` come from `community_authz.resolve_editor_async`.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
-
-    target_rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712
-        )
-    )
-    target = target_rows.first()
-    if target is None:
-        raise not_found("Member not found")
-
-    role_row = await _role_by_public_id(
-        async_dal, dal, community_id=community_id, role_uuid=role_id
-    )
-    if role_row is None:
-        # Fail closed: an undefined role is never assigned, and the scope guard below never skipped.
-        raise bad_request("Role is not defined for this community")
-    if getattr(role_row, "role_kind", None) != KIND_ADMIN:
-        await _guard_last_admin(
-            async_dal, dal, community_id=community_id, target=target, action="demote"
-        )
-    role = role_row.name
-    # Scope-based escalation guard (never a role-name check): the caller must hold every scope
-    # of the role being assigned.
-    stored = (role_row.base_claims or {}).get("scopes", [])
-    target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
+    role_uuid = _parse_role_uuid(role_id)
     caller_role = await community_authz.get_caller_community_role(
         async_dal, dal, community_id=community_id, user_id=caller_id or -1
     )
-    # A caller with no membership here (tenant/global admin bypass) may assign anything except
-    # an admin-kind role, which needs a member who themselves hold the full scope set.
-    enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
-    held = caller_role.scopes if caller_role is not None else frozenset()
-    if enforce and not target_scopes <= held:
-        raise forbidden("Cannot assign a role holding scopes you do not hold")
 
-    await set_member_role_async(
-        async_dal, dal, community_id=community_id, role=role, user_id=user_id
-    )
+    def _job() -> None:
+        member = community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot change owner role",
+        )
+        role_row = (
+            _role_by_public_id_query(dal, community_id=community_id, role_uuid=role_uuid)
+            .select()
+            .first()
+        )
+        if role_row is None:
+            # Fail closed: an undefined role is never assigned, the scope guard never skipped.
+            raise bad_request("Role is not defined for this community")
+        if getattr(role_row, "role_kind", None) != KIND_ADMIN:
+            community_authz.guard_last_admin(
+                dal, community_id=community_id, member=member, action="demote"
+            )
+        # Scope-based escalation guard (never a role-name check): the caller must hold every
+        # scope of the role being assigned.
+        stored = (role_row.base_claims or {}).get("scopes", [])
+        target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
+        # A caller with no membership here (tenant/global admin bypass) may assign anything
+        # except an admin-kind role, which needs a member who themselves hold the full scope set.
+        enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
+        held = caller_role.scopes if caller_role is not None else frozenset()
+        if enforce and not target_scopes <= held:
+            raise forbidden("Cannot assign a role holding scopes you do not hold")
+        # The name lookup must land on the very row the UUID named (a shadowing custom row of a
+        # reserved name must never link the system role instead).
+        if set_member_role(dal, community_id=community_id, role=role_row.name, user_id=user_id) != (
+            role_row.id
+        ):
+            raise bad_request("Role is not assignable")
+
+    await run_write_job(async_dal, dal, _job)
 
 
 async def authorize_reputation_admin(
@@ -512,38 +490,41 @@ async def remove_member(
     ctx: TenantContext,
     caller_id: int | None,
     reason: str | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
 ) -> None:
-    """Deactivate a community member."""
+    """Deactivate a community member (guard, deactivate and count in ONE locked transaction).
+
+    ``editor_scopes``/``editor_bypass`` come from `community_authz.resolve_editor_async`.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
-    query = (
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)  # noqa: E712
-    )
-    rows = await async_dal.select_async(dal(query))
-    target = rows.first()
-    if target is None:
-        raise not_found("Member not found")
-    await _guard_last_admin(
-        async_dal, dal, community_id=community_id, target=target, action="remove"
-    )
-
-    await async_dal.update_async(
-        query,
-        is_active=False,
-        removed_at=datetime.now(UTC),
-        removed_by=caller_id,
-        removal_reason=reason,
-    )
-    community_rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    community = community_rows.first()
-    if community is not None:
-        await async_dal.update_async(
-            dal.communities.id == community_id,
-            member_count=max(0, (community.member_count or 0) - 1),
+    def _job() -> None:
+        member = community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot remove owner",
         )
+        community_authz.guard_last_admin(
+            dal, community_id=community_id, member=member, action="remove"
+        )
+        dal(dal.community_members.id == member.id).update(
+            is_active=False,
+            removed_at=datetime.now(UTC),
+            removed_by=caller_id,
+            removal_reason=reason,
+        )
+        # Conditional, in-SQL decrement (never read-then-write), floored at 0.
+        communities = dal.communities
+        dal((communities.id == community_id) & (communities.member_count > 0)).update(
+            member_count=communities.member_count - 1
+        )
+
+    await run_write_job(async_dal, dal, _job)
 
 
 async def generate_temp_password(

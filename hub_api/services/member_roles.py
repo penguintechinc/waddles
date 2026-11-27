@@ -13,10 +13,15 @@ Writers can only link a role that exists for the community (``strict``), so a ty
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-#: The seeded system admin role (admin kind: full computed scope set) -- the creator's role.
+#: The seeded top system role (admin kind: full computed scope set) -- the creator's role. It is
+#: never assignable and its holder can be neither demoted nor removed (see :func:`is_owner_role`).
+COMMUNITY_OWNER_ROLE = "community-owner"
+
+#: The seeded system admin role (admin kind: full computed scope set) -- appointable by an owner.
 COMMUNITY_ADMIN_ROLE = "community-admin"
 
 #: The seeded baseline role every joining member gets.
@@ -29,6 +34,48 @@ ASSIGNABLE_MEMBER_ROLES: tuple[str, ...] = (
     "vip",
     COMMUNITY_MEMBER_ROLE,
 )
+
+
+#: Every role name `seed_community_system_roles()` (alembic 0002) seeds. Reserved: a custom role
+#: may never take one, and system-name lookups always also require ``is_system`` so a pre-existing
+#: custom row of the same name can never stand in for the system role.
+SYSTEM_ROLE_NAMES: frozenset[str] = frozenset(
+    {
+        COMMUNITY_MEMBER_ROLE,
+        "communicator",
+        "speaker",
+        "moderator",
+        COMMUNITY_ADMIN_ROLE,
+        COMMUNITY_OWNER_ROLE,
+    }
+)
+
+
+def role_by_name_query(dal: Any, community_id: int, name: str) -> Any:
+    """Query for the community role ``name``; a reserved system name matches the system row ONLY.
+
+    A non-reserved name (e.g. ``vip``, which the seed does not define) matches the community's
+    custom role of that name, as before.
+    """
+    cr = dal.community_roles
+    query = (cr.community_id == community_id) & (cr.name == name)
+    if name in SYSTEM_ROLE_NAMES:
+        query &= cr.is_system == True  # noqa: E712
+    return query
+
+
+def is_owner_role(role_row: Any) -> bool:
+    """True iff ``role_row`` (a member's LINKED `community_roles` row) is the seeded owner role.
+
+    Ownership is decided by the role row the member links via `community_role_id` -- the system
+    flag plus the reserved owner name, which a custom role can never carry -- never by the legacy
+    `community_members.role` string. An unlinked member (``None``) is never the owner.
+    """
+    return (
+        role_row is not None
+        and bool(getattr(role_row, "is_system", False))
+        and getattr(role_row, "name", None) == COMMUNITY_OWNER_ROLE
+    )
 
 
 def seed_community_system_roles(dal: Any, community_id: int) -> None:
@@ -53,6 +100,8 @@ def set_member_role(
 ) -> int | None:
     """Point member row(s) at the community role named ``role``; return its `community_roles.id`.
 
+    The role is resolved with :func:`role_by_name_query` (reserved names match the system row only).
+
     Targets one member (``user_id``) or every row a pydal query matches (``members``). With
     ``add=True`` (``user_id`` only) a missing membership is inserted active, and an EXISTING row
     keeps its current role (joining never demotes). Writes `community_role_id`, the legacy `role`
@@ -63,9 +112,7 @@ def set_member_role(
     if (user_id is None) == (members is None):
         raise ValueError("set_member_role needs exactly one of user_id or members")
     role_row = (
-        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
-        .select(dal.community_roles.id)
-        .first()
+        dal(role_by_name_query(dal, community_id, role)).select(dal.community_roles.id).first()
     )
     if role_row is None and strict:
         raise LookupError(f"community role {role!r} is not defined for community {community_id}")
@@ -91,16 +138,21 @@ def set_member_role(
     return role_id
 
 
-async def set_member_role_async(async_dal: Any, dal: Any, **kwargs: Any) -> int | None:
-    """:func:`set_member_role` as ONE committed executor job (rolled back on any error)."""
+async def run_write_job[T](async_dal: Any, dal: Any, job: Callable[[], T]) -> T:
+    """Run sync ``job`` as ONE DAL-executor transaction: committed, or rolled back on error."""
 
-    def _job() -> int | None:
+    def _tx() -> T:
         try:
-            role_id = set_member_role(dal, **kwargs)
+            result = job()
             dal.commit()
-            return role_id
+            return result
         except Exception:
             dal.rollback()
             raise
 
-    return await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job)
+    return await asyncio.get_running_loop().run_in_executor(async_dal.executor, _tx)
+
+
+async def set_member_role_async(async_dal: Any, dal: Any, **kwargs: Any) -> int | None:
+    """:func:`set_member_role` as ONE committed executor job (rolled back on any error)."""
+    return await run_write_job(async_dal, dal, lambda: set_member_role(dal, **kwargs))

@@ -103,7 +103,9 @@ def _role(dal: Any, community_id: int, name: str) -> Any:
 
 
 class TestCreateSeedsAndLinksCreator:
-    async def test_creator_resolves_admin_scopes_via_real_authz(self, adal: AsyncDAL) -> None:
+    async def test_creator_holds_owner_role_and_admin_scopes_via_real_authz(
+        self, adal: AsyncDAL
+    ) -> None:
         dal = adal.dal
         community_id, _ = await _create(adal)
 
@@ -115,9 +117,9 @@ class TestCreateSeedsAndLinksCreator:
                 [community_id],
             )
         }
-        assert {"member", "moderator", "community-admin"} <= seeded, seeded
-        admin_id, admin_kind, _ = _role(dal, community_id, member_roles.COMMUNITY_ADMIN_ROLE)
-        assert admin_kind == KIND_ADMIN  # set by the 0117 trigger, never by app code
+        assert {"member", "moderator", "community-admin", "community-owner"} <= seeded, seeded
+        owner_id, owner_kind, _ = _role(dal, community_id, member_roles.COMMUNITY_OWNER_ROLE)
+        assert owner_kind == KIND_ADMIN  # set by the 0117 trigger, never by app code
 
         member = pg.q(
             dal,
@@ -125,7 +127,7 @@ class TestCreateSeedsAndLinksCreator:
             "WHERE community_id = %s AND user_id = %s",
             [community_id, str(CREATOR)],
         )
-        assert member == [(member_roles.COMMUNITY_ADMIN_ROLE, admin_id, True)]
+        assert member == [(member_roles.COMMUNITY_OWNER_ROLE, owner_id, True)]
 
         full = effective_scopes(KIND_ADMIN, None)
         caller = await community_authz.get_caller_community_role(
@@ -202,10 +204,10 @@ class TestGlobalAutoJoin:
 
         await auth_service.add_user_to_global_community(adal, dal, user_id=CREATOR)
 
-        admin_id, _, _ = _role(dal, community_id, member_roles.COMMUNITY_ADMIN_ROLE)
+        owner_id, _, _ = _role(dal, community_id, member_roles.COMMUNITY_OWNER_ROLE)
         assert pg.q(
             dal,
             "SELECT role, community_role_id FROM community_members "
             "WHERE community_id = %s AND user_id = %s",
             [community_id, str(CREATOR)],
-        ) == [(member_roles.COMMUNITY_ADMIN_ROLE, admin_id)]
+        ) == [(member_roles.COMMUNITY_OWNER_ROLE, owner_id)]

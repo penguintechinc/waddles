@@ -503,7 +503,10 @@ class TestServiceLayerValidation:
 
     async def test_get_profile_resolves_owner_username(self, auth_db: Any) -> None:
         owner_id = _seed_user(auth_db, email="owner@example.com", username="theowner")
-        community_id = _seed_community(auth_db, visibility="public", owner_id=str(owner_id))
+        community_id = _seed_community(auth_db, visibility="public")
+        # The owner is the member LINKED to the system owner role (never `communities.owner_id`).
+        role_id = _seed_role(auth_db, community_id=community_id, name="community-owner", scopes=[])
+        _seed_member(auth_db, community_id=community_id, user_id=owner_id, role_id=role_id)
         profile = await svc.get_community_profile(
             auth_db, auth_db.dal, community_id=community_id, viewer_id=None
         )

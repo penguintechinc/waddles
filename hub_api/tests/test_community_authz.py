@@ -627,7 +627,7 @@ class TestAuthorityIsRoleRowNeverRoleName:
             member_role_string="community-owner",
         )
         role = await self._role(automation_db, uid)
-        assert role.name == "member"  # the display string is never consulted
+        assert role.name is None  # an unlinked legacy string names nothing
         assert role.scopes == frozenset()
 
     async def test_banned_state_strips_scopes_even_for_an_admin_kind_role(

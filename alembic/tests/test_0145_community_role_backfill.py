@@ -8,6 +8,7 @@ from types import ModuleType
 
 import psycopg2
 import pytest
+import sqlalchemy as sa
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pg_docker import DOCKER_AVAILABLE, alembic_cli, migrated_postgres
@@ -137,6 +138,85 @@ def test_seeds_missing_roles_and_backfills_links_idempotently() -> None:
                 assert (_role_ids(cur, cid), _members(cur, cid)) == before
         finally:
             conn.close()
+
+
+@requires_docker
+def test_batched_backfill_links_owner_and_ignores_shadowing_custom_role() -> None:
+    """Batch path (tiny batch size, many batches) + system-name rule, then a real upgrade."""
+    with migrated_postgres("0145-role-batches") as db:
+        alembic_cli("downgrade", _PREV, dsn=db.dsn)
+        install_community_role_seeding(db.dsn)
+        conn = psycopg2.connect(db.dsn)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO communities (name) VALUES ('legacy') RETURNING id"
+                )
+                cid = cur.fetchone()[0]  # type: ignore[index]
+                cur.execute("SELECT seed_community_system_roles(%s)", (cid,))
+                # A custom `member` predating seeding shadows the system name in this one.
+                cur.execute(
+                    "INSERT INTO communities (name) VALUES ('shadow') RETURNING id"
+                )
+                shadow_cid = cur.fetchone()[0]  # type: ignore[index]
+                cur.execute(
+                    "INSERT INTO community_roles (community_id, name, is_system, base_claims) "
+                    "VALUES (%s, 'member', false, '{\"scopes\": [\"community.members:manage\"]}')",
+                    (shadow_cid,),
+                )
+                cur.execute("SELECT seed_community_system_roles(%s)", (shadow_cid,))
+                members = [("owner", "community-owner")] + [
+                    (f"m{i}", "member") for i in range(6)
+                ]
+                for puid, role in members:
+                    cur.execute(
+                        "INSERT INTO community_members "
+                        "(community_id, platform, platform_user_id, role) "
+                        "VALUES (%s, 'discord', %s, %s)",
+                        (cid, puid, role),
+                    )
+                cur.execute(
+                    "INSERT INTO community_members (community_id, platform, platform_user_id, "
+                    "role) VALUES (%s, 'discord', 'shadowed', 'member')",
+                    (shadow_cid,),
+                )
+
+            engine = sa.create_engine(db.dsn)
+            try:
+                with engine.begin() as sa_conn:
+                    linked, batches = _load().backfill_links(sa_conn, batch_size=2)
+            finally:
+                engine.dispose()
+            # 8 member ids in ranges of 2 -> 4 batches; 7 linked, the shadowed one is not
+            assert (linked, batches) == (7, 4)
+
+            with conn.cursor() as cur:
+                roles = _role_ids(cur, cid)
+                got = _members(cur, cid)
+                assert got["owner"] == roles["community-owner"]
+                assert {got[f"m{i}"] for i in range(6)} == {roles["member"]}
+                cur.execute(
+                    "SELECT is_system FROM community_roles WHERE id = %s",
+                    (roles["community-owner"],),
+                )
+                assert cur.fetchone()[0] is True  # type: ignore[index]
+                assert _members(cur, shadow_cid) == {"shadowed": None}
+
+            # the real upgrade (autocommit batches) is a no-op on top and still single-head
+            alembic_cli("upgrade", _REV, dsn=db.dsn)
+            with conn.cursor() as cur:
+                assert _members(cur, shadow_cid) == {"shadowed": None}
+                assert (
+                    _members(cur, cid)["owner"]
+                    == _role_ids(cur, cid)["community-owner"]
+                )
+        finally:
+            conn.close()
+
+
+def test_batch_size_is_bounded() -> None:
+    assert _load().BATCH_SIZE == 5000
 
 
 @requires_docker

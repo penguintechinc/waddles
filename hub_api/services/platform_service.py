@@ -26,9 +26,9 @@ from typing import Any
 from services import community_reputation_service as reputation_svc
 from services import session_service
 from services.audit_events import AuditAction, AuditCategory
+from services.community_authz import community_owner_member
 from services.errors import bad_request, not_found
 from services.platform_account import guard_platform_account
-from services.scope_registry import KIND_ADMIN
 
 #: Roles assignable through `PUT /platform/users/{id}/role`. Clearing a role is NOT a role value:
 #: removal is `DELETE /platform/users/{id}` (deactivate), so a null/empty role is never valid.
@@ -257,21 +257,7 @@ async def get_community(async_dal: Any, dal: Any, *, community_id: int) -> dict[
         raise not_found("Community not found")
     community = rows.first()
 
-    # "Owner" = the first active member holding an admin-kind role (role_kind, never a role name).
-    owner_rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.is_active == True)  # noqa: E712
-            & (dal.community_roles.role_kind == KIND_ADMIN)
-        ),
-        dal.community_members.ALL,
-        left=dal.community_roles.on(
-            dal.community_members.community_role_id == dal.community_roles.id
-        ),
-        orderby=dal.community_members.id,
-        limitby=(0, 1),
-    )
-    owner = owner_rows.first().community_members if owner_rows else None
+    owner = await community_owner_member(async_dal, dal, community_id=community_id)
 
     module_count = await async_dal.count_async(
         dal.hub_module_installations.community_id == community_id

@@ -40,7 +40,11 @@ from quart_schema import document_response, validate_request, validate_response
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
 from services import floor_ban_lift
-from services.community_authz import guard_target_member, resolve_editor_scopes_async
+from services.community_authz import (
+    guard_target_member,
+    resolve_editor_async,
+    resolve_editor_scopes_async,
+)
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, forbidden
@@ -585,8 +589,8 @@ async def update_member_role(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         await svc.update_member_role(
             async_dal,
@@ -596,6 +600,8 @@ async def update_member_role(
             ctx=ctx,
             role_id=data.roleId,
             caller_id=caller_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
@@ -804,6 +810,9 @@ async def put_reputation_soft_ban(
         expires = expires.replace(tzinfo=UTC)
     try:
         ctx = await _authorize_reputation_admin(community_id)
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         await reputation_svc.set_soft_ban(
             async_dal,
             dal,
@@ -829,6 +838,9 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     async_dal, dal = _dal()
     try:
         ctx = await _authorize_reputation_admin(community_id)
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         cleared = await reputation_svc.clear_soft_ban(
             async_dal,
             dal,
@@ -892,8 +904,8 @@ async def remove_member(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         await svc.remove_member(
             async_dal,
@@ -903,6 +915,8 @@ async def remove_member(
             ctx=ctx,
             caller_id=caller_id,
             reason=data.reason,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         logger.debug("handled %s in admin: %s", type(exc).__name__, exc)

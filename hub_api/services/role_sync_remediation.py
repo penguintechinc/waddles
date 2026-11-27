@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from services.role_sync_service import _set_member_role
+from services.member_roles import COMMUNITY_MEMBER_ROLE
+from services.role_sync_service import _role_row_by_name, _set_member_role
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
 from services.scope_registry import KIND_ADMIN
 
@@ -41,6 +42,7 @@ class RemediationReport:
     candidates: int = 0
     newly_queued: int = 0
     demoted: int = 0
+    role_missing: int = 0
 
 
 def _candidates(dal: Any, purged: Any) -> list[Any]:
@@ -76,7 +78,7 @@ def _candidates(dal: Any, purged: Any) -> list[Any]:
 
 
 def remediate_purged_bindings(
-    dal: Any, *, apply: bool = False, baseline_role: str = "member"
+    dal: Any, *, apply: bool = False, baseline_role: str = COMMUNITY_MEMBER_ROLE
 ) -> RemediationReport:
     """Queue (default) or demote (`apply`) members promoted by a purged privileged binding."""
     bind_guild_pairing_tables(dal)
@@ -105,6 +107,16 @@ def remediate_purged_bindings(
                     report.newly_queued += 1
                     existing = dal(q.id == row_id).select().first()
                 if apply and existing.status == STATUS_PENDING:
+                    if _role_row_by_name(dal, int(purged.community_id), baseline_role) is None:
+                        # Never write a NULL link: stays queued until the baseline exists.
+                        logger.error(
+                            "role_sync.remediation_baseline_missing community_id=%s baseline=%s",
+                            purged.community_id,
+                            baseline_role,
+                        )
+                        report.role_missing += 1
+                        dal.commit()
+                        continue
                     _set_member_role(dal, member, int(purged.community_id), baseline_role)
                     dal(q.id == existing.id).update(
                         status=STATUS_DEMOTED, resolved_at=datetime.now(UTC)
@@ -115,11 +127,13 @@ def remediate_purged_bindings(
                 dal.rollback()
                 raise
     logger.info(
-        "role_sync.remediation purged_bindings=%d candidates=%d queued=%d demoted=%d apply=%s",
+        "role_sync.remediation purged_bindings=%d candidates=%d queued=%d demoted=%d "
+        "role_missing=%d apply=%s",
         report.purged_bindings_examined,
         report.candidates,
         report.newly_queued,
         report.demoted,
+        report.role_missing,
         apply,
     )
     return report
