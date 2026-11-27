@@ -2,6 +2,15 @@ FROM python:3.13-slim-bookworm@sha256:f0fa218d5b06f9b9235024fa061cde2cb141f726de
 
 WORKDIR /app
 
+# OS-package CVE fix: exact pin of Debian bookworm security release for
+# linux-pam (CVE-2025-6020, trivy HIGH gate). Drop once base digest is rebuilt upstream.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpam-modules=1.5.2-6+deb12u3 \
+    libpam-modules-bin=1.5.2-6+deb12u3 \
+    libpam-runtime=1.5.2-6+deb12u3 \
+    libpam0g=1.5.2-6+deb12u3 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Hash-locked: alembic revisions 0062/0075 import cryptography (AESGCM).
 # Same pinned version as hub_api (migrations/requirements.txt).
 COPY migrations/requirements.txt /tmp/migrations-requirements.txt

@@ -57,6 +57,15 @@ RUN set -eux; \
 
 FROM python:3.13-slim-bookworm@sha256:f0fa218d5b06f9b9235024fa061cde2cb141f726de52134471053d2d9b5324a3
 WORKDIR /app
+
+# OS-package CVE fix: exact pin of Debian bookworm security release for
+# linux-pam (CVE-2025-6020, trivy HIGH gate). Drop once base digest is rebuilt upstream.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpam-modules=1.5.2-6+deb12u3 \
+    libpam-modules-bin=1.5.2-6+deb12u3 \
+    libpam-runtime=1.5.2-6+deb12u3 \
+    libpam0g=1.5.2-6+deb12u3 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 

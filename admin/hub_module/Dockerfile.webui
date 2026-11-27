@@ -30,10 +30,15 @@ FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338
 WORKDIR /app
 
 # OS-package CVE fix: exact pin of the Debian bookworm security release for
-# perl-base (trivy HIGH/CRITICAL gate). Never a blanket `apt-get upgrade`
-# (devops-containers.md); drop the pin once the base digest is rebuilt upstream.
+# perl-base and linux-pam (CVE-2025-6020, trivy HIGH/CRITICAL gate). Never a blanket
+# `apt-get upgrade` (devops-containers.md); drop once the base digest is rebuilt upstream.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    perl-base=5.36.0-7+deb12u4 dumb-init curl \
+    perl-base=5.36.0-7+deb12u4 \
+    libpam-modules=1.5.2-6+deb12u3 \
+    libpam-modules-bin=1.5.2-6+deb12u3 \
+    libpam-runtime=1.5.2-6+deb12u3 \
+    libpam0g=1.5.2-6+deb12u3 \
+    dumb-init curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
