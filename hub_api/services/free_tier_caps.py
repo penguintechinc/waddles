@@ -56,10 +56,10 @@ from typing import Any
 from flask_core.feature_flags import feature_enabled, get_tier
 from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 
+from services import member_roles
 from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError
 from services.global_identity import global_admin_ids, grant_global_admin_sync
-from services.member_roles import require_valid_member_role
 
 logger = logging.getLogger(__name__)
 
@@ -213,21 +213,28 @@ async def create_community_capped(
     tenant_slug: str,
     tenant_id: int,
     values: dict[str, Any],
-    member_values: Callable[[int], dict[str, Any]] | None = None,
+    creator_id: int | None = None,
 ) -> int:
     """Insert a community unless the caller's tenant already holds its 1 free community.
 
-    ``member_values(new_community_id)`` (optional) builds the owner ``community_members`` row,
-    inserted in the SAME transaction as the community (all-or-nothing): a failure rolls both
-    back, so no half-created community can count toward the cap.
+    In the SAME transaction (all-or-nothing): seed the community's system roles and, when
+    ``creator_id`` is given, make that user an active member holding the seeded system owner role
+    -- so the creator resolves the full admin-kind scopes (and owner protection) from the moment
+    the community exists. A failure rolls everything back, so no half-created community can count
+    toward the cap.
     """
 
     def _write(d: Any) -> int:
         new_id = int(d.communities.insert(**values))
-        if member_values is not None:
-            member = member_values(new_id)
-            require_valid_member_role(member["role"])
-            d.community_members.insert(**member)
+        member_roles.seed_community_system_roles(d, new_id)
+        if creator_id is not None:
+            member_roles.set_member_role(
+                d,
+                community_id=new_id,
+                role=member_roles.COMMUNITY_OWNER_ROLE,
+                user_id=creator_id,
+                add=True,
+            )
         return new_id
 
     return int(

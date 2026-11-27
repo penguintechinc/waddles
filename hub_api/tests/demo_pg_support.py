@@ -2,13 +2,12 @@
 
 Boots one migrated Postgres container (`alembic/tests/pg_docker.py`, the same harness the DSAR /
 identity PG suites use), tops up the legacy-table columns the pydal binders declare but the
-alembic minimal bootstrap omits, creates `community_roles` from the REAL legacy DDL, and hands
-back a pydal `AsyncDAL` with `bind_auth_tables` + `bind_guild_pairing_tables` bound against it.
+alembic minimal bootstrap omits, installs `community_roles` + the REAL role-seeding objects, and
+hands back a pydal `AsyncDAL` with `bind_auth_tables` + `bind_guild_pairing_tables` bound to it.
 """
 
 from __future__ import annotations
 
-import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,6 +26,9 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
     PgTestDatabase,
     migrated_postgres,
 )
+from role_seeding import (  # noqa: E402  # type: ignore[import-not-found]
+    install_community_role_seeding,
+)
 
 from services.schema import bind_auth_tables, bind_guild_pairing_tables  # noqa: E402
 
@@ -35,12 +37,11 @@ __all__ = [
     "PgTestDatabase",
     "fresh_dal",
     "migrated_postgres",
+    "open_dal",
     "prepare_database",
     "q",
     "scalar",
 ]
-
-LEGACY_SQL = Path(__file__).resolve().parents[2] / "config" / "postgres" / "migrations"
 
 _PG_TYPES = {
     "string": "VARCHAR(255)",
@@ -53,14 +54,6 @@ _PG_TYPES = {
 
 #: Legacy tables whose real DDL is wider than alembic's minimal bootstrap.
 _TOPUP_TABLES = ("communities", "hub_users", "hub_user_identities", "community_members", "tenants")
-
-
-def _community_roles_ddl() -> str:
-    """The REAL `community_roles` DDL out of legacy `058_tenants_and_claims.sql` (no copy)."""
-    sql = (LEGACY_SQL / "058_tenants_and_claims.sql").read_text()
-    match = re.search(r"CREATE TABLE IF NOT EXISTS community_roles \(.*?\n\);", sql, re.DOTALL)
-    assert match is not None, "community_roles DDL moved in 058 -- update demo_pg_support"
-    return match.group(0)
 
 
 def prepare_database(db: PgTestDatabase) -> None:
@@ -78,15 +71,12 @@ def prepare_database(db: PgTestDatabase) -> None:
         migrate=False,
     )
     bind_auth_tables(dal, migrate=False)
+    # The real legacy `community_roles` DDL plus the REAL seed function / role-kind triggers
+    # (alembic 0002/0117/0118 `upgrade()` bodies), which the minimal bootstrap skipped.
+    install_community_role_seeding(db.dsn)
     raw = psycopg2.connect(db.dsn)
     raw.autocommit = True
     with raw.cursor() as cur:
-        cur.execute(_community_roles_ddl())
-        # 0117 skips on the minimal bootstrap (no community_roles yet); add the kind column it owns.
-        cur.execute(
-            "ALTER TABLE community_roles "
-            "ADD COLUMN IF NOT EXISTS role_kind SMALLINT NOT NULL DEFAULT 0"
-        )
         # entity_public_ids skips on the minimal bootstrap too; add the column it owns here.
         cur.execute(
             "ALTER TABLE community_roles "
@@ -104,8 +94,8 @@ def prepare_database(db: PgTestDatabase) -> None:
     dal.close()
 
 
-def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
-    """Generator body for a per-test fixture: truncated tables + bound pydal DAL."""
+def open_dal(db: PgTestDatabase) -> AsyncDAL:
+    """A new pydal `AsyncDAL` (own connection) on the container, test tables bound, no truncate."""
     async_dal = AsyncDAL(db.dsn.replace("postgresql://", "postgres://", 1), pool_size=1)
     dal = async_dal.dal
     dal.define_table(
@@ -120,6 +110,13 @@ def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
     )
     bind_auth_tables(dal, migrate=False)
     bind_guild_pairing_tables(dal, migrate=False)
+    return async_dal
+
+
+def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
+    """Generator body for a per-test fixture: truncated tables + bound pydal DAL."""
+    async_dal = open_dal(db)
+    dal = async_dal.dal
     dal.executesql(
         "TRUNCATE guild_tenant_pairings, community_role_sync_bindings, community_roles, "
         "community_members, hub_user_identities, hub_users, communities, tenants "

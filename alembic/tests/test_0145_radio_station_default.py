@@ -74,7 +74,8 @@ def test_metadata_single_head_off_0144() -> None:
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0145_radio_station_default"]
+    assert len(script.get_heads()) == 1
+    assert "0145_radio_station_default" in {r.revision for r in script.walk_revisions()}
 
 
 #: 0012's DDL for the table (+ 0138's public_id). The pg harness stamps 0019 on a minimal

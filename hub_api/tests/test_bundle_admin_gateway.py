@@ -227,12 +227,15 @@ async def env(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
         11: ["bundles.admin:moderate", "bundles.admin:admin"],  # admin
         12: ["community:read"],  # plain member
     }.items():
+        # Scopes resolve only through a LINKED role row (an unlinked member holds nothing).
+        role_id = dal.community_roles.insert(name=f"custom{user}", base_claims={"scopes": scopes})
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(user),
             is_active=True,
             claims_cache={"scopes": scopes},
             role="x",
+            community_role_id=role_id,
         )
     dal.commit()
 

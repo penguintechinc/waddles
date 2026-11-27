@@ -79,8 +79,9 @@ from flask_core.tenancy import TenantContext, get_tenant_context
 from quart import Request
 
 from services.current_user import get_current_user_id
-from services.errors import ApiError, forbidden, unauthorized
+from services.errors import ApiError, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
+from services.member_roles import COMMUNITY_OWNER_ROLE, is_owner_role, role_by_name_query
 from services.schema import bind_community_authz_tables
 from services.scope_registry import (
     KIND_ADMIN,
@@ -93,9 +94,12 @@ from services.scope_registry import (
 
 @dataclass(slots=True, frozen=True)
 class CommunityRole:
-    """The caller's resolved role + granted scopes for one specific community."""
+    """The caller's resolved role + granted scopes for one specific community.
 
-    name: str
+    ``name`` is display-only (None when the member links no role row); authz uses ``scopes``.
+    """
+
+    name: str | None
     priority: int
     scopes: frozenset[str]
 
@@ -153,11 +157,12 @@ async def get_caller_community_role(
     )
     if not rows:
         return None
-    cm, cr = rows[0].community_members, rows[0].community_roles
+    cr = rows[0].community_roles
     base_claims = cr.base_claims if cr is not None else None
     stored = base_claims.get("scopes", []) if isinstance(base_claims, dict) else []
     scopes = effective_scopes(_row_kind(cr), stored)
-    role_name = (cr.name if cr is not None and cr.name else None) or cm.role or "member"
+    # Display name of the LINKED role row only; an unlinked legacy `role` string names nothing.
+    role_name = cr.name if cr is not None and cr.name else None
     priority = (cr.priority if cr is not None and cr.priority is not None else 0) or 0
     return CommunityRole(name=role_name, priority=priority, scopes=frozenset(scopes))
 
@@ -280,9 +285,12 @@ def require_valid_community_id(raw: str) -> int:
 
 @dataclass(slots=True)
 class CommunityMembership:
-    """The caller's resolved role/scopes for one specific community (M7 `_scoped` variant)."""
+    """The caller's resolved role/scopes for one specific community (M7 `_scoped` variant).
 
-    role: str
+    ``role`` is display-only (None when the member links no role row); authz uses ``scopes``.
+    """
+
+    role: str | None
     scopes: frozenset[str]
     is_admin: bool
     bypass: bool
@@ -406,15 +414,21 @@ async def resolve_community_membership_scoped(
 
     row = rows[0]
     member, role_row = row.community_members, row.community_roles
+    if role_row is not None and getattr(role_row, "id", None) is None:
+        role_row = None  # LEFT JOIN miss: the member links no role row
     kind = _row_kind(role_row)
-    if kind == KIND_ADMIN:
+    if role_row is None:
+        # Fail closed: no linked role row grants nothing (no legacy string, no stale cache).
+        scopes: frozenset[str] = frozenset()
+    elif kind == KIND_ADMIN:
         # Admin-kind scopes are computed from the registry, never from a stored/cached list.
         scopes = effective_scopes(kind, None)
     else:
         scopes = _parse_claims_scopes(member.claims_cache)
-        if not scopes and role_row is not None:
+        if not scopes:
             scopes = _parse_claims_scopes(role_row.base_claims)
-    role_name = (role_row.name if role_row is not None else None) or member.role
+    # Display name of the LINKED role row only; an unlinked legacy `role` string names nothing.
+    role_name = role_row.name if role_row is not None and role_row.name else None
     return CommunityMembership(
         role=role_name, scopes=scopes, is_admin=bool(scopes & ADMIN_SCOPES), bypass=False
     )
@@ -584,6 +598,18 @@ async def resolve_editor_scopes_async(
     Goes through `resolve_community_membership_scoped` (tenant ownership check first, then the
     global/tenant-admin bypass, then the member's role scopes), unioned with the token scopes.
     """
+    scopes, _bypass = await resolve_editor_async(request, async_dal, dal, community_id=community_id)
+    return scopes
+
+
+async def resolve_editor_async(
+    request: Any, async_dal: Any, dal: Any, *, community_id: int
+) -> tuple[frozenset[str], bool]:
+    """Resolve the caller's ``(editor scopes, bypass)`` for one community.
+
+    Scopes as :func:`resolve_editor_scopes_async`; ``bypass`` is True only for a global admin or a
+    tenant admin of this community's tenant (whose scopes are then the full registry).
+    """
     ctx = get_tenant_context(request)
     if ctx is None:
         raise forbidden("Tenant context not resolved")
@@ -597,9 +623,9 @@ async def resolve_editor_scopes_async(
         scopes_claim=token_scopes,
     )
     if membership is not None and membership.bypass:
-        return all_scopes()
+        return all_scopes(), True
     held = membership.scopes if membership is not None else frozenset()
-    return frozenset(held | token_scopes)
+    return frozenset(held | token_scopes), False
 
 
 async def guard_target_member(
@@ -630,14 +656,110 @@ def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[s
         .select()
         .first()
     )
-    if member is None or not member.community_role_id:
+    if member is None:
         return frozenset()
-    role_row = dal(dal.community_roles.id == member.community_role_id).select().first()
+    return _linked_role_scopes(member, _linked_role_row(dal, member))
+
+
+def _linked_role_row(dal: Any, member: Any) -> Any | None:
+    """The `community_roles` row ``member`` links via `community_role_id` (None when unlinked)."""
+    if not member.community_role_id:
+        return None
+    return dal(dal.community_roles.id == member.community_role_id).select().first()
+
+
+def _linked_role_scopes(member: Any, role_row: Any | None) -> frozenset[str]:
+    """Scopes a member holds through its linked role row; none without one (fail closed)."""
     if role_row is None:
         return frozenset()
     if _row_kind(role_row) == KIND_ADMIN:
         return effective_scopes(KIND_ADMIN, None)
     return _parse_claims_scopes(member.claims_cache) or _parse_claims_scopes(role_row.base_claims)
+
+
+#: 409 code + message when a change would leave a community with no active owner.
+LAST_OWNER_CODE = "LAST_OWNER"
+LAST_OWNER_MESSAGE = (
+    "Cannot demote or remove the community's last owner; transfer ownership to another member first"
+)
+
+
+def _lock_owner_rows(dal: Any, community_id: int) -> tuple[int | None, list[Any]]:
+    """Lock the community's active owner member rows (``FOR UPDATE``, id order); return them.
+
+    Returns ``(owner_role_id, rows)``. Owners are members LINKED to the seeded system owner role.
+    Taken BEFORE the target row in a fixed (id) order, so concurrent owner changes in one
+    community serialize without deadlocking; after a wait, Postgres re-checks the WHERE against
+    the committed row, so an owner demoted meanwhile drops out of the set. Rows changed earlier
+    in the SAME transaction (e.g. a transfer's promote) are visible, so promote-then-demote counts.
+    """
+    role = (
+        dal(role_by_name_query(dal, community_id, COMMUNITY_OWNER_ROLE))
+        .select(dal.community_roles.id)
+        .first()
+    )
+    if role is None:
+        return None, []
+    cm = dal.community_members
+    rows = dal(
+        (cm.community_id == community_id)
+        & (cm.community_role_id == role.id)
+        & (cm.is_active == True)  # noqa: E712
+    ).select(cm.id, orderby=cm.id, for_update=dal._adapter.dbengine != "sqlite")
+    return int(role.id), list(rows)
+
+
+def lock_member_for_change(
+    dal: Any,
+    *,
+    community_id: int,
+    user_id: int,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
+    owner_message: str,
+    removes_ownership: bool = True,
+) -> Any:
+    """THE owner/escalation/last-owner guard for demoting or removing a member; returns the row.
+
+    Runs inside the caller's write transaction: the community's owner rows, then the target's
+    active `community_members` row, are read ``SELECT ... FOR UPDATE`` (sqlite serializes writers
+    instead), so the checks and the caller's write see one consistent state and a concurrent
+    demote/remove waits, then re-checks. Decided on the target's LINKED role row
+    (`community_role_id`), never the legacy role string:
+
+    * 404 -- the target is not an active member;
+    * 403 ``owner_message`` -- the target links the seeded system owner role and the editor is
+      not a global or tenant admin (``editor_bypass``);
+    * 409 ``LAST_OWNER`` -- the target is an owner, the change strips that (``removes_ownership``,
+      the default: demote, remove, ban, deactivate) and no OTHER active owner remains;
+    * 403 -- a non-bypass editor does not hold every scope the target holds.
+    """
+    owner_role_id, owners = _lock_owner_rows(dal, community_id)
+    cm = dal.community_members
+    member = (
+        dal(
+            (cm.community_id == community_id)
+            & (cm.user_id == str(user_id))
+            & (cm.is_active == True)  # noqa: E712
+        )
+        .select(for_update=dal._adapter.dbengine != "sqlite")
+        .first()
+    )
+    if member is None:
+        raise not_found("Member not found")
+    target_is_owner = owner_role_id is not None and member.community_role_id == owner_role_id
+    if target_is_owner and not editor_bypass:
+        raise forbidden(owner_message)
+    if target_is_owner and removes_ownership and not any(r.id != member.id for r in owners):
+        raise ApiError(LAST_OWNER_MESSAGE, 409, LAST_OWNER_CODE)
+    if editor_bypass:
+        return member
+    role_row = _linked_role_row(dal, member)
+    if is_owner_role(role_row):
+        raise forbidden(owner_message)
+    if not _linked_role_scopes(member, role_row) <= editor_scopes:
+        raise forbidden("Cannot modify a member holding scopes you do not hold")
+    return member
 
 
 @dataclass(slots=True, frozen=True)

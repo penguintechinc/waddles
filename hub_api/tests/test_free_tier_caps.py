@@ -25,7 +25,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
 from blueprints.v1.user_management import user_management_bp
-from services import free_tier_caps, tenant_service
+from services import free_tier_caps, member_roles, tenant_service
 from services.errors import ApiError
 from services.global_identity import (
     grant_global_admin_sync,
@@ -208,47 +208,55 @@ class TestCommunityCap:
 
 class TestCommunityAtomicity:
     async def test_member_insert_failure_leaves_no_counted_half_community(
-        self, client: Any, admin_db: Any, gates: Any
+        self, client: Any, admin_db: Any, gates: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # regression: review MED -- community row committed before the member insert, so a
         # failure between them left a half-community that counted toward the cap (402 on retry).
-        def boom(_cid: int) -> dict[str, Any]:
+        def boom(*_args: Any, **_kwargs: Any) -> None:
             raise RuntimeError("member insert failed")
 
-        with pytest.raises(RuntimeError):
-            await free_tier_caps.create_community_capped(
-                admin_db,
-                admin_db.dal,
-                tenant_slug=TENANT_SLUG,
-                tenant_id=_tenant_id(admin_db),
-                values={"name": "half", "display_name": "Half", "is_active": True},
-                member_values=boom,
-            )
+        with monkeypatch.context() as patch:
+            patch.setattr(member_roles, "set_member_role", boom)
+            with pytest.raises(RuntimeError):
+                await free_tier_caps.create_community_capped(
+                    admin_db,
+                    admin_db.dal,
+                    tenant_slug=TENANT_SLUG,
+                    tenant_id=_tenant_id(admin_db),
+                    values={"name": "half", "display_name": "Half", "is_active": True},
+                    creator_id=1,
+                )
         assert admin_db.dal(admin_db.dal.communities.id > 0).count() == 0
+        assert admin_db.dal(admin_db.dal.community_roles.id > 0).count() == 0
         assert (await _post_community(client, "retry")).status_code == 201
 
     async def test_success_creates_community_and_owner_member_together(
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
         assert (await _post_community(client, "first")).status_code == 201
-        members = admin_db.dal(admin_db.dal.community_members.id > 0).select()
-        assert [(m.user_id, m.role) for m in members] == [("1", "community-owner")]
+        dal = admin_db.dal
+        owner_role = dal(dal.community_roles.name == member_roles.COMMUNITY_OWNER_ROLE).select()
+        assert len(owner_role) == 1
+        members = dal(dal.community_members.id > 0).select()
+        assert [(m.user_id, m.role, m.community_role_id) for m in members] == [
+            ("1", member_roles.COMMUNITY_OWNER_ROLE, owner_role[0].id)
+        ]
 
-    @pytest.mark.parametrize("bad_role", ["owner", "admin", "Community-Owner", ""])
-    async def test_non_canonical_member_role_is_rejected_and_nothing_stored(
-        self, admin_db: Any, gates: Any, bad_role: str
+    async def test_unseeded_owner_role_fails_loudly_and_nothing_stored(
+        self, admin_db: Any, gates: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # regression: community owners got role 'owner' (gates expect 'community-owner')
-        with pytest.raises(ApiError) as exc:
+        # The creator must be linked to a real role row; a missing one never stores a role-less
+        # (scope-less) creator.
+        monkeypatch.setattr(member_roles, "seed_community_system_roles", lambda _d, _cid: None)
+        with pytest.raises(LookupError, match="community-owner"):
             await free_tier_caps.create_community_capped(
                 admin_db,
                 admin_db.dal,
                 tenant_slug=TENANT_SLUG,
                 tenant_id=_tenant_id(admin_db),
                 values={"name": "typo", "display_name": "Typo", "is_active": True},
-                member_values=lambda cid: {"community_id": cid, "user_id": "1", "role": bad_role},
+                creator_id=1,
             )
-        assert exc.value.status_code == 400
         assert admin_db.dal(admin_db.dal.communities.id > 0).count() == 0
         assert admin_db.dal(admin_db.dal.community_members.id > 0).count() == 0
 

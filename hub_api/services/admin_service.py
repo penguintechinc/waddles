@@ -42,7 +42,12 @@ from flask_core.tenancy import TenantContext
 from services import community_authz
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
-from services.member_roles import ASSIGNABLE_MEMBER_ROLES
+from services.member_roles import (
+    ASSIGNABLE_MEMBER_ROLES,
+    role_by_name_query,
+    run_write_job,
+    set_member_role,
+)
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
 
@@ -288,57 +293,48 @@ async def update_member_role(
     ctx: TenantContext,
     role: str,
     caller_id: int | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
 ) -> None:
-    """Update a member's role."""
+    """Update a member's role (owner/escalation guard and write in ONE locked transaction).
+
+    ``editor_scopes``/``editor_bypass`` come from `community_authz.resolve_editor_async`.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
     if role not in VALID_MEMBER_ROLES:
         raise bad_request("Invalid role")
-
-    target_rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712
-        )
-    )
-    target = target_rows.first()
-    if target is None:
-        raise not_found("Member not found")
-    if target.role == "community-owner":
-        raise forbidden("Cannot change owner role")
-
-    role_rows = await async_dal.select_async(
-        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == role))
-    )
-    role_row = role_rows.first()
-    if role_row is None:
-        # Fail closed: an undefined role is never assigned, and the scope guard below never skipped.
-        raise bad_request("Role is not defined for this community")
-    community_role_id = role_row.id
-    # Scope-based escalation guard (never a role-name check): the caller must hold every scope
-    # of the role being assigned.
-    stored = (role_row.base_claims or {}).get("scopes", [])
-    target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
     caller_role = await community_authz.get_caller_community_role(
         async_dal, dal, community_id=community_id, user_id=caller_id or -1
     )
-    # A caller with no membership here (tenant/global admin bypass) may assign anything except
-    # an admin-kind role, which needs a member who themselves hold the full scope set.
-    enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
-    held = caller_role.scopes if caller_role is not None else frozenset()
-    if enforce and not target_scopes <= held:
-        raise forbidden("Cannot assign a role holding scopes you do not hold")
 
-    await async_dal.update_async(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id)),
-        role=role,
-        community_role_id=community_role_id,
-        claims_cache=None,
-        updated_at=datetime.now(UTC),
-    )
+    def _job() -> None:
+        community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot change owner role",
+        )
+        role_row = dal(role_by_name_query(dal, community_id, role)).select().first()
+        if role_row is None:
+            # Fail closed: an undefined role is never assigned, the scope guard never skipped.
+            raise bad_request("Role is not defined for this community")
+        # Scope-based escalation guard (never a role-name check): the caller must hold every
+        # scope of the role being assigned.
+        stored = (role_row.base_claims or {}).get("scopes", [])
+        target_scopes = effective_scopes(getattr(role_row, "role_kind", None), stored)
+        # A caller with no membership here (tenant/global admin bypass) may assign anything
+        # except an admin-kind role, which needs a member who themselves hold the full scope set.
+        enforce = caller_role is not None or getattr(role_row, "role_kind", None) == KIND_ADMIN
+        held = caller_role.scopes if caller_role is not None else frozenset()
+        if enforce and not target_scopes <= held:
+            raise forbidden("Cannot assign a role holding scopes you do not hold")
+        set_member_role(dal, community_id=community_id, role=role, user_id=user_id)
+
+    await run_write_job(async_dal, dal, _job)
 
 
 async def authorize_reputation_admin(
@@ -418,37 +414,38 @@ async def remove_member(
     ctx: TenantContext,
     caller_id: int | None,
     reason: str | None,
+    editor_scopes: frozenset[str],
+    editor_bypass: bool,
 ) -> None:
-    """Deactivate a community member."""
+    """Deactivate a community member (guard, deactivate and count in ONE locked transaction).
+
+    ``editor_scopes``/``editor_bypass`` come from `community_authz.resolve_editor_async`.
+    """
     _ensure_tables(dal)
     await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
 
-    query = (
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)  # noqa: E712
-    )
-    rows = await async_dal.select_async(dal(query))
-    target = rows.first()
-    if target is None:
-        raise not_found("Member not found")
-    if target.role == "community-owner":
-        raise forbidden("Cannot remove owner")
-
-    await async_dal.update_async(
-        query,
-        is_active=False,
-        removed_at=datetime.now(UTC),
-        removed_by=caller_id,
-        removal_reason=reason,
-    )
-    community_rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    community = community_rows.first()
-    if community is not None:
-        await async_dal.update_async(
-            dal.communities.id == community_id,
-            member_count=max(0, (community.member_count or 0) - 1),
+    def _job() -> None:
+        member = community_authz.lock_member_for_change(
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
+            owner_message="Cannot remove owner",
         )
+        dal(dal.community_members.id == member.id).update(
+            is_active=False,
+            removed_at=datetime.now(UTC),
+            removed_by=caller_id,
+            removal_reason=reason,
+        )
+        # Conditional, in-SQL decrement (never read-then-write), floored at 0.
+        communities = dal.communities
+        dal((communities.id == community_id) & (communities.member_count > 0)).update(
+            member_count=communities.member_count - 1
+        )
+
+    await run_write_job(async_dal, dal, _job)
 
 
 async def generate_temp_password(
