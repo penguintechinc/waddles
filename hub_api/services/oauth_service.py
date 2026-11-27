@@ -148,6 +148,10 @@ async def exchange_code(
     return await _exchange_code(platform, creds, code, redirect_uri)
 
 
+DESKTOP_STATE_PREFIX = "desktop_"
+DESKTOP_MODE_LOGIN = "desktop_login"
+
+
 async def start_oauth(
     async_dal: Any,
     dal: Any,
@@ -156,10 +160,13 @@ async def start_oauth(
     mode: str,
     callback_base_url: str,
     binding_nonce: str,
+    desktop: bool = False,
 ) -> tuple[str, str]:
     """Start an OAuth login/link flow. Returns `(authorize_url, state)`.
 
-    The state embeds the SHA-256 of `binding_nonce` (the initiating browser's cookie).
+    The state embeds the SHA-256 of `binding_nonce` (the initiating browser's cookie),
+    unless `desktop=True` (in which case the desktop client holds `state` directly
+    across the system-browser hop and `mode="desktop_login"` is recorded server-side).
 
     `hub_oauth_states` has no `metadata` column (see `schema.py`'s module
     docstring gap 2) -- the tenant-scoped `metadata` insert Node performs
@@ -170,13 +177,18 @@ async def start_oauth(
     """
     _require_valid_platform(platform)
     await login_providers.require_enabled(platform)
-    state = bound_state(secrets.token_hex(16), binding_nonce)
+    if desktop:
+        state = f"{DESKTOP_STATE_PREFIX}{secrets.token_hex(24)}"
+        stored_mode = DESKTOP_MODE_LOGIN
+    else:
+        state = bound_state(secrets.token_hex(16), binding_nonce)
+        stored_mode = mode or "login"
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
 
     await async_dal.insert_async(
         dal.hub_oauth_states,
         state=state,
-        mode=mode or "login",
+        mode=stored_mode,
         platform=platform,
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         created_at=datetime.now(UTC),
@@ -436,17 +448,20 @@ async def oauth_callback(
     raises code `invalid_or_expired_state`.
     """
     await login_providers.require_enabled(platform)
-    try:
-        verify_state_binding(state, binding_nonce)
-    except InstallStateError as exc:
-        raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
-    state_rows = await async_dal.select_async(
-        dal(
-            (dal.hub_oauth_states.state == state)
-            & (dal.hub_oauth_states.platform == platform)
-            & (dal.hub_oauth_states.expires_at > datetime.now(UTC))
-        )
+    is_desktop = state.startswith(DESKTOP_STATE_PREFIX)
+    if not is_desktop:
+        try:
+            verify_state_binding(state, binding_nonce)
+        except InstallStateError as exc:
+            raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
+    state_query = (
+        (dal.hub_oauth_states.state == state)
+        & (dal.hub_oauth_states.platform == platform)
+        & (dal.hub_oauth_states.expires_at > datetime.now(UTC))
     )
+    if is_desktop:
+        state_query = state_query & (dal.hub_oauth_states.mode == DESKTOP_MODE_LOGIN)
+    state_rows = await async_dal.select_async(dal(state_query))
     if not state_rows:
         raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
@@ -473,7 +488,7 @@ async def oauth_callback(
 
 
 async def create_oauth_exchange_code(
-    async_dal: Any, dal: Any, *, token: str, platform: str
+    async_dal: Any, dal: Any, *, token: str, platform: str, desktop: bool = False
 ) -> tuple[str, str]:
     """Mint a short-lived, single-use opaque code standing in for a just-issued session JWT.
 
@@ -489,7 +504,10 @@ async def create_oauth_exchange_code(
     another browser cannot be redeemed there (login CSRF / session fixation).
     """
     nonce = new_nonce()
-    code = bound_state(secrets.token_urlsafe(32), nonce)
+    if desktop:
+        code = f"{DESKTOP_STATE_PREFIX}{secrets.token_urlsafe(32)}"
+    else:
+        code = bound_state(secrets.token_urlsafe(32), nonce)
     await async_dal.insert_async(
         dal.hub_oauth_exchange_codes,
         code=code,
@@ -516,10 +534,11 @@ async def redeem_oauth_exchange_code(
     verified in constant time BEFORE the claim, so a foreign browser cannot burn the code
     (typed `ApiError`: `state_binding_mismatch` / `invalid_or_expired_state`).
     """
-    try:
-        verify_state_binding(code, binding_nonce)
-    except InstallStateError as exc:
-        raise ApiError("exchange code is not bound to this browser", 400, exc.code) from exc
+    if not code.startswith(DESKTOP_STATE_PREFIX):
+        try:
+            verify_state_binding(code, binding_nonce)
+        except InstallStateError as exc:
+            raise ApiError("exchange code is not bound to this browser", 400, exc.code) from exc
     claimed = await async_dal.update_async(
         (dal.hub_oauth_exchange_codes.code == code)
         & (dal.hub_oauth_exchange_codes.used == False)  # noqa: E712 - pydal Field comparison
