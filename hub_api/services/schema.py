@@ -978,6 +978,9 @@ def bind_streaming_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        # 0145_radio_station_default: one default per community (partial unique index).
+        Field("is_default", "boolean", default=False),
+        Field("last_tested_at", "datetime"),
         migrate=migrate,
     )
 

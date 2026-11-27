@@ -225,3 +225,25 @@ async def validate_outbound_url(url: str, *, allowed_schemes: tuple[str, ...]) -
 
     await asyncio.to_thread(_resolve_and_check_sync, hostname)
     return url
+
+
+async def guarded_probe(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """Open `GET url` and return as soon as headers arrive, re-validating every redirect hop.
+
+    For reachability checks on endless bodies (Icecast/Shoutcast radio streams): the
+    body is never read -- the stream is closed straight after the status line and
+    headers. Each hop goes through `validate_outbound_url()` (http/https only, private
+    ranges blocked, DNS resolved off the event loop). `client` must be built with
+    `follow_redirects=False`. Raises `ApiError` (400) on a blocked URL or redirect target
+    and on more than `_MAX_REDIRECTS` hops; transport errors propagate as `httpx.HTTPError`.
+    """
+    current_url = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        await validate_outbound_url(current_url, allowed_schemes=("http", "https"))
+        response = await client.send(client.build_request("GET", current_url), stream=True)
+        await response.aclose()
+        location = response.headers.get("location")
+        if response.status_code not in _REDIRECT_STATUS_CODES or not location:
+            return response
+        current_url = urljoin(current_url, location)
+    raise bad_request(f"Too many redirects (> {_MAX_REDIRECTS})")

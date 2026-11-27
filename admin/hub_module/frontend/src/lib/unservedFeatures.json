@@ -159,19 +159,6 @@
       "POST /api/v1/admin/:communityId/music/playback/control"
     ]
   },
-  "music-provider-config": {
-    "label": "Music provider settings",
-    "endpoints": [
-      "PUT /api/v1/admin/:communityId/music/providers/:provider/config"
-    ]
-  },
-  "radio-station-actions": {
-    "label": "Radio station test and default",
-    "endpoints": [
-      "POST /api/v1/admin/:communityId/music/radio-stations/:stationId/test",
-      "PUT /api/v1/admin/:communityId/music/radio-stations/:stationId/default"
-    ]
-  },
   "member-server-link-requests": {
     "label": "Community link requests",
     "endpoints": [

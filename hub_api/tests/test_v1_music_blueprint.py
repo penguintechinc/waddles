@@ -687,5 +687,489 @@ class TestRadioStationPublicUuid:
         assert ok.status_code == 200
 
 
+_PROVIDER_FIELDS = {
+    "communityId",
+    "providerName",
+    "isConnected",
+    "isActive",
+    "oauthExpiresAt",
+    "lastSync",
+    "config",
+    "createdAt",
+    "updatedAt",
+}
+_STATION_FIELDS = {
+    "id",
+    "communityId",
+    "name",
+    "url",
+    "description",
+    "genre",
+    "isActive",
+    "isDefault",
+    "lastTestedAt",
+    "createdAt",
+    "updatedAt",
+}
+_CONFIG_TMPL = "/api/v1/admin/{community_id}/music/providers/{provider}/config"
+_TEST_TMPL = "/api/v1/admin/{community_id}/music/radio-stations/{station_id}/test"
+_DEFAULT_TMPL = "/api/v1/admin/{community_id}/music/radio-stations/{station_id}/default"
+_LIST_TMPL = "/api/v1/admin/{community_id}/music/radio-stations"
+
+
+def _admin(db: Any, community_id: int) -> dict[str, str]:
+    """Community-admin member + bearer header for `community_id`."""
+    _seed_member(
+        db,
+        community_id=community_id,
+        user_id=1,
+        role="community-admin",
+        scopes=["community:manage_members"],
+    )
+    return {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+
+
+def _foreign_tenant_admin(db: Any) -> tuple[int, dict[str, str]]:
+    """A community in ANOTHER tenant whose admin's JWT carries the default tenant."""
+    other_tenant_id = db.dal.tenants.insert(slug="other-tenant", is_active=True)
+    db.dal.commit()
+    community_id = _seed_community(db, tenant_id=other_tenant_id)
+    _seed_member(
+        db,
+        community_id=community_id,
+        user_id=1,
+        role="community-admin",
+        scopes=["community:manage_members"],
+    )
+    token = make_user_token(user_id=1, tenant=TENANT_SLUG)
+    return community_id, {"Authorization": f"Bearer {token}"}
+
+
+def _seed_provider(db: Any, community_id: int, *, connected: bool = True) -> None:
+    db.dal.community_music_providers.insert(
+        community_id=community_id,
+        provider_name="spotify",
+        is_connected=connected,
+        is_active=False,
+        config='{"playlistId": "abc", "refreshToken": "never-out", "apiKey": "never-out"}',
+    )
+    db.dal.commit()
+
+
+def _seed_station(
+    db: Any,
+    community_id: int,
+    *,
+    name: str = "Lofi",
+    url: str = "https://8.8.8.8/lofi",
+    active: bool = True,
+) -> str:
+    """Insert a station directly; returns its public UUID."""
+    table = db.dal.community_radio_stations
+    row_id = table.insert(community_id=community_id, name=name, url=url, is_active=active)
+    db.dal.commit()
+    return str(db.dal(table.id == row_id).select().first().public_id)
+
+
+def _provider_row(db: Any, community_id: int) -> Any:
+    return db.dal(db.dal.community_music_providers.community_id == community_id).select().first()
+
+
+def _station_row(db: Any, station_uuid: str) -> Any:
+    return db.dal(db.dal.community_radio_stations.public_id == station_uuid).select().first()
+
+
+class _FakeProbeResponse:
+    def __init__(self, status: int, content_type: str | None) -> None:
+        self.status_code = status
+        self.headers = {"content-type": content_type} if content_type else {}
+
+
+class TestProviderConfig:
+    """`PUT .../music/providers/<provider>/config` -- enable/disable a connected provider."""
+
+    async def test_missing_token_is_401(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            json={"enabled": True},
+        )
+        assert response.status_code == 401
+
+    async def test_member_without_scope_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        _seed_member(streaming_db, community_id=community_id, user_id=1, scopes=["community:read"])
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=headers,
+            json={"enabled": True},
+        )
+        assert response.status_code == 403
+
+    async def test_tenant_mismatch_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id, headers = _foreign_tenant_admin(streaming_db)
+        _seed_provider(streaming_db, community_id)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=headers,
+            json={"enabled": True},
+        )
+        assert response.status_code == 403
+        assert _provider_row(streaming_db, community_id).is_active is False
+
+    async def test_flag_off_is_402(
+        self, client: Any, streaming_db: Any, _feature_enabled_default_on: AsyncMock
+    ) -> None:
+        _feature_enabled_default_on.return_value = False
+        community_id = _seed_community(streaming_db)
+        _seed_provider(streaming_db, community_id)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=_admin(streaming_db, community_id),
+            json={"enabled": True},
+        )
+        assert response.status_code == 402
+        assert _provider_row(streaming_db, community_id).is_active is False
+
+    @pytest.mark.parametrize("body", [{}, {"enabled": "not-a-bool"}, {"enabled": None}])
+    async def test_invalid_body_is_400(self, client: Any, streaming_db: Any, body: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=_admin(streaming_db, community_id),
+            json=body,
+        )
+        assert response.status_code == 400
+
+    async def test_unsupported_provider_is_400(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="napster"),
+            headers=_admin(streaming_db, community_id),
+            json={"enabled": True},
+        )
+        assert response.status_code == 400
+
+    async def test_unknown_provider_row_is_404(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=_admin(streaming_db, community_id),
+            json={"enabled": True},
+        )
+        assert response.status_code == 404
+
+    async def test_enable_disconnected_is_409(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        _seed_provider(streaming_db, community_id, connected=False)
+        response = await client.put(
+            cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify"),
+            headers=_admin(streaming_db, community_id),
+            json={"enabled": True},
+        )
+        assert response.status_code == 409
+
+    async def test_enable_then_disable_exact_fields_no_secrets(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        community_id = _seed_community(streaming_db)
+        _seed_provider(streaming_db, community_id)
+        headers = _admin(streaming_db, community_id)
+        url = cpath(streaming_db, _CONFIG_TMPL, community_id, provider="spotify")
+
+        on = await client.put(url, headers=headers, json={"enabled": True})
+        assert on.status_code == 200
+        body = await on.get_json()
+        assert set(body) == {"success", "provider"}
+        assert set(body["provider"]) == _PROVIDER_FIELDS
+        assert body["provider"]["isActive"] is True
+        assert body["provider"]["config"] == {"playlistId": "abc"}
+        assert "never-out" not in str(body)
+
+        off = await client.put(url, headers=headers, json={"enabled": False})
+        assert (await off.get_json())["provider"]["isActive"] is False
+        row = _provider_row(streaming_db, community_id)
+        assert (row.is_active, row.is_connected) == (False, True)
+
+    async def test_list_providers_exact_fields(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        _seed_provider(streaming_db, community_id)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/providers", community_id),
+            headers=_admin(streaming_db, community_id),
+        )
+        body = await response.get_json()
+        assert set(body["providers"][0]) == _PROVIDER_FIELDS
+        assert "never-out" not in str(body)
+
+
+class TestRadioStationTest:
+    """`POST .../radio-stations/<uuid>/test` -- header-only SSRF-guarded reachability probe."""
+
+    async def test_member_without_scope_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        _seed_member(streaming_db, community_id=community_id, user_id=1, scopes=["community:read"])
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station), headers=headers
+        )
+        assert response.status_code == 403
+
+    async def test_tenant_mismatch_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id, headers = _foreign_tenant_admin(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station), headers=headers
+        )
+        assert response.status_code == 403
+
+    async def test_flag_off_is_402(
+        self, client: Any, streaming_db: Any, _feature_enabled_default_on: AsyncMock
+    ) -> None:
+        _feature_enabled_default_on.return_value = False
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 402
+
+    async def test_foreign_community_station_is_404(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        other = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, other)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 404
+
+    async def test_reachable_exact_fields_and_stamps_last_tested(
+        self, client: Any, streaming_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import services.music_service as svc_module
+
+        probe = AsyncMock(return_value=_FakeProbeResponse(200, "audio/mpeg"))
+        monkeypatch.setattr(svc_module, "guarded_probe", probe)
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert set(body) == {"success", "result"}
+        assert set(body["result"]) == {"reachable", "httpStatus", "contentType", "testedAt"}
+        assert body["result"]["reachable"] is True
+        assert body["result"]["httpStatus"] == 200
+        assert body["result"]["contentType"] == "audio/mpeg"
+        assert probe.await_args is not None
+        assert probe.await_args.args[1] == "https://8.8.8.8/lofi"
+        assert _station_row(streaming_db, station).last_tested_at is not None
+
+    async def test_non_2xx_is_unreachable(
+        self, client: Any, streaming_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import services.music_service as svc_module
+
+        monkeypatch.setattr(
+            svc_module, "guarded_probe", AsyncMock(return_value=_FakeProbeResponse(404, None))
+        )
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        result = (await response.get_json())["result"]
+        assert (result["reachable"], result["httpStatus"]) == (False, 404)
+
+    async def test_transport_error_is_unreachable_not_500(
+        self, client: Any, streaming_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        import services.music_service as svc_module
+
+        monkeypatch.setattr(
+            svc_module, "guarded_probe", AsyncMock(side_effect=httpx.ConnectError("refused"))
+        )
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 200
+        result = (await response.get_json())["result"]
+        assert (result["reachable"], result["httpStatus"]) == (False, None)
+
+    async def test_private_url_is_blocked_400_real_guard(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        """Real `guarded_probe`: a stored URL pointing at loopback is refused, never fetched."""
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id, url="http://127.0.0.1:8080/admin")
+        response = await client.post(
+            cpath(streaming_db, _TEST_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 400
+        assert _station_row(streaming_db, station).last_tested_at is None
+
+
+class TestRadioStationDefault:
+    """`PUT .../radio-stations/<uuid>/default` -- one active default per community."""
+
+    async def test_member_without_scope_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        _seed_member(streaming_db, community_id=community_id, user_id=1, scopes=["community:read"])
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+        response = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=station), headers=headers
+        )
+        assert response.status_code == 403
+        assert _station_row(streaming_db, station).is_default is False
+
+    async def test_tenant_mismatch_is_403(self, client: Any, streaming_db: Any) -> None:
+        community_id, headers = _foreign_tenant_admin(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=station), headers=headers
+        )
+        assert response.status_code == 403
+
+    async def test_flag_off_is_402(
+        self, client: Any, streaming_db: Any, _feature_enabled_default_on: AsyncMock
+    ) -> None:
+        _feature_enabled_default_on.return_value = False
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id)
+        response = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 402
+
+    async def test_numeric_or_foreign_station_is_404(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        other = _seed_community(streaming_db)
+        foreign = _seed_station(streaming_db, other)
+        headers = _admin(streaming_db, community_id)
+        own = _seed_station(streaming_db, community_id)
+        numeric = _station_row(streaming_db, own).id
+        for sid in (foreign, numeric):
+            response = await client.put(
+                cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=sid), headers=headers
+            )
+            assert response.status_code == 404
+        assert _station_row(streaming_db, foreign).is_default is False
+
+    async def test_inactive_station_is_409(self, client: Any, streaming_db: Any) -> None:
+        community_id = _seed_community(streaming_db)
+        station = _seed_station(streaming_db, community_id, active=False)
+        response = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=station),
+            headers=_admin(streaming_db, community_id),
+        )
+        assert response.status_code == 409
+
+    async def test_switching_default_clears_previous_exact_fields(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        community_id = _seed_community(streaming_db)
+        other = _seed_community(streaming_db)
+        other_default = _seed_station(streaming_db, other, name="Other")
+        other_resp = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, other, station_id=other_default),
+            headers=_admin(streaming_db, other),
+        )
+        assert other_resp.status_code == 200
+        headers = _admin(streaming_db, community_id)
+        first = _seed_station(streaming_db, community_id, name="A")
+        second = _seed_station(streaming_db, community_id, name="B")
+
+        r1 = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=first), headers=headers
+        )
+        assert r1.status_code == 200
+        body = await r1.get_json()
+        assert set(body) == {"success", "station"}
+        assert set(body["station"]) == _STATION_FIELDS
+        assert (body["station"]["id"], body["station"]["isDefault"]) == (first, True)
+
+        r2 = await client.put(
+            cpath(streaming_db, _DEFAULT_TMPL, community_id, station_id=second), headers=headers
+        )
+        assert r2.status_code == 200
+        listed = await client.get(cpath(streaming_db, _LIST_TMPL, community_id), headers=headers)
+        stations = (await listed.get_json())["stations"]
+        assert all(set(s) == _STATION_FIELDS for s in stations)
+        assert {s["id"]: s["isDefault"] for s in stations} == {first: False, second: True}
+        # Another community's default is untouched (community-scoped clear).
+        assert _station_row(streaming_db, other_default).is_default is True
+
+
+class TestGuardedProbe:
+    """`services.url_guard.guarded_probe` -- headers only, every redirect hop re-validated."""
+
+    async def test_redirect_to_private_is_blocked(self) -> None:
+        import httpx
+
+        from services.errors import ApiError
+        from services.url_guard import guarded_probe
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/secret"})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ) as client:
+            with pytest.raises(ApiError) as exc:
+                await guarded_probe(client, "https://8.8.8.8/stream")
+        assert exc.value.status_code == 400
+
+    async def test_redirect_loop_is_capped(self) -> None:
+        import httpx
+
+        from services.errors import ApiError
+        from services.url_guard import guarded_probe
+
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(302, headers={"location": "https://8.8.4.4/again"})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ) as client:
+            with pytest.raises(ApiError):
+                await guarded_probe(client, "https://8.8.8.8/stream")
+        assert calls == 6
+
+    async def test_follows_public_redirect_and_returns_headers(self) -> None:
+        import httpx
+
+        from services.url_guard import guarded_probe
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "8.8.8.8":
+                return httpx.Response(301, headers={"location": "https://8.8.4.4/live"})
+            return httpx.Response(200, headers={"content-type": "audio/aac"}, content=b"x" * 10)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ) as client:
+            response = await guarded_probe(client, "https://8.8.8.8/stream")
+        assert (response.status_code, response.headers["content-type"]) == (200, "audio/aac")
+
+
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True

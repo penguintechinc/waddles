@@ -236,14 +236,6 @@
 - path: admin/hub_module/frontend/src/pages/admin/AdminHome.jsx
   pattern: "<(NotAvailableYet|ServedFeature)"
   issue: TBD-file
-# music-provider-config
-- path: admin/hub_module/frontend/src/pages/admin/AdminMusicProviders.jsx
-  pattern: "<(NotAvailableYet|ServedFeature)"
-  issue: TBD-file
-# radio-station-actions
-- path: admin/hub_module/frontend/src/pages/admin/AdminRadioStations.jsx
-  pattern: "<(NotAvailableYet|ServedFeature)"
-  issue: TBD-file
 # reputation-config
 - path: admin/hub_module/frontend/src/pages/admin/ReputationSettings.jsx
   pattern: "<(NotAvailableYet|ServedFeature)"

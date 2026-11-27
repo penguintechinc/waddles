@@ -5,9 +5,11 @@ Mounted at `/api/v1/admin/<community_id>/music/*`, matching
 calls byte-for-byte (see `hub_api/PORTING.md`'s checklist). Node's own
 `routes/music.js` (which would mount this same contract) is never wired
 into `routes/index.js` -- `services/music_service.py`'s module docstring
-covers that gap and the resulting 5-endpoint contract-vs-implementation
-mismatch in `api.js` in full; only the 8 real `musicController.js`
-handlers are ported here.
+covers that gap. The 8 real `musicController.js` handlers are ported
+here, plus three native endpoints that back the admin webui's Music
+Providers / Radio Stations pages (provider enable/disable, radio stream
+test, default station) -- these three are gated by the
+`waddles.streaming.music_station` flag (402 when off).
 
 Auth pattern deviation from `blueprints/v1/auth.py`'s `tenant_middleware`
 + `require_scope(...)` copy-me recipe (documented, not accidental): every
@@ -39,7 +41,12 @@ from services.community_authz import authorize_community
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, payment_required
-from services.music_service import MusicProviderDTO, MusicSettingsDTO, RadioStationDTO
+from services.music_service import (
+    MusicProviderDTO,
+    MusicSettingsDTO,
+    RadioProbeResult,
+    RadioStationDTO,
+)
 from services.pagination import parse_limit
 from services.public_ids import PublicIdTarget, build_view_arg_translator
 from services.schema import bind_streaming_tables
@@ -71,6 +78,18 @@ def _dal() -> tuple[Any, Any]:
     async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
     bind_streaming_tables(dal)
     return async_dal, dal
+
+
+async def _require_music_feature() -> None:
+    """Raise 402 unless `waddles.streaming.music_station` is on for the caller's tenant.
+
+    Runs AFTER `authorize_community()` (tenant + scope first, security.md ordering), so a
+    caller without access sees 401/403, never a plan hint about someone else's community.
+    """
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
+    if not await feature_enabled(FEATURE_STREAMING_MUSIC_STATION, tenant=ctx.tenant_slug):
+        raise payment_required("The Music Station is not enabled for this plan")
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -179,6 +198,29 @@ class RadioStationResponse:
     station: RadioStationDTO
 
 
+@dataclass(slots=True, frozen=True)
+class UpdateProviderConfigRequest:
+    """Request DTO for `PUT .../music/providers/<provider>/config` -- no credentials accepted."""
+
+    enabled: bool
+
+
+@dataclass(slots=True, frozen=True)
+class MusicProviderResponse:
+    """Response DTO for the provider-config endpoint."""
+
+    success: bool
+    provider: MusicProviderDTO
+
+
+@dataclass(slots=True, frozen=True)
+class RadioProbeResponse:
+    """Response DTO for `POST .../radio-stations/<uuid>/test` -- `success` = the probe ran."""
+
+    success: bool
+    result: RadioProbeResult
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -201,10 +243,7 @@ async def get_music_settings(
             admin=True,
             scope=SCOPE_MUSIC_STATION,
         )
-        ctx = get_tenant_context(request)
-        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
-        if not await feature_enabled(FEATURE_STREAMING_MUSIC_STATION, tenant=ctx.tenant_slug):
-            raise payment_required("The Music Station is not enabled for this plan")
+        await _require_music_feature()
         settings = await svc.get_music_settings(async_dal, dal, community_id=community_id)
     except ApiError as exc:
         logger.debug("handled %s in music: %s", type(exc).__name__, exc)
@@ -422,6 +461,92 @@ async def remove_radio_station(
         logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Radio station removed")
+
+
+@music_bp.route("/<cuuid:community_id>/music/providers/<provider>/config", methods=["PUT"])
+@tenant_middleware  # type: ignore[misc]
+@validate_request(UpdateProviderConfigRequest)
+@validate_response(MusicProviderResponse)
+async def update_provider_config(
+    data: UpdateProviderConfigRequest, community_id: int, provider: str
+) -> MusicProviderResponse | tuple[dict[str, object], int]:
+    """Enable or disable a connected music provider for a community."""
+    async_dal, dal = _dal()
+    try:
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
+        await _require_music_feature()
+        dto = await svc.update_provider_config(
+            async_dal, dal, community_id=community_id, provider=provider, enabled=data.enabled
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
+        return _err(exc)
+    return MusicProviderResponse(success=True, provider=dto)
+
+
+@music_bp.route(
+    "/<cuuid:community_id>/music/radio-stations/<puuid:station_id>/test", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@validate_response(RadioProbeResponse)
+async def probe_radio_station(
+    community_id: int, station_id: int
+) -> RadioProbeResponse | tuple[dict[str, object], int]:
+    """Probe a radio station's stream URL for reachability (headers only, SSRF-guarded)."""
+    async_dal, dal = _dal()
+    try:
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
+        await _require_music_feature()
+        result = await svc.probe_radio_station(
+            async_dal, dal, community_id=community_id, station_id=station_id
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
+        return _err(exc)
+    return RadioProbeResponse(success=True, result=result)
+
+
+@music_bp.route(
+    "/<cuuid:community_id>/music/radio-stations/<puuid:station_id>/default", methods=["PUT"]
+)
+@tenant_middleware  # type: ignore[misc]
+@validate_response(RadioStationResponse)
+async def set_default_radio_station(
+    community_id: int, station_id: int
+) -> RadioStationResponse | tuple[dict[str, object], int]:
+    """Make an active radio station the community's default (previous default cleared)."""
+    async_dal, dal = _dal()
+    try:
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
+        await _require_music_feature()
+        station = await svc.set_default_radio_station(
+            async_dal, dal, community_id=community_id, station_id=station_id
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
+        return _err(exc)
+    return RadioStationResponse(success=True, station=station)
 
 
 BLUEPRINTS: list[Blueprint] = [music_bp]
