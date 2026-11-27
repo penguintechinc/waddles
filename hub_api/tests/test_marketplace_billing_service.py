@@ -56,7 +56,6 @@ class TestIsCommunityAdmin:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(user_id),
-            role="moderator",
             community_role_id=role_id,
             is_active=True,
         )
@@ -77,19 +76,18 @@ class TestIsCommunityAdmin:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(user_id),
-            role="moderator",
             community_role_id=role_id,
             is_active=True,
         )
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is False
 
-    def test_role_name_alone_grants_nothing(self, seeded: Any) -> None:
+    def test_unlinked_member_grants_nothing(self, seeded: Any) -> None:
         """A `moderator` role NAME with no scope-bearing role row is not admin (scopes only)."""
         dal, _tenant_id, community_id = seeded
         user_id = int(dal.hub_users.insert(username="nm", email="nm@x.com"))
         dal.community_members.insert(
-            community_id=community_id, user_id=str(user_id), role="moderator", is_active=True
+            community_id=community_id, user_id=str(user_id), is_active=True
         )
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is False
@@ -98,7 +96,7 @@ class TestIsCommunityAdmin:
         dal, _tenant_id, community_id = seeded
         user_id = int(dal.hub_users.insert(username="member", email="m@x.com"))
         dal.community_members.insert(
-            community_id=community_id, user_id=str(user_id), role="member", is_active=True
+            community_id=community_id, user_id=str(user_id), is_active=True
         )
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is False
@@ -107,7 +105,7 @@ class TestIsCommunityAdmin:
         dal, _tenant_id, community_id = seeded
         user_id = int(dal.hub_users.insert(username="ex", email="ex@x.com"))
         dal.community_members.insert(
-            community_id=community_id, user_id=str(user_id), role="community-owner", is_active=False
+            community_id=community_id, user_id=str(user_id), is_active=False
         )
         dal.commit()
         assert svc.is_community_admin(dal, community_id, user_id) is False

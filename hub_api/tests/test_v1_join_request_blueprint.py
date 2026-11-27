@@ -128,7 +128,6 @@ def _seed_member(auth_db: Any, *, community_id: int, user_id: int, role_id: int)
     auth_db.dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role="member",
         is_active=True,
         joined_at=datetime.now(UTC),
         community_role_id=role_id,
@@ -266,7 +265,7 @@ class TestSubmitRequest:
         community_id = _seed_tenant_community(auth_db)
         user_id = _seed_user(auth_db, email="banned@example.com", username="banned")
         auth_db.dal.community_members.insert(
-            community_id=community_id, user_id=str(user_id), role="member", is_active=False
+            community_id=community_id, user_id=str(user_id), is_active=False
         )
         auth_db.dal.commit()
         response = await client.post(

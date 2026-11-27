@@ -50,12 +50,13 @@ CREATE TABLE hub_user_identities (
     UNIQUE(hub_user_id, platform), UNIQUE(platform, platform_user_id));
 CREATE TABLE community_roles (
     id SERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
-    name VARCHAR(50) NOT NULL, public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    name VARCHAR(50) NOT NULL, is_system BOOLEAN NOT NULL DEFAULT false,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     UNIQUE(community_id, name));
 CREATE TABLE community_members (
     id SERIAL PRIMARY KEY, community_id INTEGER REFERENCES communities(id),
     user_id VARCHAR(255), platform VARCHAR(50), platform_user_id VARCHAR(255),
-    role VARCHAR(50) DEFAULT 'member', community_role_id INTEGER REFERENCES community_roles(id),
+    community_role_id INTEGER REFERENCES community_roles(id),
     claims_cache JSONB, is_active BOOLEAN DEFAULT true, left_at TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     user_uuid UUID, user_uuid_unavailable_reason TEXT,
@@ -104,8 +105,8 @@ CREATE UNIQUE INDEX uq_role_sync_binding_community_role
     ON community_role_sync_bindings (pairing_id, discord_role_id)
     WHERE sync_scope = 'community_role';
 INSERT INTO communities (id, name) VALUES (1, 'waddlebot');
-INSERT INTO community_roles (community_id, name) VALUES
-    (1, 'member'), (1, 'moderator'), (1, 'community-owner');
+INSERT INTO community_roles (community_id, name, is_system) VALUES
+    (1, 'member', true), (1, 'moderator', true), (1, 'community-owner', true);
 """
 
 
@@ -134,6 +135,11 @@ def conn(dsn: str) -> Iterator[psycopg2.extensions.connection]:
     c.close()
 
 
+_ROLE_NAME_SQL = (
+    "SELECT r.name FROM community_members m JOIN community_roles r ON r.id = m.community_role_id"
+)
+
+
 def _count(conn: psycopg2.extensions.connection, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM {table}")  # noqa: S608 -- fixed test table names
@@ -151,7 +157,10 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
         assert cur.fetchall() == [("discord_to_twitch", True, True)]
         cur.execute("SELECT discord_guild_id, tenant_id FROM discord_guild_tenants")
         assert cur.fetchall() == [(cfg.guild_id, 1)], "the seed must claim the guild (0137)"
-        cur.execute("SELECT role, user_id, is_active FROM community_members")
+        cur.execute(
+            "SELECT r.name, m.user_id, m.is_active FROM community_members m "
+            "JOIN community_roles r ON r.id = m.community_role_id"
+        )
         assert cur.fetchall() == [("member", str(result.hub_user_id), True)]
         cur.execute(
             "SELECT sync_scope, community_role FROM community_role_sync_bindings"
@@ -194,8 +203,8 @@ def test_refuses_to_rebind_pseudonymous_member(
     cfg = seed_mod.load_config(_ENV)
     with conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
-            "VALUES (1, 'discord', %s, 'member')",
+            "INSERT INTO community_members (community_id, platform, platform_user_id) "
+            "VALUES (1, 'discord', %s)",
             (cfg.discord_user_id,),
         )
         cur.execute("SELECT user_uuid FROM community_members")
@@ -269,16 +278,22 @@ def test_reseed_resets_promoted_role_but_never_owner(
     cfg = seed_mod.load_config(_ENV)
     seed_mod.seed(conn, cfg)
     with conn, conn.cursor() as cur:
-        cur.execute("UPDATE community_members SET role = 'moderator'")
+        cur.execute(
+            "UPDATE community_members SET community_role_id = "
+            "(SELECT id FROM community_roles WHERE name = 'moderator')"
+        )
     seed_mod.seed(conn, cfg)
     with conn.cursor() as cur:
-        cur.execute("SELECT role FROM community_members")
+        cur.execute(_ROLE_NAME_SQL)
         assert cur.fetchone()[0] == "member"
-        cur.execute("UPDATE community_members SET role = 'community-owner'")
+        cur.execute(
+            "UPDATE community_members SET community_role_id = "
+            "(SELECT id FROM community_roles WHERE name = 'community-owner')"
+        )
     conn.commit()
     seed_mod.seed(conn, cfg)
     with conn.cursor() as cur:
-        cur.execute("SELECT role FROM community_members")
+        cur.execute(_ROLE_NAME_SQL)
         assert cur.fetchone()[0] == "community-owner"
 
 

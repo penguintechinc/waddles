@@ -570,8 +570,6 @@ RULES: tuple[Rule, ...] = (
         "communities",
         "created_by",
         "deleted_by",
-        "owner_id",
-        "owner_name",
         reason="free-form varchar set by superadmin, not a hub_users reference",
     ),
     review(

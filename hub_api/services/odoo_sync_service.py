@@ -296,17 +296,22 @@ async def sync_community(
     dal: Any, client: OdooClient, config: OdooConfig, community_id: int
 ) -> tuple[int, int, int]:
     """Upsert one community's active members into Odoo; returns (examined, created, updated)."""
+    cm = dal.community_members
     rows = dal(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.is_active == True)  # noqa: E712 -- pydal expression
-    ).select()
+        (cm.community_id == community_id) & (cm.is_active == True)  # noqa: E712 -- pydal expr
+    ).select(
+        cm.ALL,
+        dal.community_roles.name,
+        left=dal.community_roles.on(cm.community_role_id == dal.community_roles.id),
+    )
     community_ref = member_ref(config.ref_key, community_id, "community")
     records: dict[str, dict[str, Any]] = {}
-    for row in rows:
+    for r in rows:
+        row = r.community_members
         uid = str(row.user_id or row.platform_user_id or row.id)
         ref = member_ref(config.ref_key, community_id, uid)
         records[ref] = _record_values(
-            ref, community_ref, str(row.role or "member"), int(row.reputation or 0)
+            ref, community_ref, str(r.community_roles.name or "member"), int(row.reputation or 0)
         )
     _batch_size.record(len(records))
     if not records:

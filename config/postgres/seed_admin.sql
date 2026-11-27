@@ -104,25 +104,33 @@ INSERT INTO communities (
 -- =============================================================================
 -- Add Admin to Global Community
 -- =============================================================================
+-- Authority is the LINKED role (community_members.community_role_id -> community_roles): seed the
+-- global community's system roles (idempotent, the database's own seed function) and link the
+-- admin to the system `community-admin` row. There is no role string column.
+SELECT seed_community_system_roles(id) FROM communities WHERE name = 'waddlebot-global';
+
 INSERT INTO community_members (
     community_id,
     user_id,
-    role,
+    community_role_id,
     is_active,
     joined_at
 )
 SELECT
     c.id,
     u.id,
-    'admin',
+    r.id,
     true,
     NOW()
 FROM hub_users u
 CROSS JOIN communities c
+JOIN community_roles r
+  ON r.community_id = c.id AND r.name = 'community-admin' AND r.is_system
 WHERE u.email = :'admin_email'
   AND c.name = 'waddlebot-global'
 ON CONFLICT (community_id, user_id) DO UPDATE SET
-    role = 'admin',
+    community_role_id = EXCLUDED.community_role_id,
+    claims_cache = NULL,
     is_active = true;
 
 -- =============================================================================

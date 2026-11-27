@@ -123,11 +123,11 @@ class TestCreateSeedsAndLinksCreator:
 
         member = pg.q(
             dal,
-            "SELECT role, community_role_id, is_active FROM community_members "
+            "SELECT community_role_id, is_active FROM community_members "
             "WHERE community_id = %s AND user_id = %s",
             [community_id, str(CREATOR)],
         )
-        assert member == [(member_roles.COMMUNITY_OWNER_ROLE, owner_id, True)]
+        assert member == [(owner_id, True)]
 
         full = effective_scopes(KIND_ADMIN, None)
         caller = await community_authz.get_caller_community_role(
@@ -136,13 +136,6 @@ class TestCreateSeedsAndLinksCreator:
         assert caller is not None
         assert caller.scopes == full
         assert community_authz.member_scopes_sync(dal, community_id, CREATOR) == full
-
-    async def test_owner_id_is_not_written(self, adal: AsyncDAL) -> None:
-        community_id, _ = await _create(adal)
-        assert (
-            pg.scalar(adal.dal, "SELECT owner_id FROM communities WHERE id = %s", [community_id])
-            is None
-        )
 
     async def test_seed_failure_rolls_back_the_whole_create(
         self, adal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
@@ -181,10 +174,10 @@ class TestGlobalAutoJoin:
         member_id, _, base_claims = _role(dal, community_id, member_roles.COMMUNITY_MEMBER_ROLE)
         assert pg.q(
             dal,
-            "SELECT role, community_role_id FROM community_members "
+            "SELECT community_role_id FROM community_members "
             "WHERE community_id = %s AND user_id = %s",
             [community_id, str(JOINER)],
-        ) == [(member_roles.COMMUNITY_MEMBER_ROLE, member_id)]
+        ) == [(member_id,)]
         want = frozenset(base_claims["scopes"])
         assert "community:read" in want
         caller = await community_authz.get_caller_community_role(
@@ -207,7 +200,7 @@ class TestGlobalAutoJoin:
         owner_id, _, _ = _role(dal, community_id, member_roles.COMMUNITY_OWNER_ROLE)
         assert pg.q(
             dal,
-            "SELECT role, community_role_id FROM community_members "
+            "SELECT community_role_id FROM community_members "
             "WHERE community_id = %s AND user_id = %s",
             [community_id, str(CREATOR)],
-        ) == [(member_roles.COMMUNITY_OWNER_ROLE, owner_id)]
+        ) == [(owner_id,)]

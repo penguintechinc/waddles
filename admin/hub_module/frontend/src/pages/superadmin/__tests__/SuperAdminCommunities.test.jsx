@@ -9,6 +9,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import SuperAdminCommunities from '../SuperAdminCommunities';
 import { superAdminApi } from '../../../services/api';
+import { fetchCommunityMembers } from '../../../services/communityMembersApi';
 
 vi.mock('../../../services/api', () => ({
   superAdminApi: {
@@ -18,6 +19,15 @@ vi.mock('../../../services/api', () => ({
     deleteCommunity: vi.fn(),
   },
 }));
+
+vi.mock('../../../services/communityMembersApi', () => ({
+  fetchCommunityMembers: vi.fn(),
+}));
+
+const MEMBERS = [
+  { userId: '11111111-1111-4111-8111-111111111111', username: 'alice', roleName: 'community-owner' },
+  { userId: '22222222-2222-4222-8222-222222222222', username: 'bob', roleName: 'member' },
+];
 
 const COMMUNITIES = [
   {
@@ -73,6 +83,7 @@ beforeEach(() => {
   for (const fn of ['updateCommunity', 'reassignOwner', 'deleteCommunity']) {
     superAdminApi[fn].mockResolvedValue({ data: { success: true } });
   }
+  fetchCommunityMembers.mockResolvedValue({ members: MEMBERS, page: 1, limit: 100, total: 2, totalPages: 1 });
   vi.stubGlobal('alert', vi.fn());
 });
 
@@ -298,10 +309,12 @@ describe('SuperAdminCommunities reassign owner', () => {
   async function openReassign(name = 'Penguin Club') {
     await loaded();
     fireEvent.click(rowOf(name).getByRole('button', { name: 'Reassign' }));
-    return modal('Reassign Owner');
+    const m = modal('Reassign Owner');
+    await m.findByRole('option', { name: 'bob (member)' });
+    return m;
   }
 
-  it('shows the community and current owner', async () => {
+  it('shows the community and current owner (display only)', async () => {
     const m = await openReassign();
     expect(m.getByText('Penguin Club')).toBeInTheDocument();
     expect(m.getByText('Current owner: Alice')).toBeInTheDocument();
@@ -312,34 +325,45 @@ describe('SuperAdminCommunities reassign owner', () => {
     expect(m.getByText('Current owner: Unassigned')).toBeInTheDocument();
   });
 
-  it('requires a new owner name', async () => {
+  it('offers no free-text owner name or id inputs', async () => {
     const m = await openReassign();
-    fireEvent.change(m.getByPlaceholderText("Enter new owner's name"), { target: { value: '   ' } });
-    fireEvent.submit(m.getByPlaceholderText("Enter new owner's name").closest('form'));
-    await waitFor(() => expect(alert).toHaveBeenCalledWith('Owner name is required'));
+    expect(m.queryByPlaceholderText("Enter new owner's name")).not.toBeInTheDocument();
+    expect(m.queryByPlaceholderText('Platform user ID')).not.toBeInTheDocument();
+  });
+
+  it("loads the community's members by its id and re-queries on search", async () => {
+    const m = await openReassign();
+    expect(fetchCommunityMembers).toHaveBeenCalledWith(1, { page: 1, limit: 100, search: '', roleId: '' });
+    fireEvent.change(m.getByPlaceholderText('Search members'), { target: { value: 'bo' } });
+    await waitFor(() =>
+      expect(fetchCommunityMembers).toHaveBeenCalledWith(1, { page: 1, limit: 100, search: 'bo', roleId: '' }),
+    );
+  });
+
+  it('requires a member to be selected', async () => {
+    const m = await openReassign();
+    fireEvent.submit(m.getByLabelText('New Owner *').closest('form'));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith('Select a member to become the owner'));
     expect(superAdminApi.reassignOwner).not.toHaveBeenCalled();
   });
 
-  it('reassigns with name and id, closes and reloads', async () => {
+  it('transfers by user UUID only, closes and reloads', async () => {
     const m = await openReassign();
-    fireEvent.change(m.getByPlaceholderText("Enter new owner's name"), { target: { value: 'Bob' } });
-    fireEvent.change(m.getByPlaceholderText('Platform user ID'), { target: { value: 'u-9' } });
+    fireEvent.change(m.getByLabelText('New Owner *'), { target: { value: MEMBERS[1].userId } });
     fireEvent.click(m.getByRole('button', { name: 'Reassign Owner' }));
 
     await waitFor(() =>
-      expect(superAdminApi.reassignOwner).toHaveBeenCalledWith(1, { newOwnerId: 'u-9', newOwnerName: 'Bob' }),
+      expect(superAdminApi.reassignOwner).toHaveBeenCalledWith(1, { newOwnerUserId: MEMBERS[1].userId }),
     );
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Reassign Owner' })).not.toBeInTheDocument());
     await waitFor(() => expect(superAdminApi.getCommunities).toHaveBeenCalledTimes(2));
   });
 
-  it('sends a null id when none is given', async () => {
-    const m = await openReassign();
-    fireEvent.change(m.getByPlaceholderText("Enter new owner's name"), { target: { value: 'Bob' } });
-    fireEvent.click(m.getByRole('button', { name: 'Reassign Owner' }));
-    await waitFor(() =>
-      expect(superAdminApi.reassignOwner).toHaveBeenCalledWith(1, { newOwnerId: null, newOwnerName: 'Bob' }),
-    );
+  it('says so when the member list cannot be loaded', async () => {
+    fetchCommunityMembers.mockRejectedValue(new Error('x'));
+    await loaded();
+    fireEvent.click(rowOf('Penguin Club').getByRole('button', { name: 'Reassign' }));
+    expect(await screen.findByText('Failed to load community members')).toBeInTheDocument();
   });
 
   it.each([
@@ -348,7 +372,7 @@ describe('SuperAdminCommunities reassign owner', () => {
   ])('alerts with %s on failure', async (_label, err, text) => {
     superAdminApi.reassignOwner.mockRejectedValue(err);
     const m = await openReassign();
-    fireEvent.change(m.getByPlaceholderText("Enter new owner's name"), { target: { value: 'Bob' } });
+    fireEvent.change(m.getByLabelText('New Owner *'), { target: { value: MEMBERS[1].userId } });
     fireEvent.click(m.getByRole('button', { name: 'Reassign Owner' }));
     await waitFor(() => expect(alert).toHaveBeenCalledWith(text));
   });

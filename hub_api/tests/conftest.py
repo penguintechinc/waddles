@@ -557,7 +557,6 @@ def seed_membership(
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role=role,
         is_active=True,
         community_role_id=role_id,
     )
@@ -579,7 +578,6 @@ def seed_scoped_member(
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role=name,
         is_active=True,
         community_role_id=role_id,
     )
@@ -846,7 +844,6 @@ def lifecycle_db(tmp_path: Any) -> Any:
     dal.community_members.insert(
         community_id=community_id,
         user_id="1",
-        role="admin",
         community_role_id=role_id,
         is_active=True,
     )

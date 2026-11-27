@@ -105,9 +105,7 @@ def _seed_community(db: Any) -> int:
 
 
 def _seed_member(db: Any, *, community_id: int, user_id: int) -> None:
-    db.dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role="member", is_active=True
-    )
+    db.dal.community_members.insert(community_id=community_id, user_id=str(user_id), is_active=True)
     db.dal.commit()
 
 

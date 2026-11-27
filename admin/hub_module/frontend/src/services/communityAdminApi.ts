@@ -3,7 +3,8 @@ import { requireWireCommunityId } from '../lib/communityId';
 import { expectRecord, isRecord, readOptString, readString } from '../lib/wire';
 
 // Community creation:
-//   POST /api/v1/superadmin/communities   (platform admins; may set isPublic/owner)
+//   POST /api/v1/superadmin/communities   (platform admins; may set isPublic; the creator becomes the
+//                                          owner -- there is no owner field, 400 if one is sent)
 //   POST /api/v1/communities              (everyone else; 403 `feature_disabled` while the
 //                                          `waddles.community-self-create` flag is off)
 // Both answer 201 `{ success, community: { id, name, displayName } }`.
@@ -16,9 +17,6 @@ export interface CreateCommunityPayload {
   platformServerId?: string;
   isPublic?: boolean;
   communityType?: string;
-  /** Super admins can assign another owner. */
-  ownerId?: string;
-  ownerName?: string;
 }
 
 export interface CreatedCommunity {
@@ -30,7 +28,7 @@ export interface CreatedCommunity {
 
 /** Drops the fields only the super-admin route accepts. */
 function withoutAdminFields(payload: CreateCommunityPayload): CreateCommunityPayload {
-  const { isPublic: _isPublic, ownerId: _ownerId, ownerName: _ownerName, ...rest } = payload;
+  const { isPublic: _isPublic, ...rest } = payload;
   return rest;
 }
 
@@ -55,7 +53,7 @@ function field(values: Record<string, unknown>, key: string): string | undefined
 
 /**
  * Turns the untyped `CommunityForm` values into a payload. Optional keys are omitted rather
- * than sent as `undefined`; the owner and platform-server fields are only honoured for super admins.
+ * than sent as `undefined`; the platform-server field is only honoured for super admins.
  */
 export function toCreatePayload(raw: unknown, allowOwner: boolean): CreateCommunityPayload {
   const values = isRecord(raw) ? raw : {};
@@ -75,11 +73,5 @@ export function toCreatePayload(raw: unknown, allowOwner: boolean): CreateCommun
   // the API ignores it and the pairing/bot-install flow is the only member path.
   const serverId = field(values, 'platformServerId');
   if (allowOwner && serverId) payload.platformServerId = serverId;
-  const ownerId = field(values, 'ownerId');
-  if (allowOwner && ownerId) {
-    payload.ownerId = ownerId;
-    const ownerName = field(values, 'ownerName');
-    if (ownerName) payload.ownerName = ownerName;
-  }
   return payload;
 }

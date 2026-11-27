@@ -24,7 +24,7 @@ first -- the tenant-isolation gate preventing a tenant-A admin from
 reading/mutating a tenant-B community by guessing its numeric id
 (security.md Tenant Isolation; IDOR). `update_member_role()`'s
 admin-promotion check additionally re-derives the *caller's own*
-`community_members.role` for this specific community (mirroring Node's
+`community_members.community_role_id` for this specific community (mirroring Node's
 `req.communityRole` check) since scope alone doesn't carry per-community
 role granularity yet -- see this repo's mem0 note on the Event module
 needing the same "invent scope, document the gap" treatment.

@@ -67,10 +67,11 @@ def seeded(db: Any) -> dict[str, int]:
     community_id = db.communities.insert(tenant_id=tenant_id)
     other_tenant_community_id = db.communities.insert(tenant_id=other_tenant_id)
     db.community_members.insert(
-        community_id=community_id, user_id="1", role="member", is_active=True
+        community_id=community_id, user_id="1", is_active=True
     )
+    admin_role = db.community_roles.insert(community_id=community_id, role_kind=1)
     db.community_members.insert(
-        community_id=community_id, user_id="2", role="community-admin", is_active=True
+        community_id=community_id, user_id="2", community_role_id=admin_role, is_active=True
     )
     db.commit()
     return {

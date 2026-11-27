@@ -38,7 +38,8 @@ from typing import Any
 from flask_core.auth import DEFAULT_TENANT_SLUG
 from opentelemetry import metrics
 
-from services import community_tier_service
+from services import community_authz, community_tier_service, member_roles
+from services.audit_events import ActorKind, AuditCategory, AuditEvent, AuditOutcome
 from services.errors import (
     ApiError,
     bad_request,
@@ -49,13 +50,25 @@ from services.errors import (
 )
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
-from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
+from services.membership_state import is_banned
+from services.schema import (
+    bind_admin_tables,
+    bind_auth_tables,
+    bind_community_authz_tables,
+    bind_superadmin_tenant_fields,
+)
 
 logger = logging.getLogger(__name__)
 _TIER_OVERRIDE_FAILED = metrics.get_meter("waddles.hub_api.superadmin").create_counter(
     "waddles.superadmin.tier_override_failed",
     unit="1",
     description="Operator tier overrides whose allocation or audit write failed (loud).",
+)
+
+_OWNERSHIP_TRANSFERS = metrics.get_meter("waddles.hub_api.superadmin").create_counter(
+    "waddles.superadmin.ownership_transfers",
+    unit="1",
+    description="Community ownership transfers by bounded result (transferred/noop/audit_failed).",
 )
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
@@ -199,7 +212,7 @@ async def create_community(
     """Create a new community owned by ``tenant_id`` (free tier: capped at 1).
 
     Authority is the per-community role table: the caller becomes a member holding the seeded
-    system owner role (see `create_community_capped`); `communities.owner_id` is no longer written.
+    system owner role (see `create_community_capped`); there is no owner column.
     """
     _ensure_tables(dal)
     if not name or not platform:
@@ -364,25 +377,210 @@ async def delete_community(async_dal: Any, dal: Any, *, community_id: int, calle
     )
 
 
-async def reassign_owner(
+async def community_owner_names(
+    async_dal: Any, dal: Any, *, community_ids: list[int]
+) -> dict[int, str]:
+    """Display-only owner usernames for many communities in two queries (no N+1 on the list).
+
+    The owner is the active member LINKED to the system `community-owner` role; a community with
+    no resolvable owner is simply absent. Never an authority input.
+    """
+    if not community_ids:
+        return {}
+    _ensure_owner_tables(dal)
+    cm, cr = dal.community_members, dal.community_roles
+    rows = await async_dal.select_async(
+        dal(
+            cm.community_id.belongs(community_ids)
+            & (cm.is_active == True)  # noqa: E712 - pydal Field comparison
+            & (cm.community_role_id == cr.id)
+            & (cr.community_id == cm.community_id)
+            & (cr.name == member_roles.COMMUNITY_OWNER_ROLE)
+            & (cr.is_system == True)  # noqa: E712
+        ),
+        cm.community_id,
+        cm.user_id,
+        orderby=cm.id,
+    )
+    owner_user: dict[int, int] = {}
+    for r in rows:
+        if str(r.user_id).isdigit():
+            owner_user.setdefault(int(r.community_id), int(r.user_id))
+    if not owner_user:
+        return {}
+    users = await async_dal.select_async(
+        dal(dal.hub_users.id.belongs(sorted(set(owner_user.values()))))
+    )
+    names = {int(u.id): u.username for u in users}
+    return {cid: names[uid] for cid, uid in owner_user.items() if uid in names}
+
+
+def _ensure_owner_tables(dal: Any) -> None:
+    """Bind the tables the ownership display/transfer reads (idempotent)."""
+    _ensure_tables(dal)
+    bind_auth_tables(dal)
+    bind_community_authz_tables(dal)
+
+
+async def _is_tenant_admin_of(async_dal: Any, dal: Any, *, user_id: int, tenant_id: int) -> bool:
+    """True when the caller holds a `tenant_admins` row for ``tenant_id``."""
+    ta = dal.tenant_admins
+    rows = await async_dal.select_async(dal((ta.user_id == user_id) & (ta.tenant_id == tenant_id)))
+    return bool(rows)
+
+
+def _transfer_job(dal: Any, *, community_id: int, new_user_id: int) -> tuple[str, str | None]:
+    """ONE write transaction body: demote the old owner(s), promote the new one.
+
+    Lock order is fixed (community row, new owner row, then old owner rows) so concurrent member
+    changes of this community serialize. Returns ``("noop"|"transferred", old_owner_user_id)``.
+    """
+    new_member = community_authz.lock_member_for_change(
+        dal,
+        community_id=community_id,
+        user_id=new_user_id,
+        editor_scopes=frozenset(),
+        editor_bypass=True,
+        owner_message="",
+    )
+    if is_banned(new_member):
+        raise conflict("Cannot transfer ownership to a banned member")
+    if member_roles.is_owner_role(
+        dal(dal.community_roles.id == new_member.community_role_id).select().first()
+        if new_member.community_role_id
+        else None
+    ):
+        return "noop", None
+    cm, cr = dal.community_members, dal.community_roles
+    old_ids = [
+        str(r.user_id)
+        for r in dal(
+            (cm.community_id == community_id)
+            & (cm.is_active == True)  # noqa: E712
+            & (cm.community_role_id == cr.id)
+            & member_roles.role_by_name_query(dal, community_id, member_roles.COMMUNITY_OWNER_ROLE)
+        ).select(cm.user_id, orderby=cm.id)
+    ]
+    for old_id in old_ids:
+        if old_id.isdigit():
+            community_authz.lock_member_for_change(
+                dal,
+                community_id=community_id,
+                user_id=int(old_id),
+                editor_scopes=frozenset(),
+                editor_bypass=True,
+                owner_message="",
+            )
+        member_roles.set_member_role(
+            dal,
+            community_id=community_id,
+            user_id=old_id,
+            role=member_roles.COMMUNITY_ADMIN_ROLE,
+        )
+    member_roles.set_member_role(
+        dal,
+        community_id=community_id,
+        user_id=new_user_id,
+        role=member_roles.COMMUNITY_OWNER_ROLE,
+    )
+    return "transferred", (old_ids[0] if old_ids else None)
+
+
+async def transfer_ownership(
     async_dal: Any,
     dal: Any,
     *,
     community_id: int,
-    new_owner_id: str | None,
-    new_owner_name: str | None,
-) -> None:
-    """Reassign community ownership."""
-    _ensure_tables(dal)
-    if not new_owner_name:
-        raise bad_request("New owner name is required")
-    await get_community(async_dal, dal, community_id=community_id)  # 404 if missing
-    await async_dal.update_async(
-        dal.communities.id == community_id,
-        owner_id=new_owner_id,
-        owner_name=new_owner_name,
-        updated_at=datetime.now(UTC),
+    new_owner_user_uuid: str,
+    caller_user_id: int,
+    caller_tenant_id: int,
+    is_global: bool,
+    audit: Any = None,
+) -> bool:
+    """Transfer community ownership to an existing active member (by user UUID only).
+
+    Caller must be a global (system-tenant) admin or an admin of the community's tenant (403);
+    a community outside the caller's tenant is 404 (never confirms existence). The target must be
+    an active member of THIS community (404), not banned (409); already the owner is an idempotent
+    no-op (returns ``False``). One transaction links the target to the system owner role and the
+    previous owner to `community-admin`; any failure rolls both back. Audited after commit.
+    Returns ``True`` when ownership changed.
+    """
+    _ensure_owner_tables(dal)
+    if not is_global and not await _is_tenant_admin_of(
+        async_dal, dal, user_id=caller_user_id, tenant_id=caller_tenant_id
+    ):
+        raise forbidden("Ownership transfer requires a tenant or global administrator")
+    community = await get_community(async_dal, dal, community_id=community_id)
+    if not is_global and community.tenant_id != caller_tenant_id:
+        raise not_found("Community not found")
+    target = (await async_dal.select_async(dal(dal.hub_users.uuid == new_owner_user_uuid))).first()
+    if target is None:
+        raise not_found("Member not found")
+    new_user_id = int(target.id)
+    outcome, old_user_id = await member_roles.run_write_job(
+        async_dal,
+        dal,
+        lambda: _transfer_job(dal, community_id=community_id, new_user_id=new_user_id),
     )
+    if outcome == "noop":
+        logger.info("community_ownership_transfer_noop")
+        _OWNERSHIP_TRANSFERS.add(1, {"result": "noop"})
+        return False
+    old_uuid: str | None = None
+    if old_user_id is not None and old_user_id.isdigit():
+        old_row = (await async_dal.select_async(dal(dal.hub_users.id == int(old_user_id)))).first()
+        old_uuid = str(old_row.uuid) if old_row is not None and old_row.uuid else None
+    logger.info("community_ownership_transferred")
+    _OWNERSHIP_TRANSFERS.add(1, {"result": "transferred"})
+    await _audit_transfer(
+        audit,
+        caller_user_id=caller_user_id,
+        tenant_id=int(community.tenant_id) if community.tenant_id is not None else None,
+        community_id=community_id,
+        old_uuid=old_uuid,
+        new_uuid=str(new_owner_user_uuid),
+    )
+    return True
+
+
+async def _audit_transfer(
+    audit: Any,
+    *,
+    caller_user_id: int,
+    tenant_id: int | None,
+    community_id: int,
+    old_uuid: str | None,
+    new_uuid: str,
+) -> None:
+    """Record the transfer after commit; a failed audit is loud (log + counter + 500)."""
+    if audit is None:
+        logger.warning("community_ownership_transfer_unaudited reason=no_audit_service")
+        return
+    details = {"new_owner_user_uuid": new_uuid}
+    if old_uuid:
+        details["old_owner_user_uuid"] = old_uuid
+    event = AuditEvent(
+        category=AuditCategory.ROLE,
+        action="community.ownership_transferred",
+        outcome=AuditOutcome.SUCCESS,
+        actor_kind=ActorKind.USER,
+        actor_user_id=caller_user_id,
+        tenant_id=tenant_id,
+        target_type="community",
+        target_id=str(community_id),
+        details=details,
+    )
+    try:
+        await audit.record(event)
+    except Exception as exc:
+        logger.error("community_ownership_audit_failed error_type=%s", type(exc).__name__)
+        _OWNERSHIP_TRANSFERS.add(1, {"result": "audit_failed"})
+        raise ApiError(
+            "Ownership was transferred but the audit write failed; verify the community's owner",
+            500,
+            "OWNERSHIP_AUDIT_FAILED",
+        ) from exc
 
 
 # ── Tenant management ────────────────────────────────────────────────────

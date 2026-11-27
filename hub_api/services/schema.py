@@ -143,7 +143,7 @@ def _define_communities(dal: Any, *, migrate: bool, redefine: bool = False) -> N
         # is bound once, here, by M1; every column any later group needs
         # joins this same Field list rather than a second define_table()
         # call (pydal allows exactly one per table name per DAL instance).
-        # `tenant_id`, `description`, `platform`, `owner_id`, `join_mode`,
+        # `tenant_id`, `description`, `platform`, `join_mode`,
         # `is_public`, `deleted_at` match 000_create_base_schema.sql +
         # 058_tenants_and_claims.sql's `ALTER TABLE communities ADD COLUMN
         # tenant_id` verbatim. `tenant_id` is NOT NULL in Postgres -- every
@@ -183,9 +183,6 @@ def _define_communities(dal: Any, *, migrate: bool, redefine: bool = False) -> N
         Field("primary_platform", "string", length=50),
         Field("platform", "string", length=50, default="discord"),
         Field("platform_server_id", "string", length=255),
-        # VARCHAR in Postgres, not a hub_users.id FK -- see community_members.user_id below.
-        Field("owner_id", "string", length=255),
-        Field("owner_name", "string", length=255),
         Field("community_type", "string", length=50, default="creator"),
         Field("join_mode", "string", length=50, default="open"),
         Field("is_public", "boolean", default=True),
@@ -411,7 +408,6 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("bio", "text"),
         Field("social_links", "json"),
         Field("reputation", "integer", default=600),
-        Field("role", "string", length=50, default="member"),
         Field("is_active", "boolean", default=True),
         # Int-enum standing (`services.membership_state.MembershipState`, alembic 0146): a ban is
         # a membership STATE (2), never a role name; authority lives on `community_role_id`.
@@ -2425,10 +2421,9 @@ def bind_marketplace_billing_tables(dal: Any, *, migrate: bool = False) -> None:
     not `bind_auth_tables`'s single-table early-return) -- this group shares
     `communities`/`hub_users`/`community_members` with the Core/Community
     groups, and `bind_auth_tables()` (called first, itself idempotent) is
-    the one that actually defines them with the `role` string column this
-    group's `is_community_admin()` check needs (`community_common.py`'s own
-    `community_members` binding omits `role` -- it never needed it). Calling
-    `bind_auth_tables()` here guarantees that column exists regardless of
+    the one that actually defines them (with `community_role_id`, which
+    this group's `is_community_admin()` check resolves authority through).
+    Calling `bind_auth_tables()` here guarantees that regardless of
     which group's blueprint handles the first request in a given process.
 
     Schema provenance: `config/postgres/migrations/017_add_marketplace.sql`

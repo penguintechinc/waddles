@@ -337,7 +337,6 @@ class TestRequireCommunityAdminBypasses:
         dal.community_members.insert(
             community_id=COMMUNITY_ID,
             user_id=str(user_id),
-            role="viewer",
             is_active=True,
             community_role_id=role_id,
         )
@@ -355,7 +354,7 @@ class TestRequireCommunityAdminBypasses:
         dal = automation_db.dal
         user_id = dal.hub_users.insert(username="legacy-member")
         dal.community_members.insert(
-            community_id=COMMUNITY_ID, user_id=str(user_id), role="member", is_active=True
+            community_id=COMMUNITY_ID, user_id=str(user_id), is_active=True
         )
         dal.commit()
         app = self._app(automation_db)
@@ -566,7 +565,6 @@ class TestAuthorityIsRoleRowNeverRoleName:
         dal.community_members.insert(
             community_id=COMMUNITY_ID,
             user_id=str(user_id),
-            role=member_role_string,
             is_active=True,
             membership_state=state,
             community_role_id=role_id,
@@ -663,7 +661,6 @@ class TestAuthorityIsRoleRowNeverRoleName:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(user_id),
-            role="community-owner",  # display string only
             is_active=True,
             community_role_id=role_id,
         )

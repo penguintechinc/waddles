@@ -4,7 +4,7 @@ All community authority lives in the per-community `community_roles` table (syst
 the database's own `seed_community_system_roles()`, custom roles added by admins); a member holds
 exactly one role via `community_members.community_role_id`, which is what authz resolves scopes
 through (`community_authz`, `community_access`). :func:`set_member_role` is the single writer of
-that link -- it also keeps the legacy `role` string in sync until that column is dropped.
+that link (the legacy `role` string column is gone).
 
 Writers can only link a role that exists for the community (``strict``), so a typo such as
 ``owner`` fails loudly instead of storing a scope-less member.
@@ -69,7 +69,7 @@ def is_owner_role(role_row: Any) -> bool:
 
     Ownership is decided by the role row the member links via `community_role_id` -- the system
     flag plus the reserved owner name, which a custom role can never carry -- never by the legacy
-    `community_members.role` string. An unlinked member (``None``) is never the owner.
+    legacy role string. An unlinked member (``None``) is never the owner.
     """
     return (
         role_row is not None
@@ -104,9 +104,9 @@ def set_member_role(
 
     Targets one member (``user_id``) or every row a pydal query matches (``members``). With
     ``add=True`` (``user_id`` only) a missing membership is inserted active, and an EXISTING row
-    keeps its current role (joining never demotes). Writes `community_role_id`, the legacy `role`
-    string and clears `claims_cache` so scopes re-resolve. ``strict`` (default) fails loudly when
-    the role is not defined for the community; ``strict=False`` writes a NULL link (no scopes)
+    keeps its current role (joining never demotes). Writes `community_role_id` and clears
+    `claims_cache` so scopes re-resolve. ``strict`` (default) fails loudly when the role is not
+    defined for the community; ``strict=False`` writes a NULL link (no scopes)
     instead. Runs in the caller's transaction -- the caller commits.
     """
     if (user_id is None) == (members is None):
@@ -127,14 +127,13 @@ def set_member_role(
             cm.insert(
                 community_id=community_id,
                 user_id=str(user_id),
-                role=role,
                 community_role_id=role_id,
                 is_active=True,
                 joined_at=now,
                 updated_at=now,
             )
             return role_id
-    dal(members).update(role=role, community_role_id=role_id, claims_cache=None, updated_at=now)
+    dal(members).update(community_role_id=role_id, claims_cache=None, updated_at=now)
     return role_id
 
 

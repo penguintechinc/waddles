@@ -463,7 +463,7 @@ class TestListExposesTier:
         assert by_name["plain"]["isPremium"] is False
         assert set(by_name["plain"]) == {
             "id", "name", "displayName", "description", "platform", "platformServerId",
-            "ownerId", "ownerName", "memberCount", "isActive", "isPublic", "communityType",
+            "ownerName", "memberCount", "isActive", "isPublic", "communityType",
             "isPremium", "licenseTier", "seatLimit", "createdAt", "updatedAt",
         }  # fmt: skip
 

@@ -777,7 +777,7 @@ async def community_owner_member(async_dal: Any, dal: Any, *, community_id: int)
     """THE community owner: the first active member LINKED to the seeded system owner role.
 
     Resolved through `community_role_id` -> the `is_system` owner row, never the legacy
-    `community_members.role` string nor `communities.owner_id`. Every owner display goes here.
+    legacy role string nor owner columns. Every owner display goes here.
     """
     bind_community_authz_tables(dal)
     rows = await async_dal.select_async(

@@ -12,6 +12,16 @@
 //!          -> one transaction: scoped row lock -> UPDATE -> audit row
 //! ```
 //!
+//! # Role contract (legacy `community_members.role` is dropped)
+//!
+//! The bundle-facing virtual column stays named `role`. READ returns the name of the member's
+//! LINKED role (`community_members.community_role_id` -> `community_roles`, same community);
+//! `null` when unlinked. WRITE resolves the name to this community's role row -- a reserved
+//! system name ([`RESERVED_SYSTEM_ROLES`]) matches only the `is_system` row, any other name
+//! (e.g. `vip`) only a custom row -- then sets `community_role_id`, clears `claims_cache` and
+//! bumps `updated_at`. A name with no row is `Invalid` (no NULL write). The protected-role guard
+//! reads the locked row's linked role name. Audit old/new values are role names.
+//!
 //! # Scope derivation
 //!
 //! The guest supplies only the target user UUID, column names and values.
@@ -48,6 +58,17 @@ pub const ASSIGNABLE_ROLES: &[&str] = &["member", "vip", "moderator"];
 /// Rows currently holding one of these roles are never modified by a bundle
 /// (a bundle can neither promote to nor demote an owner/admin).
 pub const PROTECTED_ROLES: &[&str] = &["community-owner", "community-admin"];
+
+/// Role names that only ever denote a community's seeded `is_system` row; a custom role of the
+/// same name never stands in for one of these.
+pub const RESERVED_SYSTEM_ROLES: &[&str] = &[
+    "member",
+    "communicator",
+    "speaker",
+    "moderator",
+    "community-admin",
+    "community-owner",
+];
 
 /// The host-derived scope of one call (never guest-supplied).
 #[derive(Clone, Debug, PartialEq, Eq)]

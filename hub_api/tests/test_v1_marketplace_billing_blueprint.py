@@ -134,7 +134,6 @@ def _make_member(
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role=role,
         is_active=True,
         community_role_id=role_id,
     )
@@ -236,7 +235,6 @@ class TestForgedAmountIgnored:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(caller_id),
-            role="community-owner",
             is_active=True,
         )
         dal.commit()
@@ -343,7 +341,7 @@ class TestDiscountCodeRedeemPriceTrust:
             updated_at=now,
         )
         dal.community_members.insert(
-            community_id=community_id, user_id=str(admin_id), role="community-owner", is_active=True
+            community_id=community_id, user_id=str(admin_id), is_active=True
         )
         dal.commit()
 

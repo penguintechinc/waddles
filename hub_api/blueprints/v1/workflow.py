@@ -42,7 +42,7 @@ per-community DB model); this group needs the real thing because (a)
 `github_sync.py` (sibling group, same Node `requireCommunityAdmin`
 gate) owns real per-community secrets (GitHub PATs) a static JWT scope
 can't express membership changes for without re-issuing tokens, and
-(b) `community_members.role`/`community_roles.base_claims.scopes` IS
+(b) `community_members.community_role_id`->`community_roles.base_claims.scopes` IS
 already an OIDC-scope-shaped value (`community:manage_members` /
 `community:manage_channels`), just resolved per-community from the DB
 instead of embedded in the static JWT `scope` claim -- still a scope

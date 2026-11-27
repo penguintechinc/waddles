@@ -57,6 +57,27 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
+_OWNER_KEYS = ("ownerId", "ownerName", "owner_id", "owner_name")
+_TRANSFER_NAME_KEYS = ("newOwnerName", "newOwnerId", "ownerName", "ownerId")
+
+
+async def _reject_owner_keys(
+    keys: tuple[str, ...] = _OWNER_KEYS,
+) -> tuple[dict[str, object], int] | None:
+    """400 when the body carries any owner key: ownership only changes via the transfer endpoint."""
+    raw = await request.get_json(silent=True)
+    if isinstance(raw, dict) and any(k in raw for k in keys):
+        return _err(
+            ApiError(
+                "Owner cannot be set here; transfer ownership with "
+                "POST /superadmin/communities/<id>/reassign {newOwnerUserId}",
+                400,
+                "VALIDATION_ERROR",
+            )
+        )
+    return None
+
+
 def _iso(value: Any) -> str | None:
     return value.isoformat() if value else None
 
@@ -132,7 +153,7 @@ class CommunityDTO:
     description: str | None
     platform: str | None
     platformServerId: str | None
-    ownerId: str | None
+    #: Display only: the username of the member linked to the system owner role (never authority).
     ownerName: str | None
     memberCount: int
     isActive: bool
@@ -165,7 +186,7 @@ class CommunityDetailDTO:
     description: str | None
     platform: str | None
     platformServerId: str | None
-    ownerId: str | None
+    #: Display only: the username of the member linked to the system owner role (never authority).
     ownerName: str | None
     memberCount: int
     isActive: bool
@@ -193,10 +214,8 @@ class CreateCommunityRequest:
     displayName: str | None = None
     description: str | None = None
     platformServerId: str | None = None
-    # Accepted for webui compatibility but NOT stored: the creator holds the seeded owner role
-    # (`community_roles`), never `communities.owner_id` (column removal follows separately).
-    ownerId: str | None = None
-    ownerName: str | None = None
+    # The creator becomes the owner through the seeded owner role; there is no owner field. An
+    # old client still sending one gets a 400 from `_reject_owner_keys` (reads the raw body).
     isPublic: bool | None = None
     communityType: str | None = None
 
@@ -227,8 +246,8 @@ class UpdateCommunityRequest:
 
     displayName: str | None = None
     description: str | None = None
-    ownerId: str | None = None
-    ownerName: str | None = None
+    # No owner fields: ownership changes only via POST .../reassign; an owner key in the raw
+    # body is a 400 (`_reject_owner_keys`).
     isActive: bool | None = None
     isPublic: bool | None = None
     platform: str | None = None
@@ -247,10 +266,10 @@ class UpdateCommunityRequest:
 
 @dataclass(slots=True, frozen=True)
 class ReassignOwnerRequest:
-    """Request DTO for reassign-owner."""
+    """Request DTO for the ownership transfer (by user UUID only; any name key is a 400)."""
 
-    newOwnerName: str
-    newOwnerId: str | None = None
+    #: The target member's `hub_users.uuid` (the user UUID the members API exposes as `userId`).
+    newOwnerUserId: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -352,7 +371,7 @@ def _license_tier_code(row: Any) -> int:
     return _TIER_CODE_BY_NAME.get(name, community_tier_service.TIER_CODE_FREE)
 
 
-def _community_dto(row: Any, public_id: str) -> CommunityDTO:
+def _community_dto(row: Any, public_id: str, owner_name: str | None) -> CommunityDTO:
     """Community DTO; `id` is the community's PUBLIC UUID (never the numeric id)."""
     tier_code = _license_tier_code(row)
     return CommunityDTO(
@@ -362,8 +381,7 @@ def _community_dto(row: Any, public_id: str) -> CommunityDTO:
         description=row.description,
         platform=row.platform,
         platformServerId=row.platform_server_id,
-        ownerId=row.owner_id,
-        ownerName=row.owner_name,
+        ownerName=owner_name,
         memberCount=row.member_count or 0,
         isActive=bool(row.is_active),
         isPublic=bool(row.is_public),
@@ -432,9 +450,14 @@ async def list_communities() -> CommunitiesResponse:
         is_active=is_active,
     )
     public_ids = await lookup_public_ids(int(r.id) for r in rows)
+    owner_names = await svc.community_owner_names(
+        async_dal, dal, community_ids=[int(r.id) for r in rows]
+    )
     return CommunitiesResponse(
         success=True,
-        communities=[_community_dto(r, public_ids[int(r.id)]) for r in rows],
+        communities=[
+            _community_dto(r, public_ids[int(r.id)], owner_names.get(int(r.id))) for r in rows
+        ],
         pagination=PaginationDTO(
             page=max(1, page), limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
@@ -455,6 +478,9 @@ async def get_community(
     except ApiError as exc:
         logger.debug("superadmin.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
+    owner_name = (await svc.community_owner_names(async_dal, dal, community_ids=[int(row.id)])).get(
+        int(row.id)
+    )
     return CommunityDetailResponse(
         success=True,
         community=CommunityDetailDTO(
@@ -464,8 +490,7 @@ async def get_community(
             description=row.description,
             platform=row.platform,
             platformServerId=row.platform_server_id,
-            ownerId=row.owner_id,
-            ownerName=row.owner_name,
+            ownerName=owner_name,
             memberCount=row.member_count or 0,
             isActive=bool(row.is_active),
             isPublic=bool(row.is_public),
@@ -486,6 +511,8 @@ async def get_community(
 async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
     """Create a new community."""
     async_dal, dal = _dal()
+    if (rejected := await _reject_owner_keys()) is not None:
+        return rejected
     caller_id = get_current_user_id(request)
     ctx = get_tenant_context(request)
     if ctx is None:
@@ -552,6 +579,8 @@ async def update_community(
     `description`; the non-nullable `displayName`/`isActive`/`isPublic` reject null with a 400.
     """
     async_dal, dal = _dal()
+    if (rejected := await _reject_owner_keys()) is not None:
+        return rejected
     raw = await request.get_json(silent=True)
     present = set(raw) if isinstance(raw, dict) else set()
     if "isPremium" in present:
@@ -568,8 +597,6 @@ async def update_community(
             return _err(ApiError(f"{key} cannot be null", 400, "VALIDATION_ERROR"))
     field_map = {
         "display_name": data.displayName,
-        "owner_id": data.ownerId,
-        "owner_name": data.ownerName,
         "is_active": data.isActive,
         "is_public": data.isPublic,
         "platform": data.platform,
@@ -639,20 +666,36 @@ async def delete_community(
 async def reassign_owner(
     data: ReassignOwnerRequest, community_id: int
 ) -> MessageResponse | tuple[dict[str, object], int]:
-    """Reassign community ownership."""
+    """Transfer community ownership to an existing active member, by user UUID only.
+
+    403 non-admin caller (tenant admin or global/system admin required); 404 community outside
+    the caller's tenant or target not a member; 409 banned target; 200 when already the owner
+    (idempotent no-op, `changed: false` is not exposed -- the message says so).
+    """
     async_dal, dal = _dal()
+    if (rejected := await _reject_owner_keys(_TRANSFER_NAME_KEYS)) is not None:
+        return rejected
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
     try:
-        await svc.reassign_owner(
+        changed = await svc.transfer_ownership(
             async_dal,
             dal,
             community_id=community_id,
-            new_owner_id=data.newOwnerId,
-            new_owner_name=data.newOwnerName,
+            new_owner_user_uuid=data.newOwnerUserId.strip().lower(),
+            caller_user_id=get_current_user_id(request),
+            caller_tenant_id=ctx.tenant_id,
+            is_global=is_system_tenant_request(),
+            audit=get_audit_service(),
         )
     except ApiError as exc:
         logger.debug("superadmin.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return MessageResponse(success=True, message="Ownership reassigned")
+    return MessageResponse(
+        success=True,
+        message="Ownership transferred" if changed else "Member is already the owner",
+    )
 
 
 # ── Routes: tenant management ───────────────────────────────────────────

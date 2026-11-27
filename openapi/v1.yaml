@@ -112,6 +112,39 @@ components:
       - message
       title: ActivationWarningDTO
       type: object
+    ActivityItem:
+      description: One feed entry; `kind` is the int enum above, ids are public UUIDs
+        (never numeric).
+      properties:
+        actorId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Actorid
+        actorName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Actorname
+        at:
+          title: At
+          type: string
+        kind:
+          title: Kind
+          type: integer
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+      required:
+      - kind
+      - at
+      - actorId
+      - actorName
+      - title
+      title: ActivityItem
+      type: object
     ActivityPeriodStats:
       description: Watch-time + message-count for one time window (all-time/weekly/monthly).
       properties:
@@ -1367,11 +1400,6 @@ components:
         name:
           title: Name
           type: string
-        ownerId:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Ownerid
         ownerName:
           anyOf:
           - type: string
@@ -1399,7 +1427,6 @@ components:
       - description
       - platform
       - platformServerId
-      - ownerId
       - ownerName
       - memberCount
       - isActive
@@ -1439,11 +1466,23 @@ components:
         role:
           title: Role
           type: string
+        roleId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Roleid
+        scopes:
+          items:
+            type: string
+          title: Scopes
+          type: array
       required:
       - id
       - name
       - displayName
       - role
+      - roleId
+      - scopes
       title: CommunityMembershipDTO
       type: object
     ConfigHistoryEntryDTO:
@@ -3214,14 +3253,6 @@ components:
           - type: string
           - type: 'null'
           title: Avatarurl
-        email:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Email
-        id:
-          title: Id
-          type: integer
         joinedAt:
           anyOf:
           - type: string
@@ -3229,11 +3260,16 @@ components:
           title: Joinedat
         reputation:
           $ref: '#/components/schemas/ReputationDTO'
-        role:
+        roleId:
           anyOf:
           - type: string
           - type: 'null'
-          title: Role
+          title: Roleid
+        roleName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rolename
         userId:
           anyOf:
           - type: string
@@ -3245,12 +3281,11 @@ components:
           - type: 'null'
           title: Username
       required:
-      - id
       - userId
       - username
-      - email
       - avatarUrl
-      - role
+      - roleId
+      - roleName
       - reputation
       - joinedAt
       title: MemberDTO
@@ -4664,6 +4699,38 @@ components:
       - failedVersions
       - ok
       title: RewrapDTO
+      type: object
+    RoleDTO:
+      description: Community role summary DTO (`id` is the role's public UUID).
+      properties:
+        displayName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Displayname
+        id:
+          title: Id
+          type: string
+        memberCount:
+          title: Membercount
+          type: integer
+        name:
+          title: Name
+          type: string
+        priority:
+          title: Priority
+          type: integer
+        roleKind:
+          title: Rolekind
+          type: integer
+      required:
+      - id
+      - name
+      - displayName
+      - roleKind
+      - priority
+      - memberCount
+      title: RoleDTO
       type: object
     RoleMirrorMappingDTO:
       description: 'Wire shape of one mirror mapping: `id`/`community_id` are PUBLIC
@@ -10114,11 +10181,11 @@ paths:
             schema:
               description: Request DTO for update-member-role.
               properties:
-                role:
-                  title: Role
+                roleId:
+                  title: Roleid
                   type: string
               required:
-              - role
+              - roleId
               title: UpdateRoleRequest
               type: object
       responses:
@@ -12261,6 +12328,39 @@ paths:
                 type: object
           description: Response DTO for message endpoints.
       summary: Manually soft-ban a member of this community (audited).
+  /api/v1/admin/{community_id}/roles:
+    get:
+      description: ''
+      operationId: get_get_roles
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for list-roles.
+                properties:
+                  roles:
+                    items:
+                      $ref: '#/components/schemas/RoleDTO'
+                    title: Roles
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - roles
+                title: RolesResponse
+                type: object
+          description: Response DTO for list-roles.
+      summary: List the community's roles (priority desc) with member counts (read-only).
   /api/v1/admin/{community_id}/settings:
     get:
       description: ''
@@ -16598,6 +16698,92 @@ paths:
           description: Self-hosted ALTCHA proof-of-work challenge DTO.
       summary: Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited,
         fail closed).
+  /api/v1/communities:
+    post:
+      description: ''
+      operationId: post_create_community__post_api_v1_communities
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body for self-create; tenant is never accepted from the
+                body.
+              properties:
+                communityType:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Communitytype
+                description:
+                  anyOf:
+                  - maxLength: 2000
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Description
+                displayName:
+                  anyOf:
+                  - maxLength: 100
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Displayname
+                name:
+                  maxLength: 100
+                  minLength: 1
+                  title: Name
+                  type: string
+                platform:
+                  default: discord
+                  maxLength: 50
+                  minLength: 1
+                  title: Platform
+                  type: string
+              required:
+              - name
+              title: SelfCreateRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: Self-create a community in the caller's tenant (scope + flag gated,
+        free-tier capped).
+  /api/v1/communities/{community_id}/activity:
+    get:
+      description: ''
+      operationId: get_get_activity
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Activity feed envelope.
+                properties:
+                  items:
+                    items:
+                      $ref: '#/components/schemas/ActivityItem'
+                    title: Items
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - items
+                title: ActivityResponse
+                type: object
+          description: Activity feed envelope.
+      summary: Newest-first member-joined / announcement feed for an active, non-banned
+        member.
   /api/v1/communities/{community_id}/calendar/event-sync:
     get:
       description: ''
@@ -23849,7 +24035,7 @@ paths:
       summary: List all communities (cross-tenant).
     post:
       description: ''
-      operationId: post_create_community
+      operationId: post_create_community__post_api_v1_superadmin_communities
       parameters: []
       requestBody:
         content:
@@ -23884,18 +24070,6 @@ paths:
                 name:
                   title: Name
                   type: string
-                ownerId:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Ownerid
-                ownerName:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Ownername
                 platform:
                   title: Platform
                   type: string
@@ -24038,18 +24212,6 @@ paths:
                   - type: 'null'
                   default: null
                   title: Licensetier
-                ownerId:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Ownerid
-                ownerName:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Ownername
                 platform:
                   anyOf:
                   - type: string
@@ -24100,7 +24262,15 @@ paths:
       summary: Update community details; `licenseTier` is an operator tier override.
   /api/v1/superadmin/communities/{community_id}/reassign:
     post:
-      description: ''
+      description: '
+
+        403 non-admin caller (tenant admin or global/system admin required); 404 community
+        outside
+
+        the caller''s tenant or target not a member; 409 banned target; 200 when already
+        the owner
+
+        (idempotent no-op, `changed: false` is not exposed -- the message says so).'
       operationId: post_reassign_owner
       parameters:
       - in: path
@@ -24113,19 +24283,14 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for reassign-owner.
+              description: Request DTO for the ownership transfer (by user UUID only;
+                any name key is a 400).
               properties:
-                newOwnerId:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Newownerid
-                newOwnerName:
-                  title: Newownername
+                newOwnerUserId:
+                  title: Newowneruserid
                   type: string
               required:
-              - newOwnerName
+              - newOwnerUserId
               title: ReassignOwnerRequest
               type: object
       responses:
@@ -24147,7 +24312,8 @@ paths:
                 title: MessageResponse
                 type: object
           description: Response DTO for message endpoints.
-      summary: Reassign community ownership.
+      summary: Transfer community ownership to an existing active member, by user
+        UUID only.
   /api/v1/superadmin/dashboard:
     get:
       description: ''

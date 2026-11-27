@@ -179,9 +179,7 @@ def _community(db: Any, tenant_id: int | None = None) -> int:
 
 
 def _member(db: Any, community_id: int, user_id: int = 2) -> dict[str, str]:
-    db.dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role="member", is_active=True
-    )
+    db.dal.community_members.insert(community_id=community_id, user_id=str(user_id), is_active=True)
     db.dal.commit()
     return {"Authorization": f"Bearer {make_user_token(user_id=user_id)}"}
 

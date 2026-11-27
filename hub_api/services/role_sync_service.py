@@ -18,7 +18,7 @@ picks which of the two reconcile passes below run for a pairing
   benefit), this direction does NOT write to Twitch at all -- Twitch
   grants no API to assign a subscriber tier. Discord guild role
   membership is authoritative instead, driving the linked hub_user's
-  **community** role/scope (`community_members.role`) via
+  **community** role/scope (`community_members.community_role_id`) via
   `community_role_sync_bindings` rows with `sync_scope = 'community_role'`
   (migration 0036) -- i.e. "Discord role -> this platform's own community
   authz", not "Discord role -> Twitch".
@@ -206,7 +206,7 @@ _roles_removed_counter = _meter.create_counter(
 )
 _community_roles_applied_counter = _meter.create_counter(
     "waddles_role_sync_community_roles_applied_total",
-    description="hub-platform community_members.role changes applied by role-sync "
+    description="hub-platform community_members.community_role_id changes applied by role-sync "
     "(Discord -> platform direction)",
 )
 _unverified_pairings_counter = _meter.create_counter(

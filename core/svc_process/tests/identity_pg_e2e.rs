@@ -53,6 +53,8 @@ const READER_PW: &str = "waddles_bundle_reader_test_pw";
 const APP_ID: &str = "penguintechinc.waddles.test-identity";
 const IDENTITY_DDL: &str = include_str!("../../../scripts/db/bundle_identity_resolve.sql");
 const ROLE_DDL: &str = include_str!("../../../scripts/db/bundle_identity_role.sql");
+const LINK_CONTRACT_DDL: &str =
+    include_str!("../../../scripts/db/community_role_link_contract.sql");
 const ECONOMY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
 const ECONOMY_IDEMPOTENCY_DDL: &str =
     include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
@@ -226,6 +228,29 @@ async fn world() -> World {
         ),
     )
     .await;
+    // Post-0147 contract: authority lives on the LINKED role row. Seed each community's roles,
+    // link the fixture members by name, replace the view with the link-reading one, then drop the
+    // legacy string column so every read below proves the post-drop contract.
+    exec(
+        &su,
+        "CREATE TABLE community_roles (
+             id SERIAL PRIMARY KEY,
+             community_id INTEGER NOT NULL REFERENCES communities(id),
+             name VARCHAR(100) NOT NULL,
+             is_system BOOLEAN NOT NULL DEFAULT false);
+         ALTER TABLE community_members ADD COLUMN community_role_id INTEGER;
+         ALTER TABLE community_members ADD COLUMN claims_cache TEXT;
+         INSERT INTO community_roles (community_id, name, is_system)
+           SELECT c.id, r.name, true FROM communities c
+           CROSS JOIN (VALUES ('community-owner'), ('owner'), ('community-admin'),
+                              ('moderator'), ('vip'), ('member')) AS r(name);
+         UPDATE community_members cm SET community_role_id = cr.id
+           FROM community_roles cr
+          WHERE cr.community_id = cm.community_id AND cr.name = cm.role;",
+    )
+    .await;
+    exec(&su, LINK_CONTRACT_DDL).await;
+    exec(&su, "ALTER TABLE community_members DROP COLUMN role").await;
     // Privileged hub-side funding (the runtime role cannot mint).
     exec(
         &su,
@@ -712,8 +737,10 @@ async fn legacy_owner_scope_is_bound_to_active_community_membership() {
     exec(
         &w.su,
         &format!(
-            "UPDATE community_members SET role = 'owner' \
-             WHERE community_id = {COMMUNITY} AND platform_user_id = '1001'"
+            "UPDATE community_members cm SET community_role_id = cr.id \
+             FROM community_roles cr \
+             WHERE cr.community_id = cm.community_id AND cr.name = 'owner' \
+               AND cm.community_id = {COMMUNITY} AND cm.platform_user_id = '1001'"
         ),
     )
     .await;

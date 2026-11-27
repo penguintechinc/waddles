@@ -36,8 +36,6 @@ function CommunityForm({
     description: '',
     platform: 'discord',
     platformServerId: '',
-    ownerId: '',
-    ownerName: '',
     isPublic: true,
     communityType: 'creator',
   });
@@ -209,45 +207,6 @@ function CommunityForm({
               </div>
             )}
           </div>
-
-          {/* Owner Info (conditionally shown for superadmin) */}
-          {showOwnerFields && (
-            <div className="space-y-4">
-              <h2 className="text-lg font-semibold text-sky-100 border-b border-navy-700 pb-2">Owner Information</h2>
-
-              <div>
-                <label htmlFor="community-form-owner-name-optional" className="block text-sm font-medium text-sky-200 mb-1">
-                  Owner Name
-                  <span className="text-navy-400 font-normal ml-2">(optional)</span>
-                </label>
-                <input
-                  id="community-form-owner-name-optional"
-                  type="text"
-                  name="ownerName"
-                  value={form.ownerName}
-                  onChange={handleChange}
-                  className="input w-full"
-                  placeholder="Community owner's display name"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="community-form-owner-platform-id-optional" className="block text-sm font-medium text-sky-200 mb-1">
-                  Owner Platform ID
-                  <span className="text-navy-400 font-normal ml-2">(optional)</span>
-                </label>
-                <input
-                  id="community-form-owner-platform-id-optional"
-                  type="text"
-                  name="ownerId"
-                  value={form.ownerId}
-                  onChange={handleChange}
-                  className="input w-full"
-                  placeholder="Owner's platform user ID"
-                />
-              </div>
-            </div>
-          )}
 
           {/* Settings */}
           <div className="space-y-4">

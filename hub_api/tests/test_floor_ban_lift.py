@@ -97,7 +97,6 @@ def db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             user_id=str(n),
             user_uuid=_uuid(n),
             display_name=f"user{n}",
-            role="member",
             is_active=True,
             community_role_id=role_id,
             joined_at=datetime.now(UTC),

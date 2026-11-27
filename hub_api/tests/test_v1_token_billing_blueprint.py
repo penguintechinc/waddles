@@ -114,7 +114,6 @@ def _seed_member(
     db.dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role=role,
         community_role_id=role_id,
         is_active=True,
     )

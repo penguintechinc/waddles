@@ -510,7 +510,6 @@ class TestActivateDeactivate:
         dal.community_members.insert(
             community_id=LIFECYCLE_OTHER_COMMUNITY_ID,
             user_id="1",
-            role="admin",
             community_role_id=role_id,
             is_active=True,
         )

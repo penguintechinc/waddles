@@ -250,7 +250,7 @@ class TestDeleteRepoConnectionRoleCheck:
             webhook_secret="y",
             is_active=True,
         )
-        dal.community_members.insert(community_id=1, user_id="7", role="member", is_active=True)
+        dal.community_members.insert(community_id=1, user_id="7", is_active=True)
         dal.commit()
         with pytest.raises(ApiError) as exc_info:
             await svc.delete_repo_connection(

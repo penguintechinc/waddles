@@ -20,7 +20,7 @@ handlers, explicit `dal.commit()` after every write. This sidesteps
 interaction) rather than needing the `jsonify_dto()` workaround M1 uses.
 
 **IDOR fix** (task security mandate, not a faithful Node port): Node's
-`requireCommunityAdmin` middleware checks `community_members.role` for the
+`requireCommunityAdmin` middleware checks `community_members.community_role_id` for the
 SPECIFIC `communityId` in the request, in addition to a super-admin/
 platform-admin bypass -- `is_community_admin()` below reproduces that
 per-community check. Scope checks alone (`require_scope("marketplace.

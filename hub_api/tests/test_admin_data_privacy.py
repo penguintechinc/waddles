@@ -180,7 +180,7 @@ def _community(db: Any, *, tenant_id: int, name: str, is_global: bool = False) -
 
 
 def _member(db: Any, *, community_id: int, user_id: int | str) -> None:
-    db.dal.community_members.insert(community_id=community_id, user_id=str(user_id), role="member")
+    db.dal.community_members.insert(community_id=community_id, user_id=str(user_id))
     db.dal.commit()
 
 

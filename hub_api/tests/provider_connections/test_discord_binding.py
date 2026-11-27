@@ -439,7 +439,7 @@ class TestHttpBinding:
         pc_db.dal.commit()
         member = pc_db.dal(pc_db.dal.hub_users.username == "member").select().first().id
         pc_db.dal.community_members.insert(
-            community_id=pc_db.seed.community_id, user_id=str(member), role="member", is_active=True
+            community_id=pc_db.seed.community_id, user_id=str(member), is_active=True
         )
         pc_db.dal.commit()
         body = _create_body({"guild_id": GUILD, "managed_roles": {"vip": ROLE_A}})

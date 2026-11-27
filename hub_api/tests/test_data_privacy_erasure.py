@@ -179,7 +179,6 @@ def _member(
     platform: str | None = "discord",
     platform_user_id: str | None = None,
     reputation: int = 742,
-    role: str = "moderator",
 ) -> int:
     """Insert a fully-populated `community_members` row (`user_id=None`: platform-keyed)."""
     member_id = db.dal.community_members.insert(
@@ -192,7 +191,6 @@ def _member(
         bio=MEMBER_BIO,
         social_links=dict(MEMBER_LINKS),
         reputation=reputation,
-        role=role,
         is_active=True,
         joined_at=_now(),
     )

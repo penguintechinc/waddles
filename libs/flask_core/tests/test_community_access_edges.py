@@ -64,9 +64,12 @@ def world(db):
     other = db.tenants.insert(slug="other", is_active=True)
     c = db.communities.insert(tenant_id=t)
     c_other = db.communities.insert(tenant_id=other)
-    db.community_members.insert(community_id=c, user_id="1", role="member", is_active=True)
-    db.community_members.insert(community_id=c, user_id="2", role="community-admin", is_active=True)
-    db.community_members.insert(community_id=c, user_id="3", role="community-admin", is_active=False)
+    db.community_members.insert(community_id=c, user_id="1", is_active=True)
+    admin_role = db.community_roles.insert(community_id=c, role_kind=1)
+    member_role = db.community_roles.insert(community_id=c, role_kind=0)
+    db.community_members.insert(community_id=c, user_id="2", community_role_id=admin_role, is_active=True)
+    db.community_members.insert(community_id=c, user_id="3", community_role_id=admin_role, is_active=False)
+    db.community_members.insert(community_id=c, user_id="4", community_role_id=member_role, is_active=True)
     db.commit()
     return SimpleNamespace(tenant=t, community=c, other_community=c_other,
                            ctx=TenantContext(tenant_id=t, tenant_slug="acme"), adal=SyncAsyncDal(db))
@@ -184,8 +187,12 @@ class TestInstalledHook:
         client = self._app(db, world).test_client()
         assert (await client.get(f"/c/{world.community}/things", headers=self._hdr("77"))).status_code == 403
 
+    async def test_member_kind_role_cannot_write(self, db, world):
+        client = self._app(db, world).test_client()
+        assert (await client.post(f"/c/{world.community}/things", headers=self._hdr("4"))).status_code == 403
+
     async def test_other_tenants_community_forbidden_even_for_its_member(self, db, world):
-        db.community_members.insert(community_id=world.other_community, user_id="1", role="member", is_active=True)
+        db.community_members.insert(community_id=world.other_community, user_id="1", is_active=True)
         db.commit()
         client = self._app(db, world).test_client()
         resp = await client.get(f"/c/{world.other_community}/things", headers=self._hdr("1", tenant="acme"))

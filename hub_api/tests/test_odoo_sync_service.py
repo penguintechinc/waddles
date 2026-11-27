@@ -89,13 +89,16 @@ def _client(fake: FakeOdoo, **overrides: str) -> tuple[svc.OdooClient, svc.OdooC
 def _add_member(
     dal: Any, community_id: int, user: str, role: str = "member", rep: int = 600
 ) -> None:
+    cr = dal.community_roles
+    found = dal((cr.community_id == community_id) & (cr.name == role)).select(cr.id).first()
+    role_id = found.id if found else cr.insert(community_id=community_id, name=role, role_kind=0)
     dal.community_members.insert(
         community_id=community_id,
         user_id=user,
         platform="twitch",
         platform_user_id=f"tw-{user}",
         display_name=f"RealName-{user}",
-        role=role,
+        community_role_id=role_id,
         reputation=rep,
         is_active=True,
     )

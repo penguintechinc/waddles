@@ -436,7 +436,7 @@ def test_strict_roles_can_perform_their_real_write_paths(pg_db: PgTestDatabase) 
     with _as_role(pg_db, "waddles_reputation") as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
-            "reputation, role) VALUES (%s, NULL, 'discord', 'fn-plat-1', 600, 'member') RETURNING user_uuid",
+            "reputation) VALUES (%s, NULL, 'discord', 'fn-plat-1', 600) RETURNING user_uuid",
             (community,),
         )
         assert cur.fetchone()[0] is not None, "trigger must mint a pseudonym uuid"
@@ -500,8 +500,10 @@ def test_strict_roles_can_perform_their_real_write_paths(pg_db: PgTestDatabase) 
 
     with _as_role(pg_db, "waddles_hub_api") as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
-            "VALUES (%s, 'discord', 'fn-plat-hub', 'member') RETURNING user_uuid",
+            # authority is the role LINK (alembic 0147 dropped the `role` string)
+            "INSERT INTO community_members "
+            "(community_id, platform, platform_user_id, community_role_id) "
+            "VALUES (%s, 'discord', 'fn-plat-hub', NULL) RETURNING user_uuid",
             (community,),
         )
         assert cur.fetchone()[0] is not None
@@ -526,8 +528,8 @@ def test_strict_roles_can_perform_their_real_write_paths(pg_db: PgTestDatabase) 
 
     with _as_role(pg_db, "waddles_legacy_core_community") as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
-            "VALUES (%s, 'discord', 'fn-plat-legacy', 'member') RETURNING user_uuid",
+            "INSERT INTO community_members (community_id, platform, platform_user_id) "
+            "VALUES (%s, 'discord', 'fn-plat-legacy') RETURNING user_uuid",
             (community,),
         )
         assert cur.fetchone()[0] is not None

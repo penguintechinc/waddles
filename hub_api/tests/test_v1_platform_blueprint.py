@@ -90,7 +90,6 @@ def _seed_member(
         platform=platform,
         platform_user_id=f"pu-{user_id}",
         display_name=display_name,
-        role="member",
         is_active=is_active,
         joined_at=datetime.now(UTC),
         created_at=datetime.now(UTC),

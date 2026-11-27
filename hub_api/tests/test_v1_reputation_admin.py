@@ -156,7 +156,6 @@ def _member(
         user_id=str(n),
         user_uuid=_uuid(n),
         display_name=f"user{n}",
-        role="admin" if admin else "member",
         is_active=True,
         community_role_id=role_id,
         joined_at=datetime.now(UTC),

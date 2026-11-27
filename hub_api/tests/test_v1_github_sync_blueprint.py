@@ -125,7 +125,6 @@ def _seed_admin(
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role=role,
         is_active=True,
         community_role_id=role_id,
     )

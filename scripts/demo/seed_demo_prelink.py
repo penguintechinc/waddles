@@ -50,13 +50,12 @@ REQUIRED_SCHEMA: Mapping[str, tuple[str, ...]] = {
         "is_primary",
     ),
     "communities": ("id",),
-    "community_roles": ("id", "community_id", "name"),
+    "community_roles": ("id", "community_id", "name", "is_system"),
     "community_members": (
         "community_id",
         "user_id",
         "platform",
         "platform_user_id",
-        "role",
         "community_role_id",
         "claims_cache",
         "is_active",
@@ -258,19 +257,20 @@ def upsert_membership(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
         )
     cur.execute(
         "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
-        "role, community_role_id, is_active) VALUES (%s, %s, %s, %s, %s, "
+        "community_role_id, is_active) VALUES (%s, %s, %s, %s, "
         "(SELECT id FROM community_roles WHERE community_id = %s AND name = %s), TRUE) "
         "ON CONFLICT (community_id, platform, platform_user_id) DO UPDATE SET "
-        "user_id = EXCLUDED.user_id, role = EXCLUDED.role, "
+        "user_id = EXCLUDED.user_id, "
         "community_role_id = EXCLUDED.community_role_id, claims_cache = NULL, "
         "is_active = TRUE, left_at = NULL, updated_at = NOW() "
-        "WHERE community_members.role <> 'community-owner'",
+        "WHERE NOT EXISTS (SELECT 1 FROM community_roles o "
+        "WHERE o.id = community_members.community_role_id AND o.is_system "
+        "AND o.name = 'community-owner')",
         (
             cfg.community_id,
             str(hub_user_id),
             DISCORD,
             cfg.discord_user_id,
-            cfg.baseline_role,
             cfg.community_id,
             cfg.baseline_role,
         ),

@@ -1076,7 +1076,6 @@ class TestChannelOverrideEscalation:
         dal.community_members.insert(
             community_id=community_id,
             user_id="7",
-            role="chan-mod",
             is_active=True,
             community_role_id=mod_role,
         )

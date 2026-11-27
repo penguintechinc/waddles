@@ -106,7 +106,6 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
     db.dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role="community-admin",
         community_role_id=role_id,
         is_active=True,
     )
@@ -131,9 +130,7 @@ class TestAuth:
 
     async def test_non_admin_member_403(self, client: Any, streaming_db: Any) -> None:
         cid = _community(streaming_db)
-        streaming_db.dal.community_members.insert(
-            community_id=cid, user_id="1", role="member", is_active=True
-        )
+        streaming_db.dal.community_members.insert(community_id=cid, user_id="1", is_active=True)
         streaming_db.dal.commit()
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         for method, tail in (("get", ""), ("post", ""), ("post", "/key/regenerate")):
@@ -473,7 +470,6 @@ class TestDestinations:
         streaming_db.dal.community_members.insert(
             community_id=b,
             user_id="1",
-            role="community-admin",
             community_role_id=role_id,
             is_active=True,
         )

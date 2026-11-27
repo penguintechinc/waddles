@@ -12,14 +12,11 @@ Skipped (never failed) where the `docker` CLI is unavailable, like every other P
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import threading
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
-import sqlalchemy as sa
 from flask_core.database import AsyncDAL
 from flask_core.tenancy import TenantContext
 
@@ -121,21 +118,6 @@ def _guard(dal: Any, community_id: int, user_id: int, **kw: Any) -> Any:
         )
     finally:
         dal.rollback()
-
-
-def _load_migration_0145() -> Any:
-    """The 0145 revision module (its `backfill_links` is the batched data-repair path)."""
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "alembic"
-        / "versions"
-        / "0145_community_role_backfill.py"
-    )
-    spec = importlib.util.spec_from_file_location("m0145_owner_guard", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class TestOwnerProtection:
@@ -290,33 +272,6 @@ class TestOwnerResolution:
         )
         assert owner is not None and owner.user_id == str(CREATOR)
 
-    async def test_backfilled_legacy_owner_resolves(
-        self, adal: AsyncDAL, pg_db: pg.PgTestDatabase
-    ) -> None:
-        dal = adal.dal
-        community_id = _bare_community(dal, _tenant(dal), "legacy")
-        pg.q(dal, "SELECT seed_community_system_roles(%s)", [community_id])
-        pg.q(
-            dal,
-            "INSERT INTO community_members (community_id, user_id, role, is_active) "
-            "VALUES (%s, %s, 'community-owner', true)",
-            [community_id, str(LEGACY)],
-        )
-        # the role string alone identifies no owner
-        assert (
-            await platform_service.community_owner_member(adal, dal, community_id=community_id)
-            is None
-        )
-        engine = sa.create_engine(pg_db.dsn)
-        try:
-            with engine.begin() as conn:
-                linked, batches = _load_migration_0145().backfill_links(conn)
-        finally:
-            engine.dispose()
-        assert (linked, batches) == (1, 1)
-        owner = await platform_service.community_owner_member(adal, dal, community_id=community_id)
-        assert owner is not None and owner.user_id == str(LEGACY)
-
 
 class TestSystemNameLookups:
     async def test_reserved_names_rejected_on_custom_create(self, adal: AsyncDAL) -> None:
@@ -364,16 +319,14 @@ class TestSystemNameLookups:
         assert community_authz.member_scopes_sync(dal, community_id, JOINER) == frozenset()
 
 
-class TestUnlinkedLegacyString:
-    async def test_unlinked_owner_string_grants_no_scopes_and_no_role_name(
-        self, adal: AsyncDAL
-    ) -> None:
+class TestUnlinkedMember:
+    async def test_unlinked_member_grants_no_scopes_and_no_role_name(self, adal: AsyncDAL) -> None:
         dal = adal.dal
         community_id, tenant_id = await _create_with_appointee(adal)
         pg.q(
             dal,
-            "INSERT INTO community_members (community_id, user_id, role, is_active, claims_cache) "
-            "VALUES (%s, %s, 'community-owner', true, %s)",
+            "INSERT INTO community_members (community_id, user_id, is_active, claims_cache) "
+            "VALUES (%s, %s, true, %s)",
             [community_id, str(LEGACY), '{"scopes": ["community.members:manage"]}'],
         )
         caller = await community_authz.get_caller_community_role(
@@ -396,6 +349,6 @@ class TestUnlinkedLegacyString:
             False,
         )
         assert community_authz.member_scopes_sync(dal, community_id, LEGACY) == frozenset()
-        # and the unlinked string is never treated as the owner by the guard
+        # and an unlinked member is never treated as the owner by the guard
         locked = _guard(dal, community_id, LEGACY, editor_scopes=frozenset(), editor_bypass=False)
         assert locked.user_id == str(LEGACY)

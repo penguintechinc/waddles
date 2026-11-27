@@ -399,7 +399,7 @@ class TestDiscountCodeCrudBlueprint:
         dal, _t, community_id = marketplace_billing_db
         admin_id = _admin(dal)
         dal.community_members.insert(
-            community_id=community_id, user_id=str(admin_id), role="community-owner", is_active=True
+            community_id=community_id, user_id=str(admin_id), is_active=True
         )
         dal.commit()
         response = await client.post(

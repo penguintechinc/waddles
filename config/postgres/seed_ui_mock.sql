@@ -25,10 +25,10 @@ ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, is_active =
 
 -- Communities (4) in the global tenant.
 INSERT INTO communities (id, name, display_name, description, primary_platform, platform,
-                         owner_name, community_type, join_mode, member_count, is_active,
+                         community_type, join_mode, member_count, is_active,
                          is_public, tenant_id)
 SELECT v.id, v.name, v.display_name, v.description, v.platform, v.platform,
-       'Aria Quill', v.ctype::community_type, 'open', v.members, true, true,
+       v.ctype::community_type, 'open', v.members, true, true,
        (SELECT id FROM tenants WHERE is_global ORDER BY id LIMIT 1)
 FROM (VALUES
     (9001, 'demo-penguin-plays', 'Penguin Plays',  'Weekly game nights, clip nights and community events.', 'twitch',  'creator', 6),
@@ -40,19 +40,27 @@ ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name,
     description = EXCLUDED.description, member_count = EXCLUDED.member_count,
     is_active = true, deleted_at = NULL;
 
--- Members: community 9001 gets all six; the others get four.
+-- Members: community 9001 gets all six; the others get four. Authority is the LINKED system role
+-- (community_role_id -> community_roles; 9001 = owner of every demo community, 9002 = moderator):
+-- seed each community's system roles first (idempotent, the database's own seed function).
+SELECT seed_community_system_roles(id) FROM communities WHERE id BETWEEN 9001 AND 9004;
+
 INSERT INTO community_members (community_id, user_id, platform, platform_user_id, display_name,
-                               role, reputation, is_active)
+                               community_role_id, reputation, is_active)
 SELECT c.id, u.id::text, c.platform, 'demo-' || u.id,
-       u.display_name,
-       CASE WHEN u.id = 9001 THEN 'community-owner' WHEN u.id = 9002 THEN 'moderator' ELSE 'member' END,
+       u.display_name, r.id,
        600 + (u.id - 9000) * 35, true
 FROM communities c
 JOIN hub_users u ON u.id BETWEEN 9001 AND 9006
+JOIN community_roles r
+  ON r.community_id = c.id AND r.is_system
+ AND r.name = CASE WHEN u.id = 9001 THEN 'community-owner'
+                   WHEN u.id = 9002 THEN 'moderator' ELSE 'member' END
 WHERE c.id BETWEEN 9001 AND 9004
   AND (c.id = 9001 OR u.id <= 9004)
 ON CONFLICT (community_id, platform, platform_user_id) DO UPDATE
-    SET display_name = EXCLUDED.display_name, reputation = EXCLUDED.reputation, is_active = true;
+    SET display_name = EXCLUDED.display_name, reputation = EXCLUDED.reputation,
+        community_role_id = EXCLUDED.community_role_id, claims_cache = NULL, is_active = true;
 
 -- Leaderboard: tenant-scoped reputation scores (migration 097 replaced the
 -- old reputation_global table with reputation_tenant).

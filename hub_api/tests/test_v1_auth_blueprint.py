@@ -400,9 +400,7 @@ def _seed_member_community(
         is_active=True,
         public_id=str(uuid.uuid4()),
     )
-    dal.community_members.insert(
-        community_id=cid, user_id=str(user_id), role="member", is_active=True
-    )
+    dal.community_members.insert(community_id=cid, user_id=str(user_id), is_active=True)
     if tier is not None:
         now = datetime.now(UTC)
         dal.community_tier_allocations.insert(
@@ -589,7 +587,6 @@ class TestMeCommunityLicenseTier:
         auth_db.dal.community_members.insert(
             community_id=cid,
             user_id=str(user_id),
-            role="member",
             is_active=True,
             community_role_id=role.id if role is not None else None,
             **extra,

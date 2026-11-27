@@ -234,7 +234,6 @@ async def env(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
             user_id=str(user),
             is_active=True,
             claims_cache={"scopes": scopes},
-            role="x",
             community_role_id=role_id,
         )
     dal.commit()

@@ -54,16 +54,15 @@ def community_db(tenant_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         base_claims={"scopes": []},
     )
     # The banned member stays is_active=True so ONLY the BANNED membership_state can deny them.
-    for uid, role, state, uuid_, role_id in [
-        (MEMBER, "member", 1, "uuid-member", None),
-        (ADMIN, "community-owner", 1, "uuid-admin", owner_role),
-        (BANNED, "member", 2, "uuid-banned", None),
-        (SOFT_BANNED, "member", 1, "uuid-soft", None),
+    for uid, state, uuid_, role_id in [
+        (MEMBER, 1, "uuid-member", None),
+        (ADMIN, 1, "uuid-admin", owner_role),
+        (BANNED, 2, "uuid-banned", None),
+        (SOFT_BANNED, 1, "uuid-soft", None),
     ]:
         dal.community_members.insert(
             community_id=community_id,
             user_id=str(uid),
-            role=role,
             is_active=True,
             membership_state=state,
             user_uuid=uuid_,
@@ -119,7 +118,6 @@ def _join_other(dal: Any, other: int, *, admin: bool) -> None:
         dal.community_members.insert(
             community_id=other,
             user_id=uid,
-            role=kind,
             is_active=True,
             user_uuid=f"uuid-other-{uid}",
             community_role_id=role_id,
@@ -865,9 +863,7 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         dal, cid = community_db
         tenant_id = dal(dal.communities.id == cid).select().first().tenant_id
         hub_uuid = dal(dal.hub_users.id == STRANGER).select().first().uuid
-        dal.community_members.insert(
-            community_id=cid, user_id=str(STRANGER), role="member", is_active=True
-        )
+        dal.community_members.insert(community_id=cid, user_id=str(STRANGER), is_active=True)
         dal.bundle_reputation_soft_bans.insert(
             tenant_id=tenant_id,
             community_id=cid,
@@ -889,7 +885,7 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         from services.errors import ApiError
 
         dal, cid = community_db
-        dal.community_members.insert(community_id=cid, user_id="777", role="member", is_active=True)
+        dal.community_members.insert(community_id=cid, user_id="777", is_active=True)
         dal.commit()
         ctx = SimpleNamespace(tenant_id=1)
         with caplog.at_level("ERROR"), pytest.raises(ApiError):
@@ -909,9 +905,7 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         dal.hub_user_identities.insert(
             hub_user_id=STRANGER, platform="discord", platform_user_id="p-123"
         )
-        dal.community_members.insert(
-            community_id=cid, user_id=str(STRANGER), role="member", is_active=True
-        )
+        dal.community_members.insert(community_id=cid, user_id=str(STRANGER), is_active=True)
         if keyed_on == "pseudonym":
             token = "11111111-1111-4111-8111-111111111111"
             dal.ephemeral_pseudonyms.insert(
@@ -924,7 +918,6 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
                 user_id="",
                 platform="discord",
                 platform_user_id="p-123",
-                role="member",
                 is_active=True,
                 user_uuid=token,
             )
@@ -961,9 +954,7 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, cid = community_db
-        dal.community_members.insert(
-            community_id=cid, user_id=str(STRANGER), role="member", is_active=True
-        )
+        dal.community_members.insert(community_id=cid, user_id=str(STRANGER), is_active=True)
         dal.commit()
         resp = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, STRANGER))
         assert resp.status_code == 200

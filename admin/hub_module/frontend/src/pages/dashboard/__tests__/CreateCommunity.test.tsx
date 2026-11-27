@@ -147,11 +147,12 @@ describe('toCreatePayload', () => {
     });
   });
 
-  it('only honours the owner fields for super admins', () => {
+  it('never sends owner fields (ownership is the creator role / the transfer endpoint)', () => {
     const form = { name: 'x', platform: 'twitch', ownerId: ' 55 ', ownerName: 'Owner' };
-    expect(toCreatePayload(form, true)).toMatchObject({ ownerId: '55', ownerName: 'Owner' });
-    expect(toCreatePayload(form, false)).not.toHaveProperty('ownerId');
-    expect(toCreatePayload(form, false)).not.toHaveProperty('ownerName');
+    for (const superAdmin of [true, false]) {
+      expect(toCreatePayload(form, superAdmin)).not.toHaveProperty('ownerId');
+      expect(toCreatePayload(form, superAdmin)).not.toHaveProperty('ownerName');
+    }
   });
 
   it('never sends platformServerId unless the caller is a super admin', () => {

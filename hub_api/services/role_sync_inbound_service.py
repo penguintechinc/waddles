@@ -8,7 +8,7 @@ no new authority:
 
 - **Discord is the source of truth only for ``community_role`` bindings.** A
   member update is mapped through ``community_role_sync_bindings`` rows with
-  ``sync_scope = 'community_role'`` and written to ``community_members.role``
+  ``sync_scope = 'community_role'`` and written to ``community_members.community_role_id``
   via the shared, idempotent ``_apply_community_role()`` (grant-only, never
   touches ``community-owner``, never creates membership).
 - **Echo / loop prevention (origin marker).** Roles bound ``subscriber_tier`` /
@@ -109,7 +109,7 @@ _events_counter = _meter.create_counter(
 )
 _applied_counter = _meter.create_counter(
     "waddles_role_sync_inbound_applied_total",
-    description="community_members.role changes applied from an inbound Discord push",
+    description="community_members.community_role_id changes applied from an inbound Discord push",
 )
 
 
@@ -448,7 +448,8 @@ async def apply_inbound_event(
     """Reconcile ONE inbound event into Waddles under the role-sync direction rules.
 
     Returns the classified outcome; never raises for an expected refusal. Writes only
-    ``community_members.role`` (via the shared idempotent applier) -- never writes Discord.
+    ``community_members.community_role_id`` (via the shared idempotent applier) -- never writes
+    Discord.
 
     The event PAYLOAD is not covered by ``binding.mac``, so it is untrusted: before anything is
     applied the member's current roles are fetched from Discord (the community's paired guild,

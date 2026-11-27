@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { superAdminApi } from '../../services/api';
+import { fetchCommunityMembers } from '../../services/communityMembersApi';
 import { TIER_BADGE_CLASS, TIER_LABEL, TIER_OPTIONS, REASON_CODES, REASON_LABEL, normalizeTier } from '../../services/communityTierConstants';
 import { isTenantTierRequired, TENANT_TIER_REQUIRED_MESSAGE, OPERATOR_POOL_HINT } from '../../services/communityTierErrors';
 import { getPlatformIcon, getPlatformColor, getPlatformLabel, getAllPlatformOptions } from '../../utils/platformConfig';
@@ -70,9 +71,9 @@ function SuperAdminCommunities() {
     }
   };
 
-  const handleReassign = async (id, newOwnerId, newOwnerName) => {
+  const handleReassign = async (id, newOwnerUserId) => {
     try {
-      const response = await superAdminApi.reassignOwner(id, { newOwnerId, newOwnerName });
+      const response = await superAdminApi.reassignOwner(id, { newOwnerUserId });
       if (response.data.success) {
         setReassignModal(null);
         loadCommunities();
@@ -498,19 +499,41 @@ function EditCommunityModal({ community, onClose, onSave }) {
   );
 }
 
+/**
+ * Ownership transfer dialog: the new owner is picked from the community's own members and sent
+ * by user UUID (`newOwnerUserId`); there is no free-text owner name.
+ */
 function ReassignOwnerModal({ community, onClose, onReassign }) {
-  const [newOwnerName, setNewOwnerName] = useState('');
-  const [newOwnerId, setNewOwnerId] = useState('');
+  const [search, setSearch] = useState('');
+  const [members, setMembers] = useState([]);
+  const [loadError, setLoadError] = useState(null);
+  const [newOwnerUserId, setNewOwnerUserId] = useState('');
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCommunityMembers(community.id, { page: 1, limit: 100, search, roleId: '' })
+      .then((page) => {
+        if (cancelled) return;
+        setMembers(page.members);
+        setLoadError(null);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError('Failed to load community members');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [community.id, search]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!newOwnerName.trim()) {
-      alert('Owner name is required');
+    if (!newOwnerUserId) {
+      alert('Select a member to become the owner');
       return;
     }
     setSaving(true);
-    await onReassign(community.id, newOwnerId || null, newOwnerName);
+    await onReassign(community.id, newOwnerUserId);
     setSaving(false);
   };
 
@@ -520,7 +543,7 @@ function ReassignOwnerModal({ community, onClose, onReassign }) {
         <div className="p-6 border-b border-navy-700">
           <h2 id="super-admin-communities-dialog-2-title" className="text-xl font-semibold text-gold-400">Reassign Owner</h2>
           <p className="text-sm text-navy-400 mt-1">
-            Reassigning ownership of: <strong className="text-sky-100">{community.displayName}</strong>
+            Transferring ownership of: <strong className="text-sky-100">{community.displayName}</strong>
           </p>
         </div>
         <form onSubmit={handleSubmit}>
@@ -528,28 +551,37 @@ function ReassignOwnerModal({ community, onClose, onReassign }) {
             <div className="p-3 bg-gold-500/20 border border-gold-500/30 rounded-lg text-gold-300 text-sm">
               Current owner: {community.ownerName || 'Unassigned'}
             </div>
+            <p className="text-sm text-navy-400">
+              The current owner becomes a community admin. The new owner must be an active member.
+            </p>
+            {loadError && <div className="text-sm text-red-300">{loadError}</div>}
             <div>
-              <label htmlFor="super-admin-communities-new-owner-name" className="block text-sm font-medium text-sky-200 mb-1">New Owner Name *</label>
+              <label htmlFor="super-admin-communities-owner-search" className="block text-sm font-medium text-sky-200 mb-1">Find member</label>
               <input
-                id="super-admin-communities-new-owner-name"
+                id="super-admin-communities-owner-search"
                 type="text"
-                value={newOwnerName}
-                onChange={(e) => setNewOwnerName(e.target.value)}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
                 className="input w-full"
-                placeholder="Enter new owner's name"
-                required
+                placeholder="Search members"
               />
             </div>
             <div>
-              <label htmlFor="super-admin-communities-new-owner-id-optional" className="block text-sm font-medium text-sky-200 mb-1">New Owner ID (optional)</label>
-              <input
-                id="super-admin-communities-new-owner-id-optional"
-                type="text"
-                value={newOwnerId}
-                onChange={(e) => setNewOwnerId(e.target.value)}
+              <label htmlFor="super-admin-communities-new-owner" className="block text-sm font-medium text-sky-200 mb-1">New Owner *</label>
+              <select
+                id="super-admin-communities-new-owner"
+                value={newOwnerUserId}
+                onChange={(e) => setNewOwnerUserId(e.target.value)}
                 className="input w-full"
-                placeholder="Platform user ID"
-              />
+                required
+              >
+                <option value="">Select a member...</option>
+                {members.map((m) => (
+                  <option key={m.userId} value={m.userId}>
+                    {m.username}{m.roleName ? ` (${m.roleName})` : ''}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
           <div className="p-6 border-t border-navy-700 flex justify-end gap-3">

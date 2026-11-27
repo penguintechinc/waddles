@@ -53,10 +53,10 @@ from .tenancy import TenantContext, TenantIsolationError, resolve_tenant_context
 
 logger = logging.getLogger(__name__)
 
-#: `community_members.role` values treated as admin-tier -- matches
-#: `hub_api/services/community_access.py`'s `_ADMIN_ROLES` (the two
-#: system-seeded owner/admin role names).
-_ADMIN_ROLES = ("community-owner", "community-admin")
+#: `community_roles.role_kind` of the admin kind -- matches
+#: `hub_api/services/scope_registry.py`'s `KIND_ADMIN`. Authority comes from the member's linked
+#: `community_roles` row (`community_members.community_role_id`), never a role name.
+_KIND_ADMIN = 1
 
 #: HTTP methods that mutate community-scoped state -- these require
 #: `require_admin`; everything else (GET, HEAD, OPTIONS) only requires
@@ -79,7 +79,7 @@ class CallerIdentityError(Exception):
 
 
 def bind_shared_read_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Define the read-only field subset of `tenants`/`communities`/`community_members`.
+    """Define the read-only subset of `tenants`/`communities`/`community_members`/`community_roles`.
 
     Idempotent (guarded on `community_members`). `migrate=False` in
     production always -- these tables are never this service's to create.
@@ -110,10 +110,18 @@ def bind_shared_read_tables(dal: Any, *, migrate: bool = False) -> None:
         # not a FK -- matches `hub_api/services/community_authz.py`'s own
         # note; compared as `str(user_id)` at every call site.
         Field("user_id", "string", length=255),
-        Field("role", "string", length=50, default="member"),
+        Field("community_role_id", "integer"),
         Field("is_active", "boolean", default=True),
         migrate=migrate,
     )
+
+    if "community_roles" not in dal.tables:
+        dal.define_table(
+            "community_roles",
+            Field("community_id", "integer", notnull=True),
+            Field("role_kind", "integer"),
+            migrate=migrate,
+        )
 
 
 def _is_super_admin(request: Request) -> bool:
@@ -152,7 +160,7 @@ async def require_admin(
     community_id: int,
     user_id: int,
 ) -> None:
-    """Raise `CommunityAccessError` unless `user_id` is an active owner/admin of `community_id`.
+    """Raise `CommunityAccessError` unless `user_id` is an active admin-kind member of `community_id`.
 
     Gates every write path in the community's resource space.
     """
@@ -165,7 +173,9 @@ async def require_admin(
         (dal.community_members.community_id == community_id)
         & (dal.community_members.user_id == str(user_id))
         & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
-        & (dal.community_members.role.belongs(_ADMIN_ROLES))
+        & (dal.community_members.community_role_id == dal.community_roles.id)
+        & (dal.community_roles.community_id == community_id)
+        & (dal.community_roles.role_kind == _KIND_ADMIN)
     )
     rows = await async_dal.select_async(membership_query, dal.community_members.id)
     if not rows:

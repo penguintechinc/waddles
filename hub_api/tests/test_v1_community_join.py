@@ -114,7 +114,6 @@ class TestJoinCommunity:
         auth_db.dal.community_members.insert(
             community_id=cid,
             user_id=str(uid),
-            role="member",
             is_active=False,
             joined_at=datetime.now(UTC),
         )

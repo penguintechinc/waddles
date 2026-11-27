@@ -663,7 +663,6 @@ def _add_community_member(dal: Any, *, community_id: int, hub_user_id: int, role
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(hub_user_id),
-        role=role,
         community_role_id=role_id,
         is_active=True,
         joined_at=datetime.now(UTC),
@@ -898,7 +897,6 @@ class TestDiscordToPlatformDirection:
         dal.community_members.insert(
             community_id=community_id,
             user_id="1",
-            role=name,
             community_role_id=role_id,
             is_active=True,
             joined_at=datetime.now(UTC),

@@ -46,9 +46,7 @@ def client(app: Quart) -> Any:
 
 def _seed_membership(dal: Any, community_id: int, user_id: int, *, active: bool = True) -> None:
     """Insert one `community_members` row (`user_id` is the legacy VARCHAR column)."""
-    dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role="member", is_active=active
-    )
+    dal.community_members.insert(community_id=community_id, user_id=str(user_id), is_active=active)
     dal.commit()
 
 

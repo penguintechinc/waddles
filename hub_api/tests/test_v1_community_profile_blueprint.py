@@ -143,7 +143,6 @@ def _seed_member(auth_db: Any, *, community_id: int, user_id: int, role_id: int)
     auth_db.dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role="member",
         is_active=True,
         joined_at=datetime.now(UTC),
         community_role_id=role_id,

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     metrics, validate_read, validate_write, BoxFuture, Change, PlatformTableError,
-    PlatformTableScope, PlatformTableStore, PROTECTED_ROLES,
+    PlatformTableScope, PlatformTableStore, PROTECTED_ROLES, RESERVED_SYSTEM_ROLES,
 };
 
 /// Per-transaction statement timeout so a stuck row lock can never hold a
@@ -71,7 +71,7 @@ fn scope_values(scope: &PlatformTableScope, user: Uuid) -> Vec<Value> {
 /// Matching on the canonical `&'static str` keeps identifiers constant.
 fn select_expr(column: &'static str) -> Result<(&'static str, bool), PlatformTableError> {
     match column {
-        "role" => Ok(("cm.role", false)),
+        "role" => Ok(("cr.name::text", false)),
         "is_active" => Ok(("(cm.is_active IS TRUE)", true)),
         "joined_at" => Ok((
             "to_char(cm.joined_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
@@ -80,6 +80,10 @@ fn select_expr(column: &'static str) -> Result<(&'static str, bool), PlatformTab
         other => Err(PlatformTableError::NotAllowlisted(other.to_string())),
     }
 }
+
+/// Join to the member's LINKED role row (same community; NULL when unlinked).
+pub(crate) const ROLE_JOIN: &str = "LEFT JOIN community_roles cr \
+     ON cr.id = cm.community_role_id AND cr.community_id = cm.community_id";
 
 /// Builds the scoped SELECT for `columns` (canonical static names). Pure, so the
 /// scope predicate is unit-testable without a database.
@@ -91,7 +95,7 @@ pub(crate) fn build_read_sql(columns: &[&'static str]) -> Result<String, Platfor
     }
     Ok(format!(
         "SELECT {} FROM community_members cm JOIN communities c ON c.id = cm.community_id \
-         WHERE {TARGET_PREDICATE}",
+         {ROLE_JOIN} WHERE {TARGET_PREDICATE}",
         exprs.join(", ")
     ))
 }
@@ -99,14 +103,22 @@ pub(crate) fn build_read_sql(columns: &[&'static str]) -> Result<String, Platfor
 /// The row-lock SELECT of a write (scoped identically to a read).
 pub(crate) fn build_lock_sql() -> String {
     format!(
-        "SELECT cm.id AS id, cm.role AS role FROM community_members cm \
-         JOIN communities c ON c.id = cm.community_id WHERE {TARGET_PREDICATE} FOR UPDATE OF cm"
+        "SELECT cm.id AS id, cr.name::text AS role FROM community_members cm \
+         JOIN communities c ON c.id = cm.community_id {ROLE_JOIN} \
+         WHERE {TARGET_PREDICATE} FOR UPDATE OF cm"
     )
 }
 
-/// The scoped UPDATE: re-asserts the community on top of the locked row id.
-pub(crate) const UPDATE_ROLE_SQL: &str = "UPDATE community_members SET role = $1, \
-     updated_at = NOW() WHERE id = $2 AND community_id = $3";
+/// Resolves a role name to THIS community's role row: reserved system names match only the
+/// `is_system` row, any other name only a custom (non-system) row. `$1 = community_id`,
+/// `$2 = name`, `$3 = is_system`.
+pub(crate) const RESOLVE_ROLE_SQL: &str = "SELECT id FROM community_roles \
+     WHERE community_id = $1 AND name = $2 AND is_system = $3";
+
+/// The scoped UPDATE: relinks the member to the resolved role row, clears the cached claims so
+/// scopes re-resolve, and re-asserts the community on top of the locked row id.
+pub(crate) const UPDATE_ROLE_SQL: &str = "UPDATE community_members SET community_role_id = $1, \
+     claims_cache = NULL, updated_at = NOW() WHERE id = $2 AND community_id = $3";
 
 const AUDIT_SQL: &str = "INSERT INTO bundle_platform_table_audit \
      (tenant_id, community_id, app_id, app_version, user_uuid, table_name, column_name, \
@@ -196,10 +208,30 @@ impl PostgresPlatformTableStore {
             if *column != "role" {
                 return Err(PlatformTableError::NotAllowlisted((*column).to_string()));
             }
+            let want_system = RESERVED_SYSTEM_ROLES.contains(&value.as_str());
+            let role_id = txn
+                .query_one_raw(stmt(
+                    RESOLVE_ROLE_SQL,
+                    vec![
+                        Value::Int(Some(scope.community_id)),
+                        Value::String(Some(value.clone())),
+                        Value::Bool(Some(want_system)),
+                    ],
+                ))
+                .await
+                .map_err(backend_err)?
+                .ok_or_else(|| {
+                    metrics::record_denied("unknown_role");
+                    PlatformTableError::Invalid(format!(
+                        "role {value:?} does not exist in this community"
+                    ))
+                })?
+                .try_get::<i32>("", "id")
+                .map_err(backend_err)?;
             txn.execute_raw(stmt(
                 UPDATE_ROLE_SQL,
                 vec![
-                    Value::String(Some(value.clone())),
+                    Value::Int(Some(role_id)),
                     Value::Int(Some(row_id)),
                     Value::Int(Some(scope.community_id)),
                 ],
@@ -283,6 +315,21 @@ mod tests {
         }
         assert!(UPDATE_ROLE_SQL.contains("community_id = $3"));
         assert!(lock.contains("FOR UPDATE OF cm"));
+        assert!(RESOLVE_ROLE_SQL.contains("community_id = $1"));
+    }
+
+    #[test]
+    fn role_is_read_from_the_linked_role_never_the_legacy_column() {
+        let read = build_read_sql(&["role"]).unwrap();
+        let lock = build_lock_sql();
+        for sql in [read.as_str(), lock.as_str()] {
+            assert!(sql.contains("cr.name"), "{sql}");
+            assert!(sql.contains("cr.community_id = cm.community_id"), "{sql}");
+            assert!(!sql.contains("cm.role"), "{sql}");
+        }
+        assert!(UPDATE_ROLE_SQL.contains("community_role_id = $1"));
+        assert!(UPDATE_ROLE_SQL.contains("claims_cache = NULL"));
+        assert!(!UPDATE_ROLE_SQL.contains("SET role"));
     }
 
     #[test]

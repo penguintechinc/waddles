@@ -25,6 +25,7 @@ from typing import Any
 from services import ban_suppression, dsar_rate_limit
 from services.community_authz import require_community_scope
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found
+from services.member_roles import COMMUNITY_MEMBER_ROLE, set_member_role_async
 from services.scope_registry import SCOPE_MEMBERS_MANAGE
 
 
@@ -296,13 +297,13 @@ async def approve_request(
         )
     )
     if not existing_member:
-        await async_dal.insert_async(
-            dal.community_members,
+        await set_member_role_async(
+            async_dal,
+            dal,
             community_id=community_id,
-            user_id=str(applicant_id),
-            role="member",
-            is_active=True,
-            joined_at=datetime.now(UTC),
+            role=COMMUNITY_MEMBER_ROLE,
+            user_id=applicant_id,
+            add=True,
         )
 
     await async_dal.update_async(

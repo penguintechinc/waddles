@@ -140,6 +140,27 @@ async fn database() -> DatabaseFixture {
         ({COMMUNITY},'{ACTOR_UUID}','twitch','1001','community-admin'),({COMMUNITY},'{BOB}','twitch','1002','member');
         INSERT INTO economy_balances(tenant_id,community_id,user_uuid,balance) VALUES({TENANT},{COMMUNITY},'{pot}',100);"
     )).await.unwrap();
+    // Post-0147 contract: the stage reads the LINKED role (view replaced), legacy column dropped.
+    admin.execute_unprepared(&format!(
+        "CREATE TABLE community_roles(id SERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
+           name VARCHAR(100) NOT NULL, is_system BOOLEAN NOT NULL DEFAULT false);
+         ALTER TABLE community_members ADD COLUMN community_role_id INTEGER;
+         ALTER TABLE community_members ADD COLUMN claims_cache TEXT;
+         INSERT INTO community_roles(community_id,name,is_system) VALUES
+           ({COMMUNITY},'community-admin',true),({COMMUNITY},'member',true);
+         UPDATE community_members cm SET community_role_id = cr.id FROM community_roles cr
+          WHERE cr.community_id = cm.community_id AND cr.name = cm.role;"
+    )).await.unwrap();
+    admin
+        .execute_unprepared(include_str!(
+            "../../../../scripts/db/community_role_link_contract.sql"
+        ))
+        .await
+        .unwrap();
+    admin
+        .execute_unprepared("ALTER TABLE community_members DROP COLUMN role")
+        .await
+        .unwrap();
     let runtime = connect(
         &ConnectConfig {
             host,

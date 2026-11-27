@@ -136,7 +136,6 @@ def community_db(community_db: Any) -> Any:
     dal.community_members.insert(
         community_id=community_id,
         user_id="1",
-        role="community-owner",
         is_active=True,
         user_uuid="uuid-owner",
         community_role_id=owner_role,

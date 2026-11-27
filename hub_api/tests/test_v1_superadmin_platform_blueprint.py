@@ -212,31 +212,6 @@ class TestCommunityManagement:
         assert [r.user_id for r in rows] == ["1"]
         assert _is_linked_owner(admin_db.dal, rows[0])
 
-    async def test_reassign_owner_keeps_canonical_owner_role(
-        self, client: Any, admin_db: Any
-    ) -> None:
-        created = await client.post(
-            "/api/v1/superadmin/communities",
-            headers=_headers(),
-            json={"name": "Reassign Me", "platform": "discord"},
-        )
-        created_uuid = (await created.get_json())["community"]["id"]  # public UUID, not numeric
-        community_id = int(
-            admin_db.dal(admin_db.dal.communities.public_id == created_uuid)
-            .select(admin_db.dal.communities.id)
-            .first()
-            .id
-        )
-        response = await client.post(
-            f"/api/v1/superadmin/communities/{created_uuid}/reassign",
-            headers=_headers(),
-            json={"newOwnerName": "newowner"},
-        )
-        assert response.status_code == 200
-        rows = admin_db.dal(admin_db.dal.community_members.community_id == community_id).select()
-        assert len(rows) == 1
-        assert _is_linked_owner(admin_db.dal, rows[0])
-
     async def test_create_community_missing_platform_is_400(self, client: Any) -> None:
         response = await client.post(
             "/api/v1/superadmin/communities", headers=_headers(), json={"name": "No Platform"}
@@ -310,23 +285,65 @@ class TestCommunityManagement:
         )
         assert response.status_code == 403
 
-    async def test_reassign_owner_success(self, client: Any, admin_db: Any) -> None:
+    async def test_reassign_owner_name_payload_is_400(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
-        response = await client.post(
-            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
-            headers=_headers(),
-            json={"newOwnerName": "newowner"},
-        )
-        assert response.status_code == 200
+        for body in (
+            {"newOwnerName": "newowner"},
+            {"newOwnerUserId": str(uuid.uuid4()), "newOwnerName": "x"},
+            {"newOwnerUserId": str(uuid.uuid4()), "newOwnerId": "7"},
+            {},
+        ):
+            response = await client.post(
+                cpath(
+                    admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id
+                ),
+                headers=_headers(),
+                json=body,
+            )
+            assert response.status_code == 400, body
 
-    async def test_reassign_owner_missing_name_is_400(self, client: Any, admin_db: Any) -> None:
+    async def test_reassign_owner_non_admin_caller_is_403(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.post(
             cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
             headers=_headers(),
-            json={},
+            json={"newOwnerUserId": str(uuid.uuid4())},
         )
-        assert response.status_code == 400
+        assert response.status_code == 403
+
+    @pytest.mark.parametrize("field", ["ownerId", "ownerName"])
+    async def test_create_and_update_reject_owner_fields(
+        self, client: Any, admin_db: Any, field: str
+    ) -> None:
+        created = await client.post(
+            "/api/v1/superadmin/communities",
+            headers=_headers(),
+            json={"name": "No Owner Field", "platform": "discord", field: "x"},
+        )
+        assert created.status_code == 400
+        assert "reassign" in (await created.get_json())["error"]["message"]
+        community_id = _seed_community(admin_db)
+        updated = await client.put(
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
+            headers=_headers(),
+            json={"displayName": "Renamed", field: "x"},
+        )
+        assert updated.status_code == 400
+
+    async def test_community_dtos_expose_no_owner_id(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        listed = await (
+            await client.get("/api/v1/superadmin/communities", headers=_headers())
+        ).get_json()
+        detail = await (
+            await client.get(
+                cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
+                headers=_headers(),
+            )
+        ).get_json()
+        assert "ownerId" not in listed["communities"][0]
+        assert "ownerId" not in detail["community"]
+        assert listed["communities"][0]["ownerName"] is None  # no linked owner member
 
 
 _UNKNOWN_TENANT_UUID = "00000000-0000-4000-8000-0000000000a1"

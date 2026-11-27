@@ -277,7 +277,6 @@ def _seed_admin(
     dal.community_members.insert(
         community_id=community_id,
         user_id=str(user_id),
-        role="admin",
         is_active=True,
         community_role_id=role_id,
     )
@@ -334,7 +333,6 @@ class TestCommunityAdminAuthz:
         dal.community_members.insert(
             community_id=COMMUNITY_ID,
             user_id=str(ADMIN_USER_ID),
-            role="moderator",
             is_active=True,
             community_role_id=role_id,
         )

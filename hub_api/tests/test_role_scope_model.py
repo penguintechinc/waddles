@@ -405,7 +405,6 @@ class TestDedicatedScopes:
         dal.community_members.insert(
             community_id=community_id,
             user_id="51",
-            role="moderator",
             community_role_id=roles["moderator"],
             is_active=True,
         )
@@ -435,7 +434,6 @@ class TestScopeEndpointAndSync:
         dal.community_members.insert(
             community_id=community_id,
             user_id="42",
-            role="community-admin",
             community_role_id=roles["community-admin"],
             is_active=True,
             claims_cache=["community:read"],
@@ -443,13 +441,9 @@ class TestScopeEndpointAndSync:
         dal.commit()
         assert member_scopes_sync(dal, community_id, 42) == reg.all_scopes()
 
-    def test_member_scopes_sync_role_name_without_role_row_is_empty(
-        self, community_db: Any
-    ) -> None:
+    def test_member_scopes_sync_unlinked_member_is_empty(self, community_db: Any) -> None:
         dal, community_id = community_db
-        dal.community_members.insert(
-            community_id=community_id, user_id="43", role="community-owner", is_active=True
-        )
+        dal.community_members.insert(community_id=community_id, user_id="43", is_active=True)
         dal.commit()
         assert member_scopes_sync(dal, community_id, 43) == frozenset()
 

@@ -161,7 +161,7 @@ class TestAuthChain:
         pc_db.dal.commit()
         member = pc_db.dal(pc_db.dal.hub_users.username == "member").select().first().id
         pc_db.dal.community_members.insert(
-            community_id=pc_db.seed.community_id, user_id=str(member), role="member", is_active=True
+            community_id=pc_db.seed.community_id, user_id=str(member), is_active=True
         )
         pc_db.dal.commit()
         response = await client.get(_base(pc_db), headers=admin_headers(pc_db, user_id=member))
@@ -173,10 +173,16 @@ class TestAuthChain:
         pc_db.dal.hub_users.insert(username="comm-admin")
         pc_db.dal.commit()
         user = pc_db.dal(pc_db.dal.hub_users.username == "comm-admin").select().first().id
+        role_id = pc_db.dal.community_roles.insert(
+            community_id=pc_db.seed.community_id,
+            name="scoped-moderator",
+            role_kind=0,
+            base_claims={"scopes": ["community:manage_channels", "provider.connections:manage"]},
+        )
         pc_db.dal.community_members.insert(
             community_id=pc_db.seed.community_id,
             user_id=str(user),
-            role="moderator",
+            community_role_id=role_id,
             is_active=True,
             claims_cache={"scopes": ["community:manage_channels", "provider.connections:manage"]},
         )
@@ -195,10 +201,16 @@ class TestAuthChain:
         pc_db.dal.hub_users.insert(username="comm-admin2")
         pc_db.dal.commit()
         user = pc_db.dal(pc_db.dal.hub_users.username == "comm-admin2").select().first().id
+        role_id = pc_db.dal.community_roles.insert(
+            community_id=pc_db.seed.community_id,
+            name="scoped-moderator",
+            role_kind=0,
+            base_claims={"scopes": ["community:manage_channels"]},
+        )
         pc_db.dal.community_members.insert(
             community_id=pc_db.seed.community_id,
             user_id=str(user),
-            role="moderator",
+            community_role_id=role_id,
             is_active=True,
             claims_cache={"scopes": ["community:manage_channels"]},
         )

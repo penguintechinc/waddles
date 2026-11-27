@@ -7,7 +7,7 @@ transaction and the matching rules. They cannot prove what only Postgres does to
   64-char lowercase hex code, the closed enum) and the UNIQUE index backs the upsert;
 - `timestamptz` comparisons with Python aware datetimes decide expiry correctly;
 - alembic 0045/0048's `trg_community_members_user_uuid` (a real trigger, real functions, real
-  `ephemeral_pseudonyms` rows it mints) coexists with member-row DELETEs and the banned-role
+  `ephemeral_pseudonyms` rows it mints) coexists with member-row DELETEs and the banned-state
   UPDATE that re-applies a restriction;
 - pydal DELETE / SELECT against tables WITHOUT an `id` column (`bundle_reputation_scores`,
   `ephemeral_pseudonyms`) and against UUID-typed columns (`user_uuid IN (...)`);
@@ -48,6 +48,7 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
 from services import ban_suppression as bs  # noqa: E402
 from services import data_privacy_service as privacy  # noqa: E402
 from services import suppression_keys as keys  # noqa: E402
+from services.membership_state import MembershipState  # noqa: E402
 from services.schema import bind_auth_tables  # noqa: E402
 
 pg_only = pytest.mark.skipif(
@@ -76,8 +77,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
                 "ADD COLUMN IF NOT EXISTS bio TEXT, ADD COLUMN IF NOT EXISTS social_links JSONB, "
                 "ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP, "
                 "ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-                "ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 600, "
-                "ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'member'"
+                "ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 600"
             )
             cur.execute(
                 "ALTER TABLE communities ADD COLUMN IF NOT EXISTS member_count INTEGER DEFAULT 0, "
@@ -181,7 +181,7 @@ def _member(
     user_id: int | None,
     platform: str | None = None,
     puid: str | None = None,
-    role: str = "member",
+    state: int = int(MembershipState.ACTIVE),
     active: bool = True,
     reputation: int = 742,
 ) -> int:
@@ -189,13 +189,14 @@ def _member(
         _one(
             dal,
             "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
-            "role, is_active, reputation) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "membership_state, is_active, reputation) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             [
                 community_id,
                 None if user_id is None else str(user_id),
                 platform,
                 puid,
-                role,
+                state,
                 active,
                 reputation,
             ],
@@ -254,7 +255,7 @@ class TestBinderMatchesTheRealSchema:
             "user_id",
             "platform",
             "platform_user_id",
-            "role",
+            "membership_state",
             "is_active",
             "user_uuid",
             "joined_at",
@@ -448,7 +449,14 @@ class TestBannedErasureOnPostgres:
         community = _community(dal, tenant)
         user_id, _ = _hub_user(dal, "banned")
         _identity(dal, user_id, "discord", PUID)
-        _member(dal, community, user_id=user_id, role="banned", active=False, reputation=310)
+        _member(
+            dal,
+            community,
+            user_id=user_id,
+            state=int(MembershipState.BANNED),
+            active=False,
+            reputation=310,
+        )
         return tenant, community, user_id
 
     def test_exactly_one_valid_row_is_written_and_everything_else_deleted(
@@ -523,7 +531,7 @@ class TestReturnOnPostgres:
         old_community = _community(dal, tenant)
         old, _ = _hub_user(dal, "old")
         _identity(dal, old, "discord", PUID)
-        _member(dal, old_community, user_id=old, role="banned", active=False)
+        _member(dal, old_community, user_id=old, state=int(MembershipState.BANNED), active=False)
         _scope_and_erase(dal, old, datetime.now(UTC))
         target = _community(dal, tenant)
         returning, _ = _hub_user(dal, "returning")
@@ -536,11 +544,13 @@ class TestReturnOnPostgres:
         assert match is not None and match.reason is bs.RestrictionReason.BAN
         row = _q(
             dal,
-            "SELECT role, is_active, user_uuid IS NOT NULL FROM community_members "
+            "SELECT membership_state, is_active, user_uuid IS NOT NULL FROM community_members "
             "WHERE community_id=%s AND user_id=%s",
             [target, str(returning)],
         )
-        assert row == [("banned", False, True)]  # the 0048 trigger resolved the uuid on insert
+        assert row == [
+            (int(MembershipState.BANNED), False, True)
+        ]  # the 0048 trigger resolved the uuid on insert
 
     async def test_a_benign_return_gets_a_fresh_start(self, adal: AsyncDAL) -> None:
         dal = adal.dal
@@ -566,7 +576,9 @@ class TestReturnOnPostgres:
         acme, beta = _tenant(dal, "acme"), _tenant(dal, "beta")
         old, _ = _hub_user(dal, "old2")
         _identity(dal, old, "discord", PUID)
-        _member(dal, _community(dal, acme), user_id=old, role="banned", active=False)
+        _member(
+            dal, _community(dal, acme), user_id=old, state=int(MembershipState.BANNED), active=False
+        )
         _scope_and_erase(dal, old, datetime.now(UTC))
         returning, _ = _hub_user(dal, "cross")
         _identity(dal, returning, "discord", PUID)
@@ -644,7 +656,13 @@ class TestReturnOnPostgres:
         tenant = _tenant(dal, "acme")
         old, _ = _hub_user(dal, "old3")
         _identity(dal, old, "discord", PUID)
-        _member(dal, _community(dal, tenant), user_id=old, role="banned", active=False)
+        _member(
+            dal,
+            _community(dal, tenant),
+            user_id=old,
+            state=int(MembershipState.BANNED),
+            active=False,
+        )
         _scope_and_erase(dal, old, datetime.now(UTC))
         joiner, _ = _hub_user(dal, "joiner")
         community = _community(dal, tenant)
@@ -654,6 +672,6 @@ class TestReturnOnPostgres:
         banned = await bs.reapply_for_hub_user_async(adal, dal, hub_user_id=joiner)
 
         assert banned == 1
-        assert _q(dal, "SELECT role, is_active FROM community_members WHERE id=%s", [member]) == [
-            ("banned", False)
-        ]
+        assert _q(
+            dal, "SELECT membership_state, is_active FROM community_members WHERE id=%s", [member]
+        ) == [(int(MembershipState.BANNED), False)]

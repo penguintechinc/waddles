@@ -248,7 +248,6 @@ def subject_member_rows(
         members.user_id,
         members.platform,
         members.platform_user_id,
-        members.role,
         members.membership_state,
         members.is_active,
         members.user_uuid,
