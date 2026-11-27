@@ -137,6 +137,13 @@ SCOPE_CONNECTIONS_ADMIN = "connections:admin"
 SCOPE_TENANT_COMMUNITY_TIER_READ = "tenant.community_tier:read"
 SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE = "tenant.community_tier:allocate"
 
+#: Tenant-level per-action scope gating member self-create (`POST /api/v1/communities`): creating
+#: a community spends the tenant's free community slot, so it is never implied by the `*:read`
+#: every session carries. Granted to the tenant `admin` and `maintainer` bundles (tenant owners /
+#: tenant admins, minted by `auth_service._scopes_for` from `tenant_admins`); replaces the
+#: never-checked legacy `community:create` literal. Global admins create via the superadmin route.
+SCOPE_COMMUNITIES_CREATE = "communities:create"
+
 
 @dataclass(slots=True)
 class OAuthProvider:
@@ -747,13 +754,13 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
         # tenant owner may only ever see their OWN tenant's chain (tenant from the JWT).
         'admin': [
             'tenant:read', 'tenant:write', 'tenant:admin', 'tenant:delete',
-            'community:create', 'community:delete', 'billing:read', 'billing:write',
+            SCOPE_COMMUNITIES_CREATE, 'community:delete', 'billing:read', 'billing:write',
             'settings:write', 'compliance.audit:admin', SCOPE_SSO_ADMIN,
             SCOPE_CONNECTIONS_ADMIN, SCOPE_TENANT_COMMUNITY_TIER_READ,
             SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE,
         ],
         'maintainer': [
-            'tenant:read', 'tenant:write', 'community:create',
+            'tenant:read', 'tenant:write', SCOPE_COMMUNITIES_CREATE,
             'billing:read', 'reports:read', 'analytics:read',
         ],
         'viewer': ['tenant:read', 'billing:read'],

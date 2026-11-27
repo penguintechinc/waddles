@@ -13,7 +13,7 @@ from typing import Any, Final
 
 
 class MembershipState(IntEnum):
-    """Closed set mirrored by the `ck_community_members_membership_state` CHECK (alembic 0145)."""
+    """Closed set mirrored by the `ck_community_members_membership_state` CHECK (alembic 0146)."""
 
     ACTIVE = 1
     BANNED = 2

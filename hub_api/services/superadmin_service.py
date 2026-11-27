@@ -212,9 +212,15 @@ async def create_community(
         )
 
     slug = name.lower().strip().replace(" ", "-")
-    existing = await async_dal.select_async(dal(dal.communities.name == slug))
-    if existing:
+    comm = dal.communities
+    # Name uniqueness is per tenant (never leaks another tenant's names); a platform server
+    # (e.g. a Discord guild) may be claimed by ONE community across ALL tenants.
+    if await async_dal.select_async(dal((comm.name == slug) & (comm.tenant_id == tenant_id))):
         raise conflict("Community name already exists")
+    if platform_server_id and await async_dal.select_async(
+        dal((comm.platform == platform) & (comm.platform_server_id == platform_server_id))
+    ):
+        raise conflict("Platform server is already linked to a community")
 
     new_id = await create_community_capped(
         async_dal,

@@ -235,13 +235,29 @@ class TestCommunityManagement:
         assert response.status_code == 400
 
     async def test_create_community_duplicate_name_is_409(self, client: Any, admin_db: Any) -> None:
-        _seed_community(admin_db, name="acme-community")
+        dal = admin_db.dal
+        tenant_id = dal(dal.tenants.slug == TENANT_SLUG).select().first().id
+        _seed_community(admin_db, name="acme-community", tenant_id=tenant_id)
         response = await client.post(
             "/api/v1/superadmin/communities",
             headers=_headers(),
             json={"name": "Acme Community", "platform": "discord"},
         )
         assert response.status_code == 409
+
+    async def test_create_community_same_name_other_tenant_is_allowed(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        dal = admin_db.dal
+        other = dal.tenants.insert(slug="other-tenant", display_name="Other", is_active=True)
+        dal.commit()
+        _seed_community(admin_db, name="acme-community", tenant_id=other)
+        response = await client.post(
+            "/api/v1/superadmin/communities",
+            headers=_headers(),
+            json={"name": "Acme Community", "platform": "discord"},
+        )
+        assert response.status_code == 201
 
     async def test_create_community_invalid_type_is_400(self, client: Any) -> None:
         response = await client.post(

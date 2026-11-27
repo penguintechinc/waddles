@@ -1,7 +1,9 @@
 """v1 member-facing community routes: self-create and recent activity.
 
 `POST /api/v1/communities` (flag `waddles.community-self-create`, default OFF -> 403
-`feature_disabled`) creates a community in the CALLER's tenant (token, never the body).
+`feature_disabled`) creates a community in the CALLER's tenant (token, never the body). The
+caller must hold the tenant scope `communities:create` (403 before any cap logic). The body
+carries no `platformServerId`: a guild is bound only via the verified pairing/bot-install flow.
 `GET /api/v1/communities/<cuuid>/activity` is the member read (active, non-banned members and
 tenant/global admins; foreign-tenant community -> 404). Logic lives in
 `services.community_self_service`.
@@ -14,6 +16,8 @@ from dataclasses import dataclass
 from typing import Annotated, Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import SCOPE_COMMUNITIES_CREATE
+from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from opentelemetry import metrics
@@ -45,7 +49,6 @@ class SelfCreateRequest:
     displayName: Annotated[str | None, Field(max_length=100)] = None  # noqa: N815
     description: Annotated[str | None, Field(max_length=2000)] = None
     platform: Annotated[str, Field(min_length=1, max_length=50)] = "discord"
-    platformServerId: Annotated[str | None, Field(max_length=255)] = None  # noqa: N815
     communityType: str | None = None  # noqa: N815
 
 
@@ -84,9 +87,10 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 
 @community_self_bp.route("", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_COMMUNITIES_CREATE)  # type: ignore[misc]
 @validate_request(SelfCreateRequest)
 async def create_community(data: SelfCreateRequest) -> tuple[Any, int]:
-    """Self-create a community in the caller's tenant (flag-gated, free-tier capped)."""
+    """Self-create a community in the caller's tenant (scope + flag gated, free-tier capped)."""
     ctx = get_tenant_context(request)
     if ctx is None:
         return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
@@ -107,7 +111,6 @@ async def create_community(data: SelfCreateRequest) -> tuple[Any, int]:
             display_name=data.displayName,
             description=data.description,
             platform=data.platform,
-            platform_server_id=data.platformServerId,
             community_type=data.communityType,
         )
     except ApiError as exc:

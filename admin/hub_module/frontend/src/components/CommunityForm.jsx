@@ -190,21 +190,24 @@ function CommunityForm({
               </select>
             </div>
 
-            <div>
-              <label htmlFor="community-form-platform-server-channel-id-optional" className="block text-sm font-medium text-sky-200 mb-1">
-                Platform Server/Channel ID
-                <span className="text-navy-400 font-normal ml-2">(optional)</span>
-              </label>
-              <input
-                id="community-form-platform-server-channel-id-optional"
-                type="text"
-                name="platformServerId"
-                value={form.platformServerId}
-                onChange={handleChange}
-                className="input w-full"
-                placeholder="e.g., Discord Server ID or Twitch Channel ID"
-              />
-            </div>
+            {/* Super admins only: members bind a server via the verified pairing flow. */}
+            {showOwnerFields && (
+              <div>
+                <label htmlFor="community-form-platform-server-channel-id-optional" className="block text-sm font-medium text-sky-200 mb-1">
+                  Platform Server/Channel ID
+                  <span className="text-navy-400 font-normal ml-2">(optional)</span>
+                </label>
+                <input
+                  id="community-form-platform-server-channel-id-optional"
+                  type="text"
+                  name="platformServerId"
+                  value={form.platformServerId}
+                  onChange={handleChange}
+                  className="input w-full"
+                  placeholder="e.g., Discord Server ID or Twitch Channel ID"
+                />
+              </div>
+            )}
           </div>
 
           {/* Owner Info (conditionally shown for superadmin) */}

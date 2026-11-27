@@ -55,7 +55,7 @@ function field(values: Record<string, unknown>, key: string): string | undefined
 
 /**
  * Turns the untyped `CommunityForm` values into a payload. Optional keys are omitted rather
- * than sent as `undefined`; the owner fields are only honoured for super admins.
+ * than sent as `undefined`; the owner and platform-server fields are only honoured for super admins.
  */
 export function toCreatePayload(raw: unknown, allowOwner: boolean): CreateCommunityPayload {
   const values = isRecord(raw) ? raw : {};
@@ -65,13 +65,16 @@ export function toCreatePayload(raw: unknown, allowOwner: boolean): CreateCommun
   const optional = {
     displayName: field(values, 'displayName'),
     description: field(values, 'description'),
-    platformServerId: field(values, 'platformServerId'),
     communityType: field(values, 'communityType'),
   };
   for (const [key, value] of Object.entries(optional)) {
     if (value !== undefined) Object.assign(payload, { [key]: value });
   }
   if (typeof values['isPublic'] === 'boolean') payload.isPublic = values['isPublic'];
+  // A server id is only accepted from super admins: self-create has no verified binding, so
+  // the API ignores it and the pairing/bot-install flow is the only member path.
+  const serverId = field(values, 'platformServerId');
+  if (allowOwner && serverId) payload.platformServerId = serverId;
   const ownerId = field(values, 'ownerId');
   if (allowOwner && ownerId) {
     payload.ownerId = ownerId;

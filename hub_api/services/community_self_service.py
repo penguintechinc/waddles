@@ -46,7 +46,6 @@ async def create_own_community(
     display_name: str | None,
     description: str | None,
     platform: str,
-    platform_server_id: str | None,
     community_type: str | None,
 ) -> Any:
     """Create a community in the caller's tenant and make the caller its admin-role holder."""
@@ -57,9 +56,7 @@ async def create_own_community(
         display_name=display_name,
         description=description,
         platform=platform,
-        platform_server_id=platform_server_id,
-        owner_id=str(caller_id),
-        owner_name=None,
+        platform_server_id=None,  # server binding only via the verified pairing/bot-install flow
         is_public=None,
         community_type=community_type,
         caller_id=caller_id,

@@ -23,6 +23,7 @@ from tests.conftest import (
 )
 
 CALLER = 7
+CREATE_SCOPE = "communities:create"
 ITEM_KEYS = {"kind", "at", "actorId", "actorName", "title"}
 
 
@@ -46,7 +47,7 @@ def app(automation_db: Any) -> Quart:
     return quart_app
 
 
-def _hdr(user_id: int = CALLER, scope: str = "") -> dict[str, str]:
+def _hdr(user_id: int = CALLER, scope: str = CREATE_SCOPE) -> dict[str, str]:
     return {"Authorization": f"Bearer {make_user_token(user_id=user_id, scope=scope)}"}
 
 
@@ -86,6 +87,45 @@ class TestSelfCreate:
         assert role.role_kind == KIND_ADMIN
         flag.assert_awaited()
         assert flag.await_args.kwargs["tenant"] == TENANT_SLUG
+
+    async def test_platform_server_id_in_body_is_not_bound(
+        self, app: Quart, automation_db: Any, flag: AsyncMock
+    ) -> None:
+        resp = await app.test_client().post(
+            "/api/v1/communities",
+            json={"name": "Guild Grab", "platformServerId": "123456789"},
+            headers=_hdr(),
+        )
+        assert resp.status_code == 201
+        dal = automation_db.dal
+        row = dal(dal.communities.name == "guild-grab").select().first()
+        assert row.platform_server_id is None
+
+    async def test_without_scope_is_403_and_creates_nothing(
+        self, app: Quart, automation_db: Any, flag: AsyncMock
+    ) -> None:
+        dal = automation_db.dal
+        before = dal(dal.communities).count()
+        for scope in ("", "tenant:read community:read"):
+            resp = await app.test_client().post(
+                "/api/v1/communities", json={"name": "Nope"}, headers=_hdr(scope=scope)
+            )
+            assert resp.status_code == 403
+        assert dal(dal.communities).count() == before
+        flag.assert_not_awaited()  # rejected before flag / cap / slot logic
+
+    async def test_same_name_other_tenant_ok_same_tenant_409(
+        self, app: Quart, automation_db: Any, flag: AsyncMock
+    ) -> None:
+        dal = automation_db.dal
+        other = dal.tenants.insert(slug="other", display_name="Other", is_active=True)
+        dal.communities.insert(name="taken", display_name="t", tenant_id=other, is_active=True)
+        dal.commit()
+        client = app.test_client()
+        ok = await client.post("/api/v1/communities", json={"name": "Taken"}, headers=_hdr())
+        assert ok.status_code == 201
+        dup = await client.post("/api/v1/communities", json={"name": "taken"}, headers=_hdr())
+        assert dup.status_code == 409
 
     async def test_missing_name_is_400(self, app: Quart, flag: AsyncMock) -> None:
         resp = await app.test_client().post("/api/v1/communities", json={}, headers=_hdr())

@@ -120,6 +120,7 @@ describe('CreateCommunity', () => {
     expect(body).toMatchObject({ name: 'my-club', platform: 'discord', communityType: 'creator' });
     expect(body).not.toHaveProperty('isPublic');
     expect(body).not.toHaveProperty('ownerId');
+    expect(body).not.toHaveProperty('platformServerId');
     expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/superadmin/communities');
   });
 
@@ -151,6 +152,12 @@ describe('toCreatePayload', () => {
     expect(toCreatePayload(form, true)).toMatchObject({ ownerId: '55', ownerName: 'Owner' });
     expect(toCreatePayload(form, false)).not.toHaveProperty('ownerId');
     expect(toCreatePayload(form, false)).not.toHaveProperty('ownerName');
+  });
+
+  it('never sends platformServerId unless the caller is a super admin', () => {
+    const form = { name: 'x', platform: 'discord', platformServerId: ' 123 ' };
+    expect(toCreatePayload(form, false)).not.toHaveProperty('platformServerId');
+    expect(toCreatePayload(form, true)).toMatchObject({ platformServerId: '123' });
   });
 
   it('treats non-object form values as empty and rejects them', () => {
