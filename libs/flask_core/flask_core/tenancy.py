@@ -59,12 +59,15 @@ class TenantContext:
     tenant_slug: str
     is_default: bool = False
     cat_community_id: Optional[int] = None
-    cat_created_by_user_id: Optional[int] = None
 
 
 @dataclass(slots=True, frozen=True)
 class CatPrincipal:
-    """Verified Community Access Token (`wdl_c_...`) principal."""
+    """Verified Community Access Token (`wdl_c_...`) principal.
+
+    A machine credential bound to ONE community: it deliberately carries no user id (the human
+    who minted it is NOT the caller), so nothing downstream can act as that user.
+    """
 
     token_id: int
     community_id: int
@@ -72,7 +75,6 @@ class CatPrincipal:
     tenant_slug: str
     is_default: bool
     scopes: FrozenSet[str]
-    created_by_user_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +259,6 @@ def resolve_cat_token(dal: Any, token: str) -> Optional[CatPrincipal]:
         tenant_slug=str(tenant.slug),
         is_default=(tenant.slug == DEFAULT_TENANT_SLUG),
         scopes=_parse_cat_scopes(getattr(row, "scopes", None)),
-        created_by_user_id=getattr(row, "created_by_user_id", None),
     )
 
 
@@ -265,9 +266,12 @@ def tenant_middleware(f):
     """
     Decorator enforcing security.md's ordering contract: tenant before scope.
 
-    Decodes the bearer JWT (or resolves a `wdl_c_` Community Access Token),
-    resolves and publishes `TenantContext` on `request.tenant_context`, and
-    only then calls the wrapped handler. Must be the outermost auth decorator
+    Decodes the bearer JWT, resolves and publishes `TenantContext` on
+    `request.tenant_context`, and only then calls the wrapped handler. A `wdl_c_`
+    Community Access Token is REFUSED (401) unless the route was explicitly opted
+    in with `flask_core.cat_auth.allow_cat` (placed below this decorator); an
+    opted-in route additionally enforces the declared scopes and community
+    binding and publishes `request.cat_principal` (never a user id). Must be the outermost auth decorator
     on every protected route -- any scope check has to run inside it, never
     outside, or it answers the right question against an unverified tenant.
     """
@@ -287,6 +291,16 @@ def tenant_middleware(f):
         dal = current_app.config.get("dal")
 
         if token.startswith("wdl_c_"):
+            from .cat_auth import enforce_cat_policy, get_cat_policy, record_cat_decision
+
+            policy = get_cat_policy(f)
+            if policy is None:
+                # Fail closed BEFORE any DB lookup: CATs are opt-in per route.
+                record_cat_decision(request, allowed=False, reason="route_not_opted_in")
+                return error_response(
+                    "Community access tokens are not accepted on this route", status_code=401
+                )
+
             try:
                 cat = resolve_cat_token(dal, token)
             except TenantIsolationError as exc:
@@ -305,26 +319,17 @@ def tenant_middleware(f):
                 _log_auth_rejection("invalid_or_expired_cat", request.path)
                 return error_response("Invalid or expired token", status_code=401)
 
-            view_cid = (request.view_args or {}).get("community_id")
-            if view_cid is not None and view_cid != cat.community_id:
-                logger.warning(
-                    "CAT community mismatch path=%s",
-                    request.path,
-                    extra={
-                        "event_type": "AUTH",
-                        "action": "tenant_middleware",
-                        "result": "FORBIDDEN",
-                    },
-                )
-                return error_response("Token not authorized for this community", status_code=403)
+            refusal = await enforce_cat_policy(request, policy, cat)
+            if refusal is not None:
+                return error_response(refusal[0], status_code=refusal[1])
 
             request.tenant_context = TenantContext(
                 tenant_id=cat.tenant_id,
                 tenant_slug=cat.tenant_slug,
                 is_default=cat.is_default,
                 cat_community_id=cat.community_id,
-                cat_created_by_user_id=cat.created_by_user_id,
             )
+            request.cat_principal = cat
             return await f(*args, **kwargs)
 
         payload = verify_jwt_token(token)

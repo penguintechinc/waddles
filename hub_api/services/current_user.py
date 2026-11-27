@@ -15,14 +15,15 @@ from __future__ import annotations
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import parse_scope_claim
-from flask_core.tenancy import TenantIsolationError, resolve_cat_token
-from quart import Request, current_app
+from quart import Request
 
 from services.errors import unauthorized
 
 
 def get_current_user_id(request: Request) -> int:
     """Return the authenticated caller's `hub_users.id` as an int, or raise 401.
+
+    A Community Access Token (`wdl_c_...`) is ALWAYS 401 here -- it is not a user.
 
     Re-validates the bearer token via the same `verify_jwt_token` helper
     `tenant_middleware`/`require_scope` use. Safe to call after
@@ -36,13 +37,10 @@ def get_current_user_id(request: Request) -> int:
 
     token = auth_header[7:]
     if token.startswith("wdl_c_"):
-        try:
-            cat = resolve_cat_token(current_app.config.get("dal"), token)
-        except TenantIsolationError as exc:
-            raise unauthorized(str(exc)) from exc
-        if cat is None or cat.created_by_user_id is None:
-            raise unauthorized("Invalid or expired token")
-        return int(cat.created_by_user_id)
+        # SECURITY: a Community Access Token is a community-scoped machine credential, never a
+        # user session -- it must NEVER resolve to the human who minted it. Routes that accept
+        # CATs opt in via `flask_core.cat_auth.allow_cat` and read `request.cat_principal`.
+        raise unauthorized("Community access tokens cannot act as a user")
 
     payload = verify_jwt_token(token)
     if payload is None:

@@ -241,8 +241,11 @@ class TestDesktopOAuthDeepLink:
         app = _make_app(auth_db)
         client = app.test_client()
 
+        verifier = "v" * 64
+        challenge = oauth_service.pkce_s256(verifier)
         start_resp = await client.get(
             "/api/v1/auth/oauth/discord?redirect_uri=waddles://oauth/callback"
+            f"&code_challenge={challenge}&code_challenge_method=S256"
         )
         assert start_resp.status_code == 200
         start_data = await start_resp.get_json()
@@ -259,12 +262,16 @@ class TestDesktopOAuthDeepLink:
         assert "mock.jwt.token" not in location
 
         exchange_code = location.split("code=")[1].split("&")[0]
-        ex_resp = await client.post("/api/v1/auth/exchange", json={"code": exchange_code})
+        ex_resp = await client.post(
+            "/api/v1/auth/exchange", json={"code": exchange_code, "code_verifier": verifier}
+        )
         assert ex_resp.status_code == 200
         ex_data = await ex_resp.get_json()
         assert ex_data["success"] is True
         assert ex_data["token"] == "mock.jwt.token"
 
         # Single-use: second redemption must fail.
-        replay_resp = await client.post("/api/v1/auth/exchange", json={"code": exchange_code})
+        replay_resp = await client.post(
+            "/api/v1/auth/exchange", json={"code": exchange_code, "code_verifier": verifier}
+        )
         assert replay_resp.status_code == 400

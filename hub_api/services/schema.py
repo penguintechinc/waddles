@@ -293,6 +293,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("platform", "string", length=50, notnull=True),
         Field("user_id", "integer"),
         Field("redirect_uri", "text"),
+        # Alembic 0146: PKCE S256 challenge for the desktop (`waddles://`) login flow.
+        Field("code_challenge", "string", length=64),
         Field("expires_at", "datetime", notnull=True),
         Field("created_at", "datetime"),
         migrate=migrate,
@@ -313,6 +315,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("platform", "string", length=50),
         Field("used", "boolean", default=False),
         Field("used_at", "datetime"),
+        # Alembic 0146: PKCE S256 challenge carried from the desktop OAuth state.
+        Field("code_challenge", "string", length=64),
         Field("expires_at", "datetime", notnull=True),
         Field("created_at", "datetime"),
         migrate=migrate,
