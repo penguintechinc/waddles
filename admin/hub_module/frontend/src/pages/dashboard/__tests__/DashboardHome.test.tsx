@@ -18,8 +18,8 @@ const ME_TWO = {
   user: {
     id: 1,
     communities: [
-      { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-owner' },
-      { id: '00000009-0000-4000-8000-000000000000', name: 'penguins', displayName: 'Penguin Pals', role: 'member' },
+      { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-owner', roleId: null, scopes: [] },
+      { id: '00000009-0000-4000-8000-000000000000', name: 'penguins', displayName: 'Penguin Pals', role: 'member', roleId: null, scopes: [] },
     ],
   },
 };
@@ -89,7 +89,7 @@ describe('DashboardHome (post-login landing)', () => {
       if (url !== '/api/v1/auth/me') return unexpectedUrl(url);
       calls += 1;
       if (calls === 1) throw httpError(500, { error: { code: 'INTERNAL', message: 'Database unavailable' } });
-      return { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member' }] } };
+      return { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member', roleId: null, scopes: [] }] } };
     });
     renderLanding();
     const alert = await screen.findByRole('alert');

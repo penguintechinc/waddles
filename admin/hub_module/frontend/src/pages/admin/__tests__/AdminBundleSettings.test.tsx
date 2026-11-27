@@ -1,7 +1,7 @@
 /**
  * Tests for the pluggable app-bundle settings page: card grid, schema-driven
  * form render, save, 409 conflict + reload, 422 field errors, 404 no-config,
- * 403, and role-aware (moderator read-only / admin edit) behaviour.
+ * 403, and scope-aware (`bundles.admin:moderate` read-only / `bundles.admin:admin` edit) behaviour.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -9,7 +9,7 @@ import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useAuth } from '../../../contexts/AuthContext';
+import { useCommunityScopes } from '../../../hooks/useCommunityScopes';
 import { useFeatureFlag } from '../../../lib/useFeatureFlag';
 import { bundleActivationApi } from '../../../services/bundleActivationApi';
 import { BundleAdminError, bundleAdminApi, type BundleConfig } from '../../../services/bundleAdminApi';
@@ -17,7 +17,7 @@ import AdminBundleSettings from '../AdminBundleSettings';
 import { bundleName, toErrorSchema } from '../../../components/bundles/settingsHelpers';
 
 vi.mock('../../../lib/useFeatureFlag', () => ({ useFeatureFlag: vi.fn() }));
-vi.mock('../../../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
+vi.mock('../../../hooks/useCommunityScopes', () => ({ useCommunityScopes: vi.fn() }));
 vi.mock('../../../services/bundleActivationApi', () => ({ bundleActivationApi: { list: vi.fn() } }));
 vi.mock('../../../services/bundleAdminApi', async (orig) => {
   const real = await orig<typeof import('../../../services/bundleAdminApi')>();
@@ -28,7 +28,7 @@ vi.mock('../../../services/bundleAdminApi', async (orig) => {
 });
 
 const flag = vi.mocked(useFeatureFlag);
-const auth = vi.mocked(useAuth);
+const scopesHook = vi.mocked(useCommunityScopes);
 const activation = vi.mocked(bundleActivationApi);
 const api = vi.mocked(bundleAdminApi);
 
@@ -47,8 +47,18 @@ const CONFIG: BundleConfig = {
   updatedBy: 1, createdAt: '2026-11-10T12:00:00Z',
 };
 
-function setRole(role: string) {
-  auth.mockReturnValue({ user: { communities: [{ id: '00000007-0000-4000-8000-000000000000', role }] } } as unknown as ReturnType<typeof useAuth>);
+/** Serves the caller's scopes in this community (what `/auth/me` would carry). */
+function setScopes(...held: string[]) {
+  const scopes = new Set(held);
+  const has = (scope: string) => scopes.has(scope);
+  scopesHook.mockReturnValue({
+    scopes,
+    has,
+    hasAny: (...wanted: string[]) => wanted.some(has),
+    isLoading: false,
+    error: null,
+    membership: undefined,
+  });
 }
 
 function mount(path = '/admin/00000007-0000-4000-8000-000000000000/settings') {
@@ -72,7 +82,7 @@ beforeEach(() => {
   vi.spyOn(console, 'debug').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   flag.mockReturnValue(true);
-  setRole('community-admin');
+  setScopes('bundles.admin:moderate', 'bundles.admin:admin');
   activation.list.mockResolvedValue([
     { appId: GREET, communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 1, version: '1.2.0', activatedAt: null },
     { appId: PLAIN, communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 2, version: '0.1.0', activatedAt: null },
@@ -166,17 +176,17 @@ describe('AdminBundleSettings', () => {
   });
 
   it('gives moderators a read-only form with no save/reset', async () => {
-    setRole('moderator');
+    setScopes('bundles.admin:moderate');
     mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     expect(await screen.findByLabelText(/Welcome message/)).toHaveAttribute('readonly');
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.getByText(/Read-only/)).toBeInTheDocument();
   });
 
-  it('blocks members who are not moderators or admins', () => {
-    setRole('member');
+  it('blocks callers holding neither bundles.admin scope', () => {
+    setScopes();
     mount();
-    expect(screen.getByRole('alert')).toHaveTextContent(/moderator or admin/);
+    expect(screen.getByRole('alert')).toHaveTextContent(/do not have permission/);
     expect(activation.list).not.toHaveBeenCalled();
   });
   it('close returns to the grid and generic save errors surface', async () => {

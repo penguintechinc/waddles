@@ -1,7 +1,6 @@
 /**
- * Regression: community owners were stored with role 'owner' while every gate checks
- * 'community-owner', so owners were redirected away from the admin panel. The gate accepts the
- * canonical role only (no 'owner' alias) and denies plain members.
+ * The admin gate is SCOPE-based: a membership holding an admin-surface scope enters, whatever its
+ * role is called; role names (community-owner, owner, ...) carry no authority.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -15,9 +14,9 @@ vi.mock('../contexts/AuthContext', async (importOriginal) => {
   return { ...actual, useAuth: vi.fn() };
 });
 
-/** Renders the admin gate for a user holding one community membership with `role`. */
-function renderGate(role) {
-  const user = { id: 1, roles: [], communities: [{ id: '00000005-0000-4000-8000-000000000000', role }] };
+/** Renders the admin gate for a user holding one community membership with `role` and `scopes`. */
+function renderGate(role, scopes) {
+  const user = { id: 1, roles: [], communities: [{ id: '00000005-0000-4000-8000-000000000000', role, scopes }] };
   useAuth.mockReturnValue({
     user,
     loading: false,
@@ -42,18 +41,28 @@ function renderGate(role) {
 }
 
 describe('ProtectedRoute requireCommunityAdmin', () => {
-  it('lets a community-owner into the admin panel', () => {
-    renderGate('community-owner');
+  it('lets a membership holding community:admin into the admin panel, whatever the role is called', () => {
+    renderGate('Warden', ['community:admin']);
     expect(screen.getByText('admin panel')).toBeTruthy();
   });
 
-  it('denies a plain member', () => {
-    renderGate('member');
+  it('lets a viewer scope (community.members:view) in', () => {
+    renderGate('member', ['community.members:view']);
+    expect(screen.getByText('admin panel')).toBeTruthy();
+  });
+
+  it('denies a plain member with no admin-surface scope', () => {
+    renderGate('member', []);
     expect(screen.getByText('dashboard')).toBeTruthy();
   });
 
-  it('does not alias the non-canonical "owner" role', () => {
-    renderGate('owner');
+  it('gives a role literally named community-owner no authority without scopes', () => {
+    renderGate('community-owner', []);
+    expect(screen.getByText('dashboard')).toBeTruthy();
+  });
+
+  it('ignores unrelated scopes', () => {
+    renderGate('member', ['community.roles:view']);
     expect(screen.getByText('dashboard')).toBeTruthy();
   });
 });

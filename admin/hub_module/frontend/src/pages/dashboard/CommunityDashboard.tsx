@@ -1,16 +1,16 @@
 import { Link, useParams } from 'react-router-dom';
 import { AnnouncementsPanel } from '../../components/dashboard/AnnouncementsPanel';
 import { CommunityHeader } from '../../components/dashboard/CommunityHeader';
-import { isCommunityAdminRole } from '../../components/dashboard/communityRoles';
 import CommunityReputationPanel from '../../components/dashboard/CommunityReputationPanel';
 import QuickActionsWidget from '../../components/dashboard/QuickActionsWidget';
 import { LeaderboardCard } from '../../components/leaderboard/LeaderboardCard';
 import { StreamsPanel } from '../../components/dashboard/StreamsPanel';
-import BotScoreCard from '../../components/BotScoreCard';
-import { Card, CardHeader, EmptyState, ErrorState, NotAvailableYet, QueryBoundary, ServedFeature } from '../../components/ui';
-import { useAuthView } from '../../contexts/authView';
-import { TIER } from '../../services/communityTierConstants';
+import { Card, CardHeader, EmptyState, ErrorState, QueryBoundary } from '../../components/ui';
+import { useRecentActivity } from '../../hooks/useCommunityActivity';
+import { useCommunityScopes } from '../../hooks/useCommunityScopes';
 import { useLiveStreams } from '../../hooks/useCommunityPanels';
+import { COMMUNITY_SCOPES, hasAdminSurface } from '../../lib/communityScopes';
+import { RECENT_ACTIVITY_KIND, type RecentActivityItem } from '../../services/communityActivityApi';
 import { useMyCommunities, usePublicCommunity } from '../../hooks/useMyCommunities';
 import type { MyCommunity } from '../../services/myCommunitiesApi';
 import { parseCommunityId } from '../../lib/communityId';
@@ -24,24 +24,33 @@ function StatTile({ value, label, tone }: { value: string; label: string; tone: 
   );
 }
 
+/** One-line description of a feed entry, by kind code. */
+function describeActivity(item: RecentActivityItem): string {
+  const who = item.actorName ?? 'Someone';
+  if (item.kind === RECENT_ACTIVITY_KIND.memberJoined) return `${who} joined the community`;
+  if (item.kind === RECENT_ACTIVITY_KIND.announcement) return item.title ? `Announcement: ${item.title}` : 'New announcement';
+  return item.title ?? who;
+}
+
 /** Everything on the dashboard that needs the caller to be a member. */
 function DashboardBody({ membership }: { membership: MyCommunity }) {
   const communityId = membership.id;
-  const { isSuperAdmin, communityTier } = useAuthView();
+  const { has, scopes } = useCommunityScopes(communityId);
   const details = usePublicCommunity(communityId);
   const streams = useLiveStreams(communityId);
-  const canManage = isCommunityAdminRole(membership.role);
-  const isOwnerOrAdmin = membership.role === 'community-owner' || membership.role === 'community-admin';
+  const activity = useRecentActivity(communityId);
+  const canConnect = has(COMMUNITY_SCOPES.providerConnections);
+  const canAdminister = has(COMMUNITY_SCOPES.admin) || hasAdminSurface([...scopes]);
   const live = streams.data;
-  const connect = canManage || isSuperAdmin ? { connectTo: `/admin/${communityId}/connections` } : {};
+  const connect = canConnect ? { connectTo: `/admin/${communityId}/connections` } : {};
 
   return (
     <div>
-      <CommunityHeader membership={membership} details={details.data} canAdminister={canManage || isSuperAdmin} />
+      <CommunityHeader membership={membership} details={details.data} canAdminister={canAdminister} />
 
-      <StreamsPanel communityId={communityId} query={streams} canManage={canManage || isSuperAdmin} />
+      <StreamsPanel communityId={communityId} query={streams} canManage={has(COMMUNITY_SCOPES.streamConfig) || canConnect} />
 
-      <AnnouncementsPanel communityId={communityId} canManage={canManage} />
+      <AnnouncementsPanel communityId={communityId} canManage={has(COMMUNITY_SCOPES.announcementsRead)} />
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
@@ -51,21 +60,33 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
               label="Members"
               tone="border-l-interactive"
             />
-            <StatTile value={membership.role.replace('community-', '')} label="Your role" tone="border-l-accent" />
+            <StatTile value={membership.role} label="Your role" tone="border-l-accent" />
             <StatTile value={live ? String(live.length) : '—'} label="Live Now" tone="border-l-success" />
           </div>
           <Card as="section" aria-label="Recent activity">
             <CardHeader title="Recent Activity" />
-            <NotAvailableYet feature="community-recent-activity" className="py-8" />
+            <QueryBoundary
+              query={activity}
+              loadingLabel="Loading recent activity"
+              errorTitle="We could not load recent activity"
+              isEmpty={(items: RecentActivityItem[]) => items.length === 0}
+              empty={<p className="py-8 text-center text-fg-secondary">Nothing has happened here yet.</p>}
+            >
+              {(items) => (
+                <ul className="divide-y divide-line" aria-label="Recent activity items">
+                  {items.map((item) => (
+                    <li key={`${item.kind}-${item.at}-${item.actorId ?? ''}-${item.title ?? ''}`} className="py-3 text-sm text-fg" data-testid="activity-item">
+                      {describeActivity(item)}
+                      <span className="ml-2 text-fg-secondary">{new Date(item.at).toLocaleDateString()}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </QueryBoundary>
           </Card>
         </div>
 
         <div className="space-y-6">
-          {isOwnerOrAdmin ? (
-            <ServedFeature feature="bot-score" fallbackClassName="card py-8">
-              <BotScoreCard communityId={communityId} isPremium={communityTier(communityId) >= TIER.premium} />
-            </ServedFeature>
-          ) : null}
           <CommunityReputationPanel communityId={communityId} />
           <LeaderboardCard communityId={communityId} type="watch-time" title="Top Viewers" limit={5} {...connect} />
           <LeaderboardCard communityId={communityId} type="messages" title="Top Chatters" limit={5} {...connect} />

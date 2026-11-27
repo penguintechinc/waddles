@@ -1,6 +1,6 @@
 /**
- * Community creation. The legacy `POST /communities/create` is not served; the identical-shape
- * `POST /superadmin/communities` is, for platform admins. Everyone else gets "not available yet".
+ * Community creation: super admins use `POST /superadmin/communities`; everyone else uses the
+ * self-service `POST /communities` (403 `feature_disabled` while the flag is off, shown to the user).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -81,16 +81,34 @@ describe('CreateCommunity', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  it('tells ordinary users self-service creation is not available yet, without any request', () => {
+  it('lets an ordinary user self-create on POST /communities, without super-admin-only fields', async () => {
     auth.isSuperAdmin = false;
-    const post = vi.spyOn(apiClient, 'post');
-    const get = vi.spyOn(apiClient, 'get');
+    const post = vi
+      .spyOn(apiClient, 'post')
+      .mockResolvedValue(ok({ success: true, community: { id: '0000002b-0000-4000-8000-000000000000', name: 'my-club', displayName: 'My Club' } }, 201));
     renderPage();
-    expect(screen.getByTestId('not-available-yet')).toHaveAttribute('data-feature', 'community-self-create');
-    expect(screen.getByText(/only be created by platform administrators/i)).toBeInTheDocument();
-    expect(screen.queryByTestId('community-name-input')).not.toBeInTheDocument();
-    expect(post).not.toHaveBeenCalled();
-    expect(get).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('not-available-yet')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'My Club' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByText('community dashboard')).toBeInTheDocument();
+    const [url, body] = post.mock.calls[0]!;
+    expect(url).toBe('/api/v1/communities');
+    expect(body).toMatchObject({ name: 'my-club', platform: 'discord', communityType: 'creator' });
+    expect(body).not.toHaveProperty('isPublic');
+    expect(body).not.toHaveProperty('ownerId');
+    expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/superadmin/communities');
+  });
+
+  it('shows the server message when self-creation is disabled (feature_disabled) and stays on the form', async () => {
+    auth.isSuperAdmin = false;
+    vi.spyOn(apiClient, 'post').mockRejectedValue(
+      httpError(403, { success: false, code: 'feature_disabled', error: { code: 'feature_disabled', message: 'Community creation is not enabled for your account yet' } }),
+    );
+    renderPage();
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'club' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByTestId('community-form-error')).toHaveTextContent('Community creation is not enabled for your account yet');
+    expect(screen.queryByText('community dashboard')).not.toBeInTheDocument();
   });
 });
 

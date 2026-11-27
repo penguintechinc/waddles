@@ -1,12 +1,8 @@
 import type { BadgeTone } from '../ui';
+import { ROLE_KIND_ADMIN } from '../../services/communityRolesApi';
 
-/** Community roles that can see admin surfaces (mirrors hub-api's admin/moderator gate). */
-export const COMMUNITY_ADMIN_ROLES: readonly string[] = ['community-owner', 'community-admin', 'moderator'];
-
-/** True when `role` is a community owner, admin or moderator. */
-export function isCommunityAdminRole(role: string | undefined): boolean {
-  return role !== undefined && COMMUNITY_ADMIN_ROLES.includes(role);
-}
+// Display helpers only. Authorization is scope-based (`useCommunityScopes`); nothing here
+// decides what a caller may do.
 
 /** `community-admin` -> `Admin`; unknown roles are title-cased as-is. */
 export function roleLabel(role: string): string {
@@ -14,28 +10,7 @@ export function roleLabel(role: string): string {
   return bare === '' ? 'Member' : bare.charAt(0).toUpperCase() + bare.slice(1);
 }
 
-/** Badge tone per role; the label text always accompanies it (never colour-only). */
-export function roleTone(role: string): BadgeTone {
-  switch (role) {
-    case 'community-owner':
-      return 'gold';
-    case 'community-admin':
-    case 'moderator':
-      return 'sky';
-    default:
-      return 'gray';
-  }
+/** Badge tone by role kind code (admin kind is highlighted); the label always accompanies it. */
+export function roleTone(roleKind: number | null | undefined): BadgeTone {
+  return roleKind === ROLE_KIND_ADMIN ? 'sky' : 'gray';
 }
-
-/**
- * Roster role filters. hub-api matches `role` exactly, so each filter is ONE role; the legacy
- * "Owners & Admins" comma list would silently match nobody.
- */
-export const COMMUNITY_ROLE_FILTERS: readonly { value: string; label: string }[] = [
-  { value: '', label: 'All Members' },
-  { value: 'community-owner', label: 'Owners' },
-  { value: 'community-admin', label: 'Admins' },
-  { value: 'moderator', label: 'Moderators' },
-  { value: 'vip', label: 'VIPs' },
-  { value: 'member', label: 'Members' },
-];

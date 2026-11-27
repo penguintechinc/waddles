@@ -23,6 +23,18 @@ vi.mock('../../../contexts/AuthContext', () => ({
   useAuth: vi.fn(),
 }));
 
+// Assignable community roles come from `GET /admin/:id/roles`, never a constant in the page.
+vi.mock('../../../services/communityRolesApi', async (orig) => {
+  const real = await orig<typeof import('../../../services/communityRolesApi')>();
+  return {
+    ...real,
+    fetchCommunityRoles: vi.fn(async () => [
+      { id: '000000a1-0000-4000-8000-000000000000', name: 'steward', displayName: 'Steward', roleKind: 1, priority: 90, memberCount: 1 },
+      { id: '000000a2-0000-4000-8000-000000000000', name: 'vip', displayName: 'VIP', roleKind: 3, priority: 10, memberCount: 4 },
+    ]),
+  };
+});
+
 // `@penguintechinc/react-libs`'s built dist is a directory-import ESM
 // package vitest/node can't resolve directly -- same workaround as
 // `src/pages/admin/__tests__/LoyaltyLeaderboard.test.jsx` /
@@ -365,7 +377,12 @@ describe('AdminRoleSyncMapping', () => {
     fireEvent.change(screen.getByLabelText(/Discord role ID/), {
       target: { value: '903' },
     });
-    fireEvent.change(await screen.findByLabelText(/Community role/), {
+    const roleSelect = await screen.findByLabelText(/Community role/);
+    // Options are the server's roles (value = stored role name, label = display name).
+    await waitFor(() => expect(screen.getByRole('option', { name: 'VIP' })).toBeInTheDocument());
+    expect(screen.getByRole('option', { name: 'Steward' })).toHaveValue('steward');
+    expect(screen.queryByRole('option', { name: 'community-admin' })).not.toBeInTheDocument();
+    fireEvent.change(roleSelect, {
       target: { value: 'vip' },
     });
 

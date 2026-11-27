@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, Outlet, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
+import { hasAdminSurface } from './lib/communityScopes';
 import { LoadingState, ServedFeature } from './components/ui';
 
 // Every page is route-level code-split: the shell (layouts) ships in the main
@@ -230,8 +231,7 @@ export function ProtectedRoute({ children, requireCommunityAdmin = false, requir
   if (requireCommunityAdmin) {
     // Super admins always have access; community-level admins checked per-community
     const isSuperAdmin = hasRole('admin') || hasRole('super_admin');
-    const communityAdminRoles = ['community-owner', 'community-admin', 'moderator'];
-    const hasCommunityAdmin = user.communities?.some(c => communityAdminRoles.includes(c.role));
+    const hasCommunityAdmin = user.communities?.some(c => hasAdminSurface(c.scopes));
     if (!isSuperAdmin && !hasCommunityAdmin) {
       return <Navigate to="/dashboard" replace />;
     }

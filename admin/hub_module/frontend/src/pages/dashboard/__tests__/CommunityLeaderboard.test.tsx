@@ -43,7 +43,7 @@ const STATS = {
   },
 };
 
-const ME = { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member' }] } };
+const ME = { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member', roleId: null, scopes: [] }] } };
 
 type Handler = (url: string, params: unknown) => unknown;
 

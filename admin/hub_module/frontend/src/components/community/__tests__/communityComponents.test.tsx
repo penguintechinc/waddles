@@ -42,7 +42,7 @@ describe('ReputationLeaderboardTab', () => {
 
 describe('MyCommunityCard', () => {
   it('renders from membership alone, and shows platform/logo/description when details exist', () => {
-    const community = { id: '00000003-0000-4000-8000-000000000000', name: 'n', displayName: 'Name', role: 'vip' };
+    const community = { id: '00000003-0000-4000-8000-000000000000', name: 'n', displayName: 'Name', role: 'vip', roleId: null, scopes: [] as string[] };
     const { rerender } = render(<MemoryRouter><MyCommunityCard community={community} /></MemoryRouter>);
     expect(screen.getByText('Name')).toBeInTheDocument();
     expect(screen.queryByText(/members$/)).not.toBeInTheDocument();
@@ -62,17 +62,17 @@ describe('MyCommunityCard', () => {
 
 describe('MemberRow', () => {
   it('shows avatars when present and initials otherwise', () => {
-    const base = { id: 1, userId: null, username: 'zed', avatarUrl: null, role: 'vip', joinedAt: null };
-    const { rerender } = render(<MemoryRouter><ul><MemberRow member={base} /></ul></MemoryRouter>);
+    const base = { userId: '00000001-0000-4000-8000-000000000000', username: 'zed', avatarUrl: null, roleId: null, roleName: 'VIP', joinedAt: null };
+    const { rerender } = render(<MemoryRouter><ul><MemberRow member={base} roles={[]} /></ul></MemoryRouter>);
     expect(screen.getByText('Z')).toBeInTheDocument();
     expect(screen.getByText('Joined Unknown')).toBeInTheDocument();
-    rerender(<MemoryRouter><ul><MemberRow member={{ ...base, avatarUrl: 'https://x/a.png' }} /></ul></MemoryRouter>);
+    rerender(<MemoryRouter><ul><MemberRow member={{ ...base, avatarUrl: 'https://x/a.png' }} roles={[]} /></ul></MemoryRouter>);
     expect(document.querySelector('img[src="https://x/a.png"]')).not.toBeNull();
   });
 });
 
 describe('CommunityHeader', () => {
-  const membership = { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-owner' };
+  const membership = { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'Warden', roleId: null, scopes: [] as string[] };
   it('prefers public details, falls back to membership, and gates the admin link', () => {
     const { rerender } = render(<MemoryRouter><CommunityHeader membership={membership} details={undefined} canAdminister={false} /></MemoryRouter>);
     expect(screen.getByRole('heading', { name: 'Acme' })).toBeInTheDocument();

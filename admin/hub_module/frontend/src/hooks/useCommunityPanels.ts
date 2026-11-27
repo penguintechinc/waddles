@@ -1,5 +1,19 @@
-import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query';
-import { fetchCommunityMembers, type MemberPage, type MemberQuery } from '../services/communityMembersApi';
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
+import {
+  changeMemberRole,
+  fetchCommunityMembers,
+  removeMember,
+  type MemberPage,
+  type MemberQuery,
+} from '../services/communityMembersApi';
+import { fetchCommunityRoles, type CommunityRoleOption } from '../services/communityRolesApi';
 import {
   fetchLiveStreams,
   fetchPublishedAnnouncements,
@@ -27,6 +41,33 @@ export function useCommunityMembers(
     queryFn: () => fetchCommunityMembers(communityId, query),
     placeholderData: keepPreviousData,
     enabled,
+  });
+}
+
+/** The community's roles (role filter + change-role options). `enabled` gates callers without `community.members:view`. */
+export function useCommunityRoles(communityId: string, enabled: boolean): UseQueryResult<CommunityRoleOption[]> {
+  return useQuery({
+    queryKey: ['community', communityId, 'roles'] as const,
+    queryFn: () => fetchCommunityRoles(communityId),
+    enabled,
+  });
+}
+
+/** Changes one member's role, then refreshes the roster and role member counts. */
+export function useChangeMemberRole(communityId: string): UseMutationResult<void, unknown, { userId: string; roleId: string }> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, roleId }) => changeMemberRole(communityId, userId, roleId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['community', communityId] }),
+  });
+}
+
+/** Removes one member, then refreshes the roster and role member counts. */
+export function useRemoveMember(communityId: string): UseMutationResult<void, unknown, string> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) => removeMember(communityId, userId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['community', communityId] }),
   });
 }
 
