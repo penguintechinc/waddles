@@ -501,33 +501,50 @@ async def register(data: RegisterRequest) -> tuple[Any, int]:
 
 @dataclass(slots=True, frozen=True)
 class VerifyEmailRequest:
-    """Request DTO for `POST /verify-email` (token in the body, never in a URL/log)."""
+    """Request DTO for `POST /verify-email` and `POST /cancel-signup` (token in the body only)."""
 
     token: str
 
 
+#: Fixed answers: verification never signs anyone in; resend never reveals the account.
+VERIFIED_MESSAGE = "Email verified. You can now sign in."
+CANCELLED_MESSAGE = "The sign-up request was cancelled and the pending account deleted."
+RESEND_MESSAGE = (
+    "If an account with that address is waiting for verification, a new link is on its way."
+)
+
+
 @auth_bp.route("/verify-email", methods=["POST"])
 @validate_request(VerifyEmailRequest)
-# NOT @validate_response -- same crash class as register() above (this
-# route also inserts nothing itself, but auth_service.verify_email()'s own
-# update_async + hub_sessions insert_async chain hits the same pattern).
+# NOT @validate_response -- auth_service.verify_email()'s update_async chain hits the crash
+# documented in services/dto_response.py; jsonify_dto() is the equivalent-safety workaround.
 async def verify_email(data: VerifyEmailRequest) -> tuple[Any, int]:
-    """Consume the emailed single-use token (webui `/verify-email` posts it) and sign in."""
+    """Confirm the address behind the emailed single-use token. Mints NO session.
+
+    The user signs in normally afterwards (password, OAuth or SSO), so a victim tricked into
+    clicking someone else's link is never logged into that account.
+    """
     async_dal, dal = _dal()
-    token = data.token
     try:
-        result = await auth_service.verify_email(async_dal, dal, _cfg(), token=token)
+        await auth_service.verify_email(
+            async_dal, dal, token=data.token, install_dal=current_app.config.get("install_dal")
+        )
     except ApiError as exc:
         return _err(exc)
-    response, status = jsonify_dto(
-        RegisterSuccessResponse(
-            success=True,
-            message="Email verified successfully",
-            token=result.token,
-            user=_login_user_dto(result),
-        )
-    )
-    return set_session_cookie(response, result.token), status
+    return jsonify_dto(MessageResponse(success=True, message=VERIFIED_MESSAGE))
+
+
+@auth_bp.route("/cancel-signup", methods=["POST"])
+@validate_request(VerifyEmailRequest)
+# NOT @validate_response -- delete_async chain, same crash class as verify_email above.
+async def cancel_signup(data: VerifyEmailRequest) -> tuple[Any, int]:
+    """The emailed "this wasn't me" link: cancel and delete the still-unverified account."""
+    async_dal, dal = _dal()
+    try:
+        await auth_service.cancel_signup(async_dal, dal, token=data.token)
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(MessageResponse(success=True, message=CANCELLED_MESSAGE))
 
 
 @dataclass(slots=True, frozen=True)
@@ -543,13 +560,13 @@ class ResendVerificationRequest:
 async def resend_verification(
     data: ResendVerificationRequest,
 ) -> MessageResponse | tuple[dict[str, object], int]:
-    """Resend verification."""
+    """Queue a fresh link; one fixed 200 answer for known, unknown and cooled-down addresses."""
     async_dal, dal = _dal()
     try:
         await auth_service.resend_verification(async_dal, dal, _cfg(), email=data.email)
     except ApiError as exc:
         return _err(exc)
-    return MessageResponse(success=True, message="Verification email sent")
+    return MessageResponse(success=True, message=RESEND_MESSAGE)
 
 
 @auth_bp.route("/login", methods=["POST"])

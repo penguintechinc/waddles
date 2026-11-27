@@ -34,7 +34,7 @@ from quart_schema import QuartSchema
 from app import bridge_session_cookie_to_bearer
 from blueprints.v1.auth import auth_bp
 from config import HubAPIConfig
-from services import oauth_service
+from services import email_verification, oauth_service
 from services.global_identity import grant_global_admin_sync
 from services.install_state_binding import bound_state
 from tests.community_ids import public_id
@@ -175,14 +175,28 @@ class TestRegister:
         assert body["user"]["email"] == "new@example.com"
         assert body["user"]["isSuperAdmin"] is False
 
-    async def test_register_duplicate_email_is_409(self, client: Any, auth_db: Any) -> None:
+    async def test_register_duplicate_email_is_indistinguishable_202(
+        self, client: Any, auth_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Existing address: the same 202 a new signup gets (no enumeration), nothing created."""
+        monkeypatch.setattr(email_verification, "require_configured", lambda: None)
+        sent: list[str] = []
+
+        async def notice(_cfg: Any, *, to_email: str) -> None:
+            sent.append(to_email)
+
+        monkeypatch.setattr(email_verification, "send_existing_account_notice", notice)
         _seed_settings(auth_db, signup_enabled="true", email_configured="true")
         _seed_user(auth_db, email="taken@example.com")
         response = await client.post(
             "/api/v1/auth/register",
             json={"email": "taken@example.com", "password": "hunter22"},
         )
-        assert response.status_code == 409
+        await email_verification.drain_pending_sends(grace_seconds=15)
+        assert response.status_code == 202
+        assert (await response.get_json())["requiresVerification"] is True
+        assert sent == ["taken@example.com"]  # the owner is told; no second account
+        assert auth_db.dal(auth_db.dal.hub_users.email == "taken@example.com").count() == 1
 
     async def test_register_missing_fields_is_400(self, client: Any) -> None:
         """quart-schema @validate_request rejects a body missing required fields."""

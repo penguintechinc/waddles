@@ -20,7 +20,7 @@ vi.mock('@penguintechinc/react-libs', () => ({
 }));
 
 vi.mock('../../../services/api', () => ({
-  emailVerificationApi: { verify: vi.fn(), resend: vi.fn() },
+  emailVerificationApi: { verify: vi.fn(), resend: vi.fn(), cancelSignup: vi.fn() },
   oauthApi: { providers: vi.fn().mockResolvedValue({ data: { providers: [] } }) },
   passkeyApi: { startLogin: vi.fn(), finishLogin: vi.fn() },
   publicApi: {
@@ -49,7 +49,7 @@ afterEach(() => {
 const at = (path, ui) => render(<MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>);
 
 describe('VerifyEmailPage', () => {
-  it('posts the fragment token exactly once (StrictMode) and shows success', async () => {
+  it('posts the fragment token exactly once (StrictMode) and asks the user to sign in', async () => {
     emailVerificationApi.verify.mockResolvedValue({ data: { success: true } });
     render(
       <StrictMode>
@@ -62,7 +62,25 @@ describe('VerifyEmailPage', () => {
     await waitFor(() => expect(screen.getByTestId('verify-success')).toBeTruthy());
     expect(emailVerificationApi.verify).toHaveBeenCalledTimes(1);
     expect(emailVerificationApi.verify).toHaveBeenCalledWith('abc_DEF-123');
-    expect(refreshUser).toHaveBeenCalledWith(true);
+    // Verifying never signs anyone in: no session refresh, an explicit sign-in step instead.
+    expect(refreshUser).not.toHaveBeenCalled();
+    expect(screen.getByTestId('verify-success').textContent).toMatch(/Sign in/);
+  });
+
+  it("the \"this wasn't me\" link cancels the pending account instead of verifying", async () => {
+    emailVerificationApi.cancelSignup.mockResolvedValue({ data: { success: true } });
+    at('/verify-email#token=tok_1&action=cancel', <VerifyEmailPage />);
+    await waitFor(() => expect(screen.getByTestId('cancel-success')).toBeTruthy());
+    expect(emailVerificationApi.cancelSignup).toHaveBeenCalledWith('tok_1');
+    expect(emailVerificationApi.verify).not.toHaveBeenCalled();
+  });
+
+  it('shows the server error for a dead cancel link', async () => {
+    emailVerificationApi.cancelSignup.mockRejectedValue({
+      response: { status: 400, data: { error: { message: 'Invalid or expired verification token' } } },
+    });
+    at('/verify-email#token=old&action=cancel', <VerifyEmailPage />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/expired/));
   });
 
   it('shows the server error and a resend form for a bad or expired link', async () => {

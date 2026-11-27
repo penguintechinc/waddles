@@ -21,7 +21,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
+from flask_core.auth import DEFAULT_TENANT_SLUG
 
+from config import HubAPIConfig
+from services import email_verification as ev
 from services import session_service
 from services.audit_events import AuditAction, AuditCategory, AuditOutcome
 from services.audit_http import record_privileged_user_change
@@ -340,24 +343,35 @@ async def update_user(
     email: str | None,
     is_active: bool | None,
     caller_id: int,
+    cfg: HubAPIConfig | None = None,
+    tenant_slug: str = DEFAULT_TENANT_SLUG,
 ) -> Any:
-    """Update user; deactivating revokes sessions and can never strand the last global admin."""
+    """Update user; deactivating revokes sessions and can never strand the last global admin.
+
+    An email change goes through the shared `ev.email_change_fields` path: normalized,
+    re-checked against the signup-domain policy of `tenant_slug`, marked unverified with the old
+    tokens cleared, and a fresh verification link mailed (needs `cfg` while verification is
+    enforced). Deactivation clears any outstanding verification token.
+    """
     if email is None and is_active is None:
         raise bad_request("At least one field to update is required")
 
     current = await get_user(async_dal, dal, user_id=user_id)
 
     update_fields: dict[str, Any] = {}
-    if email and email != current.email:
-        dupe = await async_dal.select_async(
-            dal((dal.hub_users.email == email) & (dal.hub_users.id != user_id))
+    change: ev.EmailChange | None = None
+    if email and ev.normalize_email(email) != current.email:
+        change = await ev.email_change_fields(
+            async_dal, dal, user_id=user_id, new_email=email, tenant_slug=tenant_slug
         )
-        if dupe:
-            raise conflict("Email already in use")
-        update_fields["email"] = email
-        update_fields["username"] = email
+        update_fields.update(change.fields)
+        update_fields["username"] = change.email
     if is_active is not None:
         update_fields["is_active"] = is_active
+    if is_active is False:
+        update_fields["email_verification_token"] = None
+        update_fields["email_verification_expires"] = None
+    send_verification = change is not None and await ev.enforced()
 
     if not update_fields:
         return current
@@ -383,6 +397,11 @@ async def update_user(
         was_admin = _guard_global_admin_target(
             d, user_id=user_id, caller_id=caller_id, removing=deactivating
         )
+        if send_verification:
+            # After the authz guard, before any write: fail loud rather than strand the user.
+            if cfg is None:
+                raise RuntimeError("update_user: an email change needs cfg to send verification")
+            ev.require_configured()
         d(d.hub_users.id == user_id).update(**update_fields)
         return was_admin
 
@@ -405,6 +424,10 @@ async def update_user(
     if deactivating:
         await session_service.revoke_user_sessions(
             async_dal, dal, user_id=user_id, reason="user_deactivated"
+        )
+    if send_verification and change is not None and cfg is not None:
+        await ev.schedule_verification(
+            async_dal, dal, cfg, user_id=user_id, email=change.email, name="email_change"
         )
     if was_admin:
         await _audit_admin_change(
@@ -442,7 +465,13 @@ async def delete_user(async_dal: Any, dal: Any, *, user_id: int, caller_id: int)
         was_admin = _guard_global_admin_target(
             d, user_id=user_id, caller_id=caller_id, removing=True
         )
-        d(d.hub_users.id == user_id).update(is_active=False, updated_at=datetime.now(UTC))
+        d(d.hub_users.id == user_id).update(
+            is_active=False,
+            # A deactivated account can never be verified by a stale link.
+            email_verification_token=None,
+            email_verification_expires=None,
+            updated_at=datetime.now(UTC),
+        )
         return was_admin
 
     try:

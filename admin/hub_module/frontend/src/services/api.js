@@ -78,6 +78,7 @@ export const oauthApi = {
 // the webui /verify-email page with the token in the URL fragment; it is POSTed in the body only.
 export const emailVerificationApi = {
   verify: (token) => api.post('/api/v1/auth/verify-email', { token }),
+  cancelSignup: (token) => api.post('/api/v1/auth/cancel-signup', { token }),
   resend: (email) => api.post('/api/v1/auth/resend-verification', { email }),
 };
 

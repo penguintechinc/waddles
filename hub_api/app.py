@@ -48,7 +48,7 @@ from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
-from services import email_service
+from services import email_service, email_verification
 from services.analytics_exclusions_service import (
     run_reconcile_loop as run_exclusions_reconcile_loop,
 )
@@ -572,6 +572,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         shared lib from this PR). Failing to release the pool cleanly on
         shutdown must never crash the ASGI lifespan.
         """
+        # In-flight verification mails/pending-account jobs finish before the pool closes.
+        drained = await email_verification.drain_pending_sends(grace_seconds=30.0)
+        if drained:
+            logger.info(f"Drained {drained} email verification background job(s) on shutdown")
         bootstrap_task = app.config.get("BOOTSTRAP_TASK")
         if bootstrap_task is not None:
             bootstrap_task.cancel()

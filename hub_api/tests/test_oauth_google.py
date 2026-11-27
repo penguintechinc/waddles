@@ -77,6 +77,7 @@ async def test_exchange_maps_userinfo(monkeypatch: pytest.MonkeyPatch) -> None:
         "id": "1234",
         "username": "Ann",
         "email": "a@b.com",
+        "email_verified": True,
         "avatar_url": "https://p/x.png",
     }
     assert seen[1].headers["Authorization"] == "Bearer tok"
@@ -90,6 +91,7 @@ async def test_unverified_email_dropped(monkeypatch: pytest.MonkeyPatch) -> None
         "google", {"client_id": "c", "client_secret": "s"}, "code", "r"
     )
     assert out["email"] is None
+    assert out["email_verified"] is False
     assert out["username"] == "evil"
 
 

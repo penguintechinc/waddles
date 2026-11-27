@@ -15677,6 +15677,30 @@ paths:
                 type: object
           description: Response DTO for admin login endpoints.
       summary: Admin login.
+  /api/v1/auth/cancel-signup:
+    post:
+      description: ''
+      operationId: post_cancel_signup
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /verify-email` and `POST /cancel-signup`
+                (token in the body only).
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyEmailRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: 'The emailed "this wasn''t me" link: cancel and delete the still-unverified
+        account.'
   /api/v1/auth/exchange:
     post:
       description: '
@@ -16279,7 +16303,8 @@ paths:
                 title: MessageResponse
                 type: object
           description: Response DTO for `{success, message}` endpoints (resend-verification).
-      summary: Resend verification.
+      summary: Queue a fresh link; one fixed 200 answer for known, unknown and cooled-down
+        addresses.
   /api/v1/auth/sso/options:
     get:
       description: ''
@@ -16553,15 +16578,20 @@ paths:
       summary: Tenant login info.
   /api/v1/auth/verify-email:
     post:
-      description: ''
+      description: '
+
+        The user signs in normally afterwards (password, OAuth or SSO), so a victim
+        tricked into
+
+        clicking someone else''s link is never logged into that account.'
       operationId: post_verify_email
       parameters: []
       requestBody:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST /verify-email` (token in the body,
-                never in a URL/log).
+              description: Request DTO for `POST /verify-email` and `POST /cancel-signup`
+                (token in the body only).
               properties:
                 token:
                   title: Token
@@ -16573,8 +16603,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Consume the emailed single-use token (webui `/verify-email` posts it)
-        and sign in.
+      summary: Confirm the address behind the emailed single-use token. Mints NO session.
   /api/v1/captcha/challenge:
     get:
       description: ''

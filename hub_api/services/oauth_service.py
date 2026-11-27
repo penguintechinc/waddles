@@ -225,6 +225,8 @@ async def _exchange_code(
                 "id": u["id"],
                 "username": u["username"],
                 "email": u.get("email"),
+                # Discord asserts address verification with `verified: true`.
+                "email_verified": u.get("verified") is True,
                 "avatar_url": avatar,
             }
 
@@ -257,6 +259,8 @@ async def _exchange_code(
                 "id": u["id"],
                 "username": u["login"],
                 "email": u.get("email"),
+                # Helix carries no explicit verification assertion: treated as unverified.
+                "email_verified": False,
                 "avatar_url": u.get("profile_image_url"),
             }
 
@@ -287,6 +291,8 @@ async def _exchange_code(
                 "id": identity["id"],
                 "username": identity["name"],
                 "email": identity.get("email"),
+                # users.identity carries no explicit verification assertion: unverified.
+                "email_verified": False,
                 "avatar_url": identity.get("image_192") or identity.get("image_72"),
             }
 
@@ -312,13 +318,14 @@ async def _exchange_code(
             )
             user_resp.raise_for_status()
             u = user_resp.json()
-            # Only trust an email Google has verified; otherwise treat as absent
-            # (caller falls back to a synthetic `<name>@google.local`).
-            email = u.get("email") if u.get("email_verified") else None
+            # OIDC sends a boolean; some deployments send the string "true". An address Google
+            # has not verified is dropped outright (caller falls back to a placeholder).
+            verified = u.get("email_verified") in (True, "true")
             return {
                 "id": u["sub"],
                 "username": u.get("name") or (u.get("email") or u["sub"]).split("@")[0],
-                "email": email,
+                "email": u.get("email") if verified else None,
+                "email_verified": verified,
                 "avatar_url": u.get("picture"),
             }
 
@@ -354,7 +361,8 @@ async def _find_or_create_user_from_oauth(
     Signup-domain policy (`services/email_verification.py`; applied when `cfg` is passed, i.e. on
     the real login callback): while the signup allowlist is set, a NEW OAuth user must have a
     provider email in an allowed domain (else `email_domain_not_allowed`, nothing created), is
-    created pending and mailed a verification link, and gets no session
+    created pending and mailed a "someone requested an account" link (with a "this wasn't me"
+    cancel link), and gets no session
     (`email_verification_required`) until verified. An existing unverified user of a restricted
     tenant is held at login the same way (`ev.hold_unverified_external_login`).
     """
@@ -392,7 +400,19 @@ async def _find_or_create_user_from_oauth(
             is_analytics_consumer=bool(u.is_analytics_consumer),
         )
 
-    email = user_data.get("email") or f"{user_data['username']}@{platform}.local"
+    provider_email = user_data.get("email") or None
+    provider_verified = bool(provider_email) and user_data.get("email_verified") is True
+    needs_verification = cfg is not None and await ev.external_signup_needs_verification(
+        async_dal, dal, email=provider_email
+    )
+    # An address the provider did not verify is only ever attached when WE are about to verify
+    # it (restricted tenant hold); otherwise the account gets a synthetic placeholder, so an
+    # unverified claim can never squat or be linked to a real address.
+    email = (
+        provider_email
+        if provider_email and (provider_verified or needs_verification)
+        else f"{user_data['username']}@{platform}.local"
+    )
     existing = await async_dal.select_async(dal(dal.hub_users.email == email.lower()))
     if existing:
         raise conflict(
@@ -400,9 +420,6 @@ async def _find_or_create_user_from_oauth(
             "platform from your account settings instead."
         )
 
-    needs_verification = cfg is not None and await ev.external_signup_needs_verification(
-        async_dal, dal, email=user_data.get("email")
-    )
     new_id = await async_dal.insert_async(
         dal.hub_users,
         email=email.lower(),
@@ -436,7 +453,7 @@ async def _find_or_create_user_from_oauth(
     # user signing up again with the same platform account).
     await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user.id)
     if needs_verification and cfg is not None:
-        await ev.issue_and_send(async_dal, dal, cfg, user_id=int(new_id), email=email.lower())
+        await ev.send_external_hold(async_dal, dal, cfg, user_id=int(new_id), email=email.lower())
         raise ev.verification_required()
     return user
 

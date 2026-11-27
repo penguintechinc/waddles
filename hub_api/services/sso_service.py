@@ -1182,7 +1182,7 @@ async def _finish_login(
         )
         if created and needs_verification:
             await _email_gate(
-                ev.issue_and_send(
+                ev.send_external_hold(
                     ctx.async_dal, ctx.dal, ctx.cfg, user_id=int(user_row.id), email=user_row.email
                 )
             )
@@ -1237,6 +1237,30 @@ async def _find_identity_link(ctx: SsoContext, conn_id: int, subject: str) -> An
         ).select()
     )
     return rows[0] if rows else None
+
+
+async def signup_tenant_slug(
+    install_dal: Any, async_dal: Any, dal: Any, *, user_id: int
+) -> str | None:
+    """Slug of the tenant whose SSO connection provisioned `user_id`, or None if not SSO-linked.
+
+    Used by `/verify-email` so the domain re-check applies the policy of the tenant the account
+    actually signed up into. Missing SSO tables fail loudly (`sso_schema_missing`).
+    """
+    identities = getattr(install_dal, "sso_identities", None)
+    connections = getattr(install_dal, "sso_connections", None)
+    if identities is None or connections is None:
+        raise SsoConfigError(
+            "sso_schema_missing", "SSO tables are not present -- run the 0049 migration"
+        )
+    links = list(await install_dal(identities.hub_user_id == user_id).select())
+    if not links:
+        return None
+    conns = list(await install_dal(connections.id == links[0].connection_id).select())
+    if not conns:
+        return None
+    tenant = await async_dal.select_async(dal(dal.tenants.id == int(conns[0].tenant_id)))
+    return str(tenant.first().slug) if tenant else None
 
 
 async def _user_row(ctx: SsoContext, user_id: int) -> Any | None:
