@@ -40,7 +40,10 @@ from quart_schema import document_response, validate_request, validate_response
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
 from services import floor_ban_lift
-from services.community_authz import guard_target_member, resolve_editor_scopes_async
+from services.community_authz import (
+    resolve_editor_async,
+    resolve_editor_scopes_async,
+)
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, forbidden
@@ -198,12 +201,11 @@ class ReputationDTO:
 class MemberDTO:
     """Community member DTO."""
 
-    id: int
     userId: str | None
     username: str | None
-    email: str | None
     avatarUrl: str | None
-    role: str | None
+    roleId: str | None
+    roleName: str | None
     reputation: ReputationDTO
     joinedAt: str | None
 
@@ -231,7 +233,27 @@ class MembersResponse:
 class UpdateRoleRequest:
     """Request DTO for update-member-role."""
 
-    role: str
+    roleId: str
+
+
+@dataclass(slots=True, frozen=True)
+class RoleDTO:
+    """Community role summary DTO (`id` is the role's public UUID)."""
+
+    id: str
+    name: str
+    displayName: str | None
+    roleKind: int
+    priority: int
+    memberCount: int
+
+
+@dataclass(slots=True, frozen=True)
+class RolesResponse:
+    """Response DTO for list-roles."""
+
+    success: bool
+    roles: list[RoleDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -485,7 +507,7 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
     page = int(request.args.get("page", "1"))
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
-    role = request.args.get("role")
+    role_id = request.args.get("roleId")
     try:
         rows, total, total_pages = await svc.get_members(
             async_dal,
@@ -495,19 +517,19 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
             page=page,
             limit=limit,
             search=search,
-            role=role,
+            role_id=role_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     user_uuids = await lookup_user_public_ids((member.user_id for member, _ in rows))
     members = [
         MemberDTO(
-            id=member.id,
             userId=public_id_for(user_uuids, member.user_id),
             username=getattr(user, "username", None),
-            email=getattr(user, "email", None),
             avatarUrl=getattr(user, "avatar_url", None),
-            role=member.role,
+            roleId=member.role_public_id,
+            roleName=member.role_name,
             reputation=_reputation_dto(member.reputation),
             joinedAt=_iso(member.joined_at),
         )
@@ -519,6 +541,36 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
         pagination=PaginationDTO(
             page=max(1, page), limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
+    )
+
+
+@admin_bp.route("/<cuuid:community_id>/roles", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_member_scope(SCOPE_MEMBERS_VIEW)  # type: ignore[misc]
+@validate_response(RolesResponse)
+async def get_roles(community_id: int) -> RolesResponse | tuple[dict[str, object], int]:
+    """List the community's roles (priority desc) with member counts (read-only)."""
+    async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None
+    try:
+        roles = await svc.get_roles(async_dal, dal, community_id=community_id, ctx=ctx)
+    except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
+        return _err(exc)
+    return RolesResponse(
+        success=True,
+        roles=[
+            RoleDTO(
+                id=r["id"],
+                name=r["name"],
+                displayName=r["display_name"],
+                roleKind=int(r["role_kind"]),
+                priority=int(r["priority"] or 0),
+                memberCount=n,
+            )
+            for r, n in roles
+        ],
     )
 
 
@@ -536,8 +588,8 @@ async def update_member_role(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         await svc.update_member_role(
             async_dal,
@@ -545,8 +597,10 @@ async def update_member_role(
             community_id=community_id,
             user_id=user_id,
             ctx=ctx,
-            role=data.role,
+            role_id=data.roleId,
             caller_id=caller_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
@@ -568,8 +622,8 @@ async def adjust_reputation(
     ctx = get_tenant_context(request)
     assert ctx is not None
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         new_score, change = await svc.adjust_reputation(
             async_dal,
@@ -579,6 +633,8 @@ async def adjust_reputation(
             ctx=ctx,
             amount=data.amount,
             set_to=data.setTo,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
@@ -613,6 +669,20 @@ async def _authorize_reputation_admin(community_id: int) -> Any:
         async_dal, dal, request, community_id=community_id, ctx=ctx
     )
     return ctx
+
+
+async def _target_lock(async_dal: Any, dal: Any, community_id: int, user_id: int) -> Any:
+    """The caller's in-transaction target lock + owner/scope check for a member write."""
+    editor_scopes, editor_bypass = await resolve_editor_async(
+        request, async_dal, dal, community_id=community_id
+    )
+    return svc.target_member_lock(
+        dal,
+        community_id=community_id,
+        user_id=user_id,
+        editor_scopes=editor_scopes,
+        editor_bypass=editor_bypass,
+    )
 
 
 @admin_bp.route("/<cuuid:community_id>/reputation/config", methods=["GET"])
@@ -763,6 +833,7 @@ async def put_reputation_soft_ban(
             user_id=user_id,
             expires_at=expires,
             actor_user_id=get_optional_current_user_id(request),
+            lock=await _target_lock(async_dal, dal, community_id, user_id),
         )
     except ApiError as exc:
         logger.warning(
@@ -787,6 +858,7 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
             community_id=community_id,
             user_id=user_id,
             actor_user_id=get_optional_current_user_id(request),
+            lock=await _target_lock(async_dal, dal, community_id, user_id),
         )
     except ApiError as exc:
         logger.warning(
@@ -843,8 +915,8 @@ async def remove_member(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
-        await guard_target_member(
-            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
         )
         await svc.remove_member(
             async_dal,
@@ -854,6 +926,8 @@ async def remove_member(
             ctx=ctx,
             caller_id=caller_id,
             reason=data.reason,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
@@ -884,6 +958,9 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        editor_scopes, editor_bypass = await resolve_editor_async(
+            request, async_dal, dal, community_id=community_id
+        )
         temp_password, expires_at = await svc.generate_temp_password(
             async_dal,
             dal,
@@ -893,6 +970,8 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
             force_oauth_link=data.forceOAuthLink,
             expires_in_hours=data.expiresInHours,
             caller_id=caller_id,
+            editor_scopes=editor_scopes,
+            editor_bypass=editor_bypass,
         )
     except ApiError as exc:
         return _err(exc)

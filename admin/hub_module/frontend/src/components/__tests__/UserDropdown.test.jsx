@@ -149,8 +149,8 @@ describe('UserDropdown content', () => {
       user: {
         username: 'alice',
         communities: [
-          { id: '00000004-0000-4000-8000-000000000000', name: 'Members', role: 'member' },
-          { id: '00000009-0000-4000-8000-000000000000', name: 'Mods', role: 'moderator' },
+          { id: '00000004-0000-4000-8000-000000000000', name: 'Members', role: 'community-owner', scopes: [] },
+          { id: '00000009-0000-4000-8000-000000000000', name: 'Mods', role: 'Warden', scopes: ['community.members:view'] },
         ],
       },
     });

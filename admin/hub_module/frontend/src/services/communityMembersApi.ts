@@ -1,19 +1,29 @@
 import { apiClient } from '../lib/apiClient';
-import { expectRecord, readArray, readNumber, readOptNumber, readOptString, readString } from '../lib/wire';
+import { isCommunityId } from '../lib/communityId';
+import {
+  WireShapeError,
+  expectRecord,
+  readArray,
+  readNumber,
+  readOptNumber,
+  readOptString,
+  readString,
+  type WireRecord,
+} from '../lib/wire';
 
-// Typed read of the community roster from the only served route:
-//   GET /api/v1/admin/:communityId/members?page=&limit=&search=&role=   (scope community:admin)
-// The member-facing `GET /api/v1/communities/:id/members` is not served (see
-// `UNSERVED_FEATURES['member-roster']`), so the roster is admin/moderator-only for now. The
-// server filters `role` by exact match: one role per request, never a comma list. Member emails
-// the route also returns are deliberately not carried into the view-model.
+// Typed client for the community roster and its two mutations (UUIDs only on the wire):
+//   GET    /api/v1/admin/:communityId/members?page&limit&search&roleId   (scope community.members:view)
+//   PUT    /api/v1/admin/:communityId/members/:userId/role  { roleId }   (scope members:roles.manage)
+//   DELETE /api/v1/admin/:communityId/members/:userId                    (scope members:remove)
+// The server returns neither numeric ids nor emails, and the view-model carries none.
 
 export interface CommunityMember {
-  id: number;
-  userId: string | null;
+  /** User public_id (UUID). */
+  userId: string;
   username: string;
   avatarUrl: string | null;
-  role: string;
+  roleId: string | null;
+  roleName: string | null;
   joinedAt: string | null;
 }
 
@@ -29,23 +39,31 @@ export interface MemberQuery {
   page: number;
   limit: number;
   search: string;
-  /** Exact community role to filter by, or empty for everyone. */
-  role: string;
+  /** Role public_id to filter by, or empty for everyone. */
+  roleId: string;
+}
+
+function readUuid(row: WireRecord, key: string, what: string): string {
+  const value = readString(row, key, what);
+  if (!isCommunityId(value)) throw new WireShapeError(what, `${key} is not a UUID`);
+  return value;
 }
 
 function parseMember(raw: unknown): CommunityMember {
   const row = expectRecord(raw, 'members[]');
+  const roleId = readOptString(row, 'roleId');
+  if (roleId !== null && !isCommunityId(roleId)) throw new WireShapeError('members[]', 'roleId is not a UUID');
   return {
-    id: readNumber(row, 'id', 'members[]'),
-    userId: readOptString(row, 'userId'),
+    userId: readUuid(row, 'userId', 'members[]'),
     username: readOptString(row, 'username') ?? 'Unknown',
     avatarUrl: readOptString(row, 'avatarUrl'),
-    role: readString(row, 'role', 'members[]'),
+    roleId,
+    roleName: readOptString(row, 'roleName'),
     joinedAt: readOptString(row, 'joinedAt'),
   };
 }
 
-/** Parses a `MembersResponse` body. */
+/** Parses a members response body. */
 export function parseMemberPage(data: unknown): MemberPage {
   const body = expectRecord(data, 'members');
   const pagination = expectRecord(body['pagination'], 'members pagination');
@@ -62,7 +80,17 @@ export function parseMemberPage(data: unknown): MemberPage {
 export async function fetchCommunityMembers(communityId: string, query: MemberQuery): Promise<MemberPage> {
   const params: Record<string, string | number> = { page: query.page, limit: query.limit };
   if (query.search.trim() !== '') params['search'] = query.search.trim();
-  if (query.role !== '') params['role'] = query.role;
+  if (query.roleId !== '') params['roleId'] = query.roleId;
   const { data } = await apiClient.get<unknown>(`/api/v1/admin/${communityId}/members`, { params });
   return parseMemberPage(data);
+}
+
+/** `PUT /api/v1/admin/:id/members/:userId/role`. */
+export async function changeMemberRole(communityId: string, userId: string, roleId: string): Promise<void> {
+  await apiClient.put<unknown>(`/api/v1/admin/${communityId}/members/${userId}/role`, { roleId });
+}
+
+/** `DELETE /api/v1/admin/:id/members/:userId`. */
+export async function removeMember(communityId: string, userId: string): Promise<void> {
+  await apiClient.delete<unknown>(`/api/v1/admin/${communityId}/members/${userId}`);
 }

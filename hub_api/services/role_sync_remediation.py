@@ -10,7 +10,7 @@ ledger, so this is the closest available evidence) -- and:
 - default (review): enqueues each into `role_sync_remediation_queue` (status 0 = pending) for an
   admin to review; nothing about the member changes.
 - `apply=True`: demotes each still-matching member to the baseline role and marks the queue
-  row resolved (status 1). `community-owner` is never touched.
+  row resolved (status 1). admin-kind (owner) roles are never touched.
 
 Idempotent (unique `(purged_binding_id, hub_user_id)`); logs carry ids and counts only.
 """
@@ -22,15 +22,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from services.role_sync_service import _set_member_role
+from services.member_roles import COMMUNITY_MEMBER_ROLE
+from services.role_sync_service import _role_row_by_name, _set_member_role
 from services.schema import bind_auth_tables, bind_guild_pairing_tables
+from services.scope_registry import KIND_ADMIN
 
 logger = logging.getLogger(__name__)
 
 STATUS_PENDING = 0
 STATUS_DEMOTED = 1
 STATUS_DISMISSED = 2
-_OWNER_ROLE = "community-owner"
 
 
 @dataclass(slots=True)
@@ -41,15 +42,26 @@ class RemediationReport:
     candidates: int = 0
     newly_queued: int = 0
     demoted: int = 0
+    role_missing: int = 0
 
 
 def _candidates(dal: Any, purged: Any) -> list[Any]:
     """Active members of the purged binding's community holding its role, with a Discord link."""
     bind_auth_tables(dal)
+    role_row = (
+        dal(
+            (dal.community_roles.community_id == purged.community_id)
+            & (dal.community_roles.name == purged.community_role)
+        )
+        .select()
+        .first()
+    )
+    if role_row is None or role_row.role_kind == KIND_ADMIN:
+        return []  # role gone, or an admin-kind (owner) role: never remediated
     m = dal.community_members
     rows = dal(
         (m.community_id == purged.community_id)
-        & (m.role == purged.community_role)
+        & (m.community_role_id == role_row.id)
         & (m.is_active == True)  # noqa: E712 - pydal idiom
     ).select()
     ident = dal.hub_user_identities
@@ -59,8 +71,6 @@ def _candidates(dal: Any, purged: Any) -> list[Any]:
             hub_user_id = int(row.user_id)
         except (TypeError, ValueError):
             continue
-        if row.role == _OWNER_ROLE:
-            continue
         linked = dal((ident.hub_user_id == hub_user_id) & (ident.platform == "discord")).count()
         if linked:
             out.append(row)
@@ -68,7 +78,7 @@ def _candidates(dal: Any, purged: Any) -> list[Any]:
 
 
 def remediate_purged_bindings(
-    dal: Any, *, apply: bool = False, baseline_role: str = "member"
+    dal: Any, *, apply: bool = False, baseline_role: str = COMMUNITY_MEMBER_ROLE
 ) -> RemediationReport:
     """Queue (default) or demote (`apply`) members promoted by a purged privileged binding."""
     bind_guild_pairing_tables(dal)
@@ -90,13 +100,23 @@ def remediate_purged_bindings(
                         purged_binding_id=purged.id,
                         community_id=purged.community_id,
                         hub_user_id=hub_user_id,
-                        role_at_review=member.role,
+                        role_at_review=purged.community_role,
                         status=STATUS_PENDING,
                         created_at=datetime.now(UTC),
                     )
                     report.newly_queued += 1
                     existing = dal(q.id == row_id).select().first()
                 if apply and existing.status == STATUS_PENDING:
+                    if _role_row_by_name(dal, int(purged.community_id), baseline_role) is None:
+                        # Never write a NULL link: stays queued until the baseline exists.
+                        logger.error(
+                            "role_sync.remediation_baseline_missing community_id=%s baseline=%s",
+                            purged.community_id,
+                            baseline_role,
+                        )
+                        report.role_missing += 1
+                        dal.commit()
+                        continue
                     _set_member_role(dal, member, int(purged.community_id), baseline_role)
                     dal(q.id == existing.id).update(
                         status=STATUS_DEMOTED, resolved_at=datetime.now(UTC)
@@ -107,11 +127,13 @@ def remediate_purged_bindings(
                 dal.rollback()
                 raise
     logger.info(
-        "role_sync.remediation purged_bindings=%d candidates=%d queued=%d demoted=%d apply=%s",
+        "role_sync.remediation purged_bindings=%d candidates=%d queued=%d demoted=%d "
+        "role_missing=%d apply=%s",
         report.purged_bindings_examined,
         report.candidates,
         report.newly_queued,
         report.demoted,
+        report.role_missing,
         apply,
     )
     return report

@@ -323,6 +323,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("user_identifier", "string", length=255, notnull=True),
         Field("password_hash", "string", length=255, notnull=True),
         Field("community_id", "integer"),
+        # The ONE hub user this temp password authenticates as (alembic 0147).
+        Field("hub_user_id", "integer"),
         Field("force_oauth_link", "boolean", default=False),
         Field("linked_oauth_platform", "string", length=50),
         Field("linked_oauth_user_id", "string", length=255),
@@ -413,6 +415,12 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reputation", "integer", default=600),
         Field("role", "string", length=50, default="member"),
         Field("is_active", "boolean", default=True),
+        # Int-enum standing (`services.membership_state.MembershipState`, alembic 0146): a ban is
+        # a membership STATE (2), never a role name; authority lives on `community_role_id`.
+        Field("membership_state", "integer", default=1),
+        # Why the row is BANNED (`membership_state.BanSource` bitmask, alembic 0148): BANNED while
+        # any bit remains; each lift clears only its own bit (`ban_suppression`).
+        Field("ban_sources", "integer", default=0),
         Field("joined_at", "datetime"),
         # Gap (4): platformController.js's getUsers()/getUser()/getStats()
         # all reference `community_members.last_activity`/`created_at`, but

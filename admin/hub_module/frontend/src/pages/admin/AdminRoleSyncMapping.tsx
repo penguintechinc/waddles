@@ -9,12 +9,12 @@ import AddDiscordServerPanel from '../../components/roleSync/AddDiscordServerPan
 import EventDiscordSyncToggle from '../../components/calendar/EventDiscordSyncToggle';
 import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';
 import { useAuth } from '../../contexts/AuthContext';
+import { useCommunityRoles } from '../../hooks/useCommunityPanels';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import {
   roleSyncApi,
   roleSyncKeys,
   extractErrorMessage,
-  COMMUNITY_ROLES,
   SUBSCRIBER_TIERS,
   type CommunityRole,
   type CreateRoleSyncBindingPayload,
@@ -71,6 +71,9 @@ export default function AdminRoleSyncMapping() {
   const communityId = parseCommunityId(communityIdParam) ?? '';
   const hasValidCommunity = communityId !== '';
   const canManage = Boolean(isCommunityAdmin(communityIdParam));
+  // Assignable roles come from hub-api (`community_roles`); bindings still store the role name.
+  const rolesQuery = useCommunityRoles(communityId, pageEnabled && hasValidCommunity && canManage);
+  const roleOptions = (rolesQuery.data ?? []).map((role) => ({ value: role.name, label: role.displayName }));
 
   const [searchParams] = useSearchParams();
   const installResult = searchParams.get('discord_server');
@@ -249,8 +252,8 @@ export default function AdminRoleSyncMapping() {
       type: 'select',
       label: 'Community role',
       required: true,
-      defaultValue: 'community-admin',
-      options: COMMUNITY_ROLES.map((role) => ({ value: role, label: role })),
+      defaultValue: roleOptions[0]?.value ?? '',
+      options: roleOptions,
       helpText:
         'If a member holds multiple mapped Discord roles, the highest-priority community role wins. Losing a mapped Discord role never auto-demotes — demotion is an explicit admin action.',
       triggerField: 'sync_scope',

@@ -45,16 +45,14 @@ export type RoleSyncScope = 'subscriber_tier' | 'moderator' | 'community_role';
 export type SubscriberTier = 1 | 2 | 3;
 
 /**
- * `community_role_sync_bindings.community_role` -- migration 0036's CHECK
- * constraint values, the same set `services/admin_service.py::
- * update_member_role()` accepts. `community-owner` is deliberately excluded
- * (never assignable by sync).
+ * `community_role_sync_bindings.community_role` -- the role NAME the server stores for a
+ * binding. The assignable set comes from `GET /admin/:id/roles` (`communityRolesApi`), never a
+ * constant here.
  */
-export type CommunityRole = 'community-admin' | 'moderator' | 'vip' | 'member';
+export type CommunityRole = string;
 
 export const SYNC_SCOPES: readonly RoleSyncScope[] = ['subscriber_tier', 'moderator', 'community_role'];
 export const SUBSCRIBER_TIERS: readonly SubscriberTier[] = [1, 2, 3];
-export const COMMUNITY_ROLES: readonly CommunityRole[] = ['community-admin', 'moderator', 'vip', 'member'];
 
 /** One `guild_tenant_pairings` row. */
 export interface GuildPairing {

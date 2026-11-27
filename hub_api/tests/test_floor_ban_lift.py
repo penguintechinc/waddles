@@ -22,7 +22,8 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.admin import admin_bp
-from services import floor_ban_lift
+from blueprints.v1.community_join import community_join_bp
+from services import auth_service, ban_suppression, floor_ban_lift
 from services.audit_events import (
     AuditAction,
     AuditCategory,
@@ -32,6 +33,7 @@ from services.audit_events import (
 )
 from services.community_inventory_authz import require_inventory_member
 from services.errors import ApiError
+from services.membership_state import BanSource, MembershipState
 from services.schema import (
     bind_admin_tables,
     bind_auth_tables,
@@ -41,6 +43,8 @@ from services.schema import (
 )
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.test_v1_join_request_blueprint import _test_config
+from tests.user_ids import uid
 
 ADMIN, MEMBER, TENANT_ADMIN = 1, 2, 3
 ACTIVE_STATUSES = (1, 2, 3, 4, 5, 7)
@@ -360,6 +364,174 @@ class TestSoftBanLiftAndExpiry:
         assert _allowed(db)
         _soft_ban(db)
         assert not _allowed(db)
+
+
+class TestLiftRestoresMembership:
+    """Regression (PR #1542 review): a lift restores the BANNED membership in the SAME transaction.
+
+    After the lift the member re-joins successfully and `/auth/me` (`get_current_user`) lists the
+    community again, with its role link untouched by the ban.
+    """
+
+    @staticmethod
+    def _ban_membership(db: Any, source: BanSource) -> int:
+        ban_suppression.ban_membership(
+            db.dal,
+            community_id=db.community_id,
+            hub_user_id=MEMBER,
+            source=source,
+            now=datetime.now(UTC),
+        )
+        db.dal.commit()
+        return int(_member_row(db).community_role_id)
+
+    @staticmethod
+    def _join_client(db: Any) -> Any:
+        app = Quart(__name__)
+        QuartSchema(app)
+        app.config["dal"] = db.dal
+        app.config["async_dal"] = db.async_dal
+        app.config["HUB_API_CONFIG"] = _test_config()
+        install_community_ids(app, db.dal)
+        app.register_blueprint(community_join_bp)
+        return app.test_client()
+
+    async def _assert_restored(self, db: Any, role_id: int) -> None:
+        row = _member_row(db)
+        assert (int(row.membership_state), row.is_active) == (int(MembershipState.ACTIVE), True)
+        assert row.community_role_id == role_id, "the ban never touched the role link"
+        join = await self._join_client(db).post(
+            f"/api/v1/communities/{public_id(db.async_dal, db.community_id)}/join",
+            headers=_h(MEMBER, scope=""),
+        )
+        assert join.status_code in (200, 201), await join.get_json()
+        me = await auth_service.get_current_user(db.async_dal, db.dal, user_id=MEMBER)
+        assert me is not None
+        listed = [
+            c for c in me.communities if c.public_id == public_id(db.async_dal, db.community_id)
+        ]
+        assert len(listed) == 1, "the community is back on /auth/me"
+        assert listed[0].scopes, "with the role's scopes"
+
+    async def _assert_banned_out(self, db: Any) -> None:
+        join = await self._join_client(db).post(
+            f"/api/v1/communities/{public_id(db.async_dal, db.community_id)}/join",
+            headers=_h(MEMBER, scope=""),
+        )
+        assert join.status_code == 403
+        me = await auth_service.get_current_user(db.async_dal, db.dal, user_id=MEMBER)
+        assert me is not None and not [
+            c for c in me.communities if c.public_id == public_id(db.async_dal, db.community_id)
+        ]
+
+    async def test_floor_ban_lift_restores_membership(self, client: Any, db: Any) -> None:
+        role_id = self._ban_membership(db, BanSource.FLOOR_BAN)
+        _ban(db)
+        await self._assert_banned_out(db)
+        resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN))
+        assert resp.status_code == 200
+        await self._assert_restored(db, role_id)
+
+    async def test_soft_ban_clear_restores_membership(
+        self, client: Any, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = db.dal.executesql
+
+        def fake_sql(sql: str, placeholders: list[Any] | None = None, **kw: Any) -> Any:
+            if "reputation_clear_soft_ban" not in sql:
+                return real(sql, placeholders=placeholders, **kw)
+            _tenant, community_id, user_uuid, _actor, _only_floor = placeholders or []
+            bans = db.dal.bundle_reputation_soft_bans
+            n = db.dal((bans.community_id == community_id) & (bans.user_uuid == user_uuid)).delete()
+            return [[bool(n)]]
+
+        monkeypatch.setattr(db.dal, "executesql", fake_sql)
+        role_id = self._ban_membership(db, BanSource.SOFT_BAN)
+        _soft_ban(db)
+        await self._assert_banned_out(db)
+        resp = await client.delete(
+            f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/soft-bans/"
+            f"{uid(MEMBER)}",
+            headers=_h(ADMIN, scope="community:admin"),
+        )
+        assert resp.status_code == 200, await resp.get_json()
+        await self._assert_restored(db, role_id)
+
+    @staticmethod
+    def _fake_soft_ban_clear(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Route `reputation_clear_soft_ban` (a Postgres function) to a sqlite delete."""
+        real = db.dal.executesql
+
+        def fake_sql(sql: str, placeholders: list[Any] | None = None, **kw: Any) -> Any:
+            if "reputation_clear_soft_ban" not in sql:
+                return real(sql, placeholders=placeholders, **kw)
+            _tenant, community_id, user_uuid, _actor, _only_floor = placeholders or []
+            bans = db.dal.bundle_reputation_soft_bans
+            n = db.dal((bans.community_id == community_id) & (bans.user_uuid == user_uuid)).delete()
+            return [[bool(n)]]
+
+        monkeypatch.setattr(db.dal, "executesql", fake_sql)
+
+    async def test_soft_ban_clear_keeps_a_manual_ban(
+        self, client: Any, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression (PR #1542 security review, HIGH): clearing a soft ban never fails open.
+
+        Banned manually AND soft-banned: the clear removes only SOFT_BAN, the member stays
+        BANNED; removing the manual ban (the last source) then restores access.
+        """
+        self._fake_soft_ban_clear(db, monkeypatch)
+        role_id = self._ban_membership(db, BanSource.MANUAL)
+        self._ban_membership(db, BanSource.SOFT_BAN)
+        _soft_ban(db)
+        resp = await client.delete(
+            f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/soft-bans/"
+            f"{uid(MEMBER)}",
+            headers=_h(ADMIN, scope="community:admin"),
+        )
+        assert resp.status_code == 200, await resp.get_json()
+        assert int(_member_row(db).ban_sources) == int(BanSource.MANUAL)
+        await self._assert_banned_out(db)
+
+        assert (
+            ban_suppression.lift_membership_ban(
+                db.dal,
+                community_id=db.community_id,
+                hub_user_id=MEMBER,
+                source=BanSource.MANUAL,
+                now=datetime.now(UTC),
+            )
+            == 1
+        )
+        db.dal.commit()
+        await self._assert_restored(db, role_id)
+
+    async def test_floor_ban_lift_keeps_a_manual_ban(self, client: Any, db: Any) -> None:
+        """Regression (PR #1542 security review, MEDIUM): a tenant lift clears FLOOR_BAN only."""
+        self._ban_membership(db, BanSource.MANUAL)
+        self._ban_membership(db, BanSource.FLOOR_BAN)
+        _ban(db)
+        resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN))
+        assert resp.status_code == 200
+        row = _member_row(db)
+        assert int(row.membership_state) == int(MembershipState.BANNED)
+        assert int(row.ban_sources) == int(BanSource.MANUAL)
+        await self._assert_banned_out(db)
+
+    async def test_refused_lift_leaves_the_membership_banned(self, client: Any, db: Any) -> None:
+        """Fail closed: a refused lift (non-tenant-admin) restores nothing."""
+        self._ban_membership(db, BanSource.FLOOR_BAN)
+        _ban(db)
+        resp = await client.delete(_url(db), headers=_h(ADMIN))
+        assert resp.status_code == 403
+        assert int(_member_row(db).membership_state) == int(MembershipState.BANNED)
+
+
+def _member_row(db: Any) -> Any:
+    cm = db.dal.community_members
+    return (
+        db.dal((cm.community_id == db.community_id) & (cm.user_id == str(MEMBER))).select().first()
+    )
 
 
 class TestAuditEvent:

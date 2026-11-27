@@ -24,7 +24,12 @@ export interface MyCommunity {
   id: string;
   name: string;
   displayName: string;
+  /** Role display name only; authorization reads `scopes`, never this. */
   role: string;
+  /** The caller's community role public_id (UUID), or null when the server has none. */
+  roleId: string | null;
+  /** Effective scopes the caller holds in this community (global/tenant admins hold every scope). */
+  scopes: string[];
 }
 
 /** Public-facing community fields from `/public/communities/:id` and the list route. */
@@ -57,6 +62,22 @@ function readCommunityId(row: WireRecord, key: string, what: string): string {
   return value;
 }
 
+/** Reads a required string array (every element a string); throws rather than dropping bad entries. */
+function readStringArray(row: WireRecord, key: string, what: string): string[] {
+  return readArray(row, key, what).map((item, index) => {
+    if (typeof item !== 'string') throw new WireShapeError(what, `${key}[${index}] is not a string`);
+    return item;
+  });
+}
+
+/** Reads an optional UUID (null when absent/null); a present non-UUID throws. */
+function readOptUuid(row: WireRecord, key: string, what: string): string | null {
+  const value = readOptString(row, key);
+  if (value === null) return null;
+  if (!isCommunityId(value)) throw new WireShapeError(what, `${key} is not a UUID`);
+  return value;
+}
+
 function parseMyCommunity(raw: unknown): MyCommunity {
   const row = expectRecord(raw, 'auth/me communities[]');
   const name = readString(row, 'name', 'auth/me communities[]');
@@ -65,6 +86,8 @@ function parseMyCommunity(raw: unknown): MyCommunity {
     name,
     displayName: readOptString(row, 'displayName') ?? name,
     role: readString(row, 'role', 'auth/me communities[]'),
+    roleId: readOptUuid(row, 'roleId', 'auth/me communities[]'),
+    scopes: readStringArray(row, 'scopes', 'auth/me communities[]'),
   };
 }
 

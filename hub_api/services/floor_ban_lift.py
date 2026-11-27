@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Collection
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from services import ban_suppression
@@ -22,6 +23,7 @@ from services.bundle_telemetry import get_meter
 from services.community_reputation_service import _admin_actor
 from services.data_privacy_service import subject_uuids_of
 from services.errors import not_found
+from services.membership_state import BanSource
 from services.sql_util import execute_positional
 
 logger = logging.getLogger(__name__)
@@ -102,9 +104,21 @@ async def lift_floor_bans(
         if row is None:
             return 0
         tokens = subject_uuids_of(dal, user_id=int(row.id))
-        return lift_floor_bans_sync(
+        lifted = lift_floor_bans_sync(
             dal, tenant_id=tenant_id, user_uuids=tokens, lifted_by=actor, call=call
         )
+        if lifted:
+            # Same transaction: clear ONLY the FLOOR_BAN source; a membership comes back
+            # (role link intact) only when no other ban source (manual, soft ban,
+            # suppression) remains.
+            ban_suppression.lift_membership_bans_in_tenant(
+                dal,
+                tenant_id=tenant_id,
+                hub_user_id=int(row.id),
+                source=BanSource.FLOOR_BAN,
+                now=datetime.now(UTC),
+            )
+        return lifted
 
     lifted = await ban_suppression.run_in_transaction(async_dal, dal, work)
     _emit("lifted" if lifted else "none")

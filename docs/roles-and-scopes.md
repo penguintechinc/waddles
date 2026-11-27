@@ -25,6 +25,24 @@ checks). A `roles` claim such as `super_admin` or `platform-admin` authorizes no
 The kind is set by migration `0117_community_role_kind` (backfill plus a `BEFORE INSERT` trigger for
 `seed_community_system_roles()`), so the guards read data, not names.
 
+Every community gets its predefined roles from the database function `seed_community_system_roles()`
+(the only definition of their names and scopes), called inside community create's transaction; the
+creator is linked to the system `community-owner` role. A member holds one role through
+`community_members.community_role_id`, and authz resolves scopes and the role name only through
+that link: a member with no linked role row holds no scopes and no role name, whatever its legacy
+`role` string says. All membership-role writes go through
+`hub_api/services/member_roles.set_member_role` (it also keeps the legacy `role` string in sync).
+Migration `0145_community_role_backfill` repaired communities created before this.
+
+- **Reserved names.** The seeded names (`member`, `communicator`, `speaker`, `moderator`,
+  `community-admin`, `community-owner`) are reserved: creating a custom role with one is a `400
+  ROLE_NAME_RESERVED`, and every lookup by a reserved name matches only the `is_system` row, so a
+  same-named custom role never stands in for a system role.
+- **Owner protection.** The owner (the member linked to the system owner role) can be demoted or
+  removed only by a global or tenant admin. Any other caller also needs every scope the target
+  holds. The check and the write run in one transaction under a row lock
+  (`community_authz.lock_member_for_change`). The platform view finds the owner the same way.
+
 ## Role management rules
 
 * Create, edit and delete need the `roles:manage` scope (held by the admin kind; global and tenant

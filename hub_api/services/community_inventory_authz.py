@@ -6,8 +6,8 @@ the inventory routes authorise against the REQUESTED community, using the same s
 other community-scoped groups (`community_authz` / `community_access`):
 
 * members (browse, check out, check in, my-items): an ACTIVE `community_members` row that is not
-  banned (`role == 'banned'`, written with `is_active=False` by the reputation policy) and has no
-  live soft-ban (`bundle_reputation_soft_bans`, keyed by the member's `user_uuid`);
+  banned (`membership_state == BANNED`, written with `is_active=False` by the reputation policy)
+  and has no live soft-ban (`bundle_reputation_soft_bans`, keyed by the member's `user_uuid`);
 * admins (items, checkouts, summary, audit log): the dedicated `community:admin` scope held via
   the caller's community role, or a tenant admin of the community's tenant.
 
@@ -28,9 +28,8 @@ from services.community_authz import member_scopes_sync
 from services.community_reputation_service import _ensure_reputation_tables
 from services.errors import forbidden
 from services.global_identity import is_global_admin_sync
+from services.membership_state import is_banned
 from services.scope_registry import SCOPE_COMMUNITY_ADMIN
-
-BANNED_ROLE = "banned"
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +112,13 @@ def require_inventory_member(
     )
     if member is None:
         raise forbidden("Community membership required")
-    role = getattr(member, "role", None)
-    if isinstance(role, str) and role.strip().lower() == BANNED_ROLE:
+    if is_banned(member):
         raise forbidden("Community membership required")
     tokens = _identity_tokens(dal, user_id, member)
     if not tokens:
         # Fail closed: without an identity token the soft-ban table cannot be consulted.
         logger.error(
-            "inventory soft-ban check denied: unresolvable identity "
-            "(community_id=%s, user_id=%s)",
+            "inventory soft-ban check denied: unresolvable identity (community_id=%s, user_id=%s)",
             community_id,
             user_id,
         )

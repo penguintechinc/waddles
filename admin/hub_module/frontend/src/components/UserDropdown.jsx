@@ -13,6 +13,7 @@ import {
   ChevronDownIcon,
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../contexts/AuthContext';
+import { hasAdminSurface } from '../lib/communityScopes';
 
 /**
  * UserDropdown — header avatar/username trigger with a sectioned dropdown menu.
@@ -113,9 +114,8 @@ function UserDropdown() {
   const visibleCommunities = communities.slice(0, 5);
   const hasMoreCommunities = communities.length > 5;
 
-  // Find first community where user is admin/owner/moderator for the "Admin Panel" link
-  const adminRoles = ['community-owner', 'community-admin', 'moderator'];
-  const firstAdminCommunity = communities.find((c) => adminRoles.includes(c.role));
+  // Find first community where user is an admin surface for the "Admin Panel" link
+  const firstAdminCommunity = communities.find((c) => hasAdminSurface(c.scopes));
 
   const showPortalsSection = isVendor || firstAdminCommunity || isSuperAdmin;
 

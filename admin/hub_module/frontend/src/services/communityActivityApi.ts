@@ -1,5 +1,7 @@
 import { apiClient } from '../lib/apiClient';
+import { isCommunityId } from '../lib/communityId';
 import {
+  WireShapeError,
   expectRecord,
   readArray,
   readNumber,
@@ -159,4 +161,36 @@ export async function fetchLiveActivity(communityId: string, limit: number): Pro
     params: { limit },
   });
   return readArray(expectRecord(data, 'live-activity'), 'events', 'live-activity').map(parseLiveActivityEvent);
+}
+
+/** `kind` codes of the recent-activity feed. */
+export const RECENT_ACTIVITY_KIND = { memberJoined: 1, announcement: 2 } as const;
+
+/** One entry of the member-facing recent-activity feed. */
+export interface RecentActivityItem {
+  kind: number;
+  at: string;
+  /** Actor user public_id (UUID), when known. */
+  actorId: string | null;
+  actorName: string | null;
+  title: string | null;
+}
+
+function parseRecentActivity(raw: unknown): RecentActivityItem {
+  const row = expectRecord(raw, 'recent activity[]');
+  const actorId = readOptString(row, 'actorId');
+  if (actorId !== null && !isCommunityId(actorId)) throw new WireShapeError('recent activity[]', 'actorId is not a UUID');
+  return {
+    kind: readNumber(row, 'kind', 'recent activity[]'),
+    at: readString(row, 'at', 'recent activity[]'),
+    actorId,
+    actorName: readOptString(row, 'actorName'),
+    title: readOptString(row, 'title'),
+  };
+}
+
+/** `GET /api/v1/communities/:id/activity?limit=`; the body is `{ success, items }`. */
+export async function fetchRecentActivity(communityId: string, limit: number): Promise<RecentActivityItem[]> {
+  const { data } = await apiClient.get<unknown>(`/api/v1/communities/${communityId}/activity`, { params: { limit } });
+  return readArray(expectRecord(data, 'recent activity'), 'items', 'recent activity').map(parseRecentActivity);
 }

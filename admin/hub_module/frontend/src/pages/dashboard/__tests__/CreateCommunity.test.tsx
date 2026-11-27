@@ -1,6 +1,6 @@
 /**
- * Community creation. The legacy `POST /communities/create` is not served; the identical-shape
- * `POST /superadmin/communities` is, for platform admins. Everyone else gets "not available yet".
+ * Community creation: super admins use `POST /superadmin/communities`; everyone else uses the
+ * self-service `POST /communities` (403 `feature_disabled` while the flag is off, shown to the user).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -10,6 +10,7 @@ import CreateCommunity from '../CreateCommunity';
 import { toCreatePayload } from '../../../services/communityAdminApi';
 import { apiClient } from '../../../lib/apiClient';
 import { createTestQueryClient } from '../../../test/renderWithProviders';
+import { communityKeys } from '../../../hooks/useMyCommunities';
 import { httpError, ok } from '../../../test/api';
 
 const auth = vi.hoisted(() => ({ isSuperAdmin: true }));
@@ -18,9 +19,9 @@ vi.mock('../../../contexts/AuthContext', () => ({
   useAuth: () => ({ user: { username: 'tux' }, isAuthenticated: true, isSuperAdmin: auth.isSuperAdmin, refreshUser: vi.fn() }),
 }));
 
-function renderPage() {
+function renderPage(client = createTestQueryClient()) {
   return render(
-    <QueryClientProvider client={createTestQueryClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/communities/create']}>
         <Routes>
           <Route path="/communities/create" element={<CreateCommunity />} />
@@ -53,6 +54,29 @@ describe('CreateCommunity', () => {
     expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/communities/create');
   });
 
+  it('invalidates the "my communities" query after a successful create', async () => {
+    vi.spyOn(apiClient, 'post').mockResolvedValue(ok({ success: true, community: { id: '0000002a-0000-4000-8000-000000000000', name: 'penguin-pals', displayName: 'Penguin Pals' } }, 201));
+    const client = createTestQueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    renderPage(client);
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'Penguin Pals' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByText('community dashboard')).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['communities', 'mine'] });
+    expect(communityKeys.mine).toEqual(['communities', 'mine']);
+  });
+
+  it('leaves "my communities" cached when the create fails', async () => {
+    vi.spyOn(apiClient, 'post').mockRejectedValue(httpError(409, { success: false, error: { code: 'CONFLICT', message: 'taken' } }));
+    const client = createTestQueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    renderPage(client);
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'dupe' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByTestId('community-form-error')).toBeInTheDocument();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
   it('refuses a numeric community id in the create response instead of navigating to it', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValue(ok({ success: true, community: { id: 42, name: 'x', displayName: null } }, 201));
     renderPage();
@@ -81,16 +105,35 @@ describe('CreateCommunity', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  it('tells ordinary users self-service creation is not available yet, without any request', () => {
+  it('lets an ordinary user self-create on POST /communities, without super-admin-only fields', async () => {
     auth.isSuperAdmin = false;
-    const post = vi.spyOn(apiClient, 'post');
-    const get = vi.spyOn(apiClient, 'get');
+    const post = vi
+      .spyOn(apiClient, 'post')
+      .mockResolvedValue(ok({ success: true, community: { id: '0000002b-0000-4000-8000-000000000000', name: 'my-club', displayName: 'My Club' } }, 201));
     renderPage();
-    expect(screen.getByTestId('not-available-yet')).toHaveAttribute('data-feature', 'community-self-create');
-    expect(screen.getByText(/only be created by platform administrators/i)).toBeInTheDocument();
-    expect(screen.queryByTestId('community-name-input')).not.toBeInTheDocument();
-    expect(post).not.toHaveBeenCalled();
-    expect(get).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('not-available-yet')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'My Club' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByText('community dashboard')).toBeInTheDocument();
+    const [url, body] = post.mock.calls[0]!;
+    expect(url).toBe('/api/v1/communities');
+    expect(body).toMatchObject({ name: 'my-club', platform: 'discord', communityType: 'creator' });
+    expect(body).not.toHaveProperty('isPublic');
+    expect(body).not.toHaveProperty('ownerId');
+    expect(body).not.toHaveProperty('platformServerId');
+    expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/superadmin/communities');
+  });
+
+  it('shows the server message when self-creation is disabled (feature_disabled) and stays on the form', async () => {
+    auth.isSuperAdmin = false;
+    vi.spyOn(apiClient, 'post').mockRejectedValue(
+      httpError(403, { success: false, code: 'feature_disabled', error: { code: 'feature_disabled', message: 'Community creation is not enabled for your account yet' } }),
+    );
+    renderPage();
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'club' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByTestId('community-form-error')).toHaveTextContent('Community creation is not enabled for your account yet');
+    expect(screen.queryByText('community dashboard')).not.toBeInTheDocument();
   });
 });
 
@@ -109,6 +152,12 @@ describe('toCreatePayload', () => {
     expect(toCreatePayload(form, true)).toMatchObject({ ownerId: '55', ownerName: 'Owner' });
     expect(toCreatePayload(form, false)).not.toHaveProperty('ownerId');
     expect(toCreatePayload(form, false)).not.toHaveProperty('ownerName');
+  });
+
+  it('never sends platformServerId unless the caller is a super admin', () => {
+    const form = { name: 'x', platform: 'discord', platformServerId: ' 123 ' };
+    expect(toCreatePayload(form, false)).not.toHaveProperty('platformServerId');
+    expect(toCreatePayload(form, true)).toMatchObject({ platformServerId: '123' });
   });
 
   it('treats non-object form values as empty and rejects them', () => {

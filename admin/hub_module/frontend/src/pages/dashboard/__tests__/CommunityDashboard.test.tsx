@@ -1,10 +1,10 @@
 /**
- * Community dashboard composed from SERVED routes only. The legacy single
- * `GET /communities/:id/dashboard` (+ bot-score, recent activity) is not served by hub-api;
- * those panels show an explicit "not available yet" state rather than a blank/failed page.
+ * Community dashboard composed from SERVED routes only, gated on `/auth/me` SCOPES (never role
+ * names). Recent activity is served by `GET /communities/:id/activity`; the bot-score panel is
+ * not rendered here because hub-api does not serve it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import CommunityDashboard from '../CommunityDashboard';
 import { httpError, mockApiGet, unexpectedUrl } from '../../../test/api';
 import { renderWithProviders } from '../../../test/renderWithProviders';
@@ -18,10 +18,23 @@ vi.mock('../../../components/dashboard/CommunityReputationPanel', () => ({
   default: () => <div data-testid="reputation-panel" />,
 }));
 
-const me = (role: string) => ({
+const ADMIN_SCOPES = ['community:admin', 'provider.connections:manage', 'stream:config.manage', 'community.announcements:read'];
+
+const me = (role: string, scopes: string[]) => ({
   success: true,
-  user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role }] },
+  user: {
+    id: 1,
+    communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role, roleId: null, scopes }],
+  },
 });
+
+const ACTIVITY = {
+  success: true,
+  items: [
+    { kind: 1, at: '2026-11-20T10:00:00Z', actorId: '0000000a-0000-4000-8000-000000000000', actorName: 'Dana', title: null },
+    { kind: 2, at: '2026-11-21T10:00:00Z', actorId: null, actorName: null, title: 'Patch notes' },
+  ],
+};
 
 const PUBLIC = {
   success: true,
@@ -66,11 +79,12 @@ const ANNOUNCEMENT = {
 
 type Handler = (url: string) => unknown;
 
-function serve(role: string, overrides: Handler = () => undefined) {
+function serve(scopes: string[], overrides: Handler = () => undefined, role = 'member') {
   return mockApiGet((url) => {
     const custom = overrides(url);
     if (custom !== undefined) return custom;
-    if (url === '/api/v1/auth/me') return me(role);
+    if (url === '/api/v1/auth/me') return me(role, scopes);
+    if (url === '/api/v1/communities/00000007-0000-4000-8000-000000000000/activity') return ACTIVITY;
     if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') return PUBLIC;
     if (url === '/api/v1/communities/00000007-0000-4000-8000-000000000000/streams') return { success: true, streams: [STREAM] };
     if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements') return { success: true, data: [ANNOUNCEMENT], pagination: {} };
@@ -89,8 +103,8 @@ describe('CommunityDashboard', () => {
   beforeEach(() => vi.spyOn(console, 'error').mockImplementation(() => {}));
   afterEach(() => vi.restoreAllMocks());
 
-  it('composes the admin view from served routes and flags the panels that have none', async () => {
-    const get = serve('community-admin');
+  it('composes the admin view from served routes, including recent activity', async () => {
+    const get = serve(ADMIN_SCOPES, undefined, 'Warden');
     renderPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Acme HQ' })).toBeInTheDocument();
@@ -102,26 +116,56 @@ describe('CommunityDashboard', () => {
     expect(screen.getByTestId('leaderboard-card-watch-time')).toBeInTheDocument();
     expect(screen.getByTestId('leaderboard-card-messages')).toBeInTheDocument();
 
-    const gated = screen.getAllByTestId('not-available-yet').map((el) => el.getAttribute('data-feature'));
-    expect(gated.sort()).toEqual(['bot-score', 'community-recent-activity']);
+    expect(screen.queryByTestId('not-available-yet')).not.toBeInTheDocument();
+    const items = await screen.findAllByTestId('activity-item');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent('Dana joined the community');
+    expect(items[1]).toHaveTextContent('Announcement: Patch notes');
+    expect(screen.getByText('Your role').previousElementSibling).toHaveTextContent('Warden');
 
     const urls = get.mock.calls.map(([url]) => url);
-    for (const dead of ['/api/v1/communities/00000007-0000-4000-8000-000000000000/dashboard', '/api/v1/admin/00000007-0000-4000-8000-000000000000/bot-score', '/api/v1/communities/00000007-0000-4000-8000-000000000000/activity']) {
+    for (const dead of ['/api/v1/communities/00000007-0000-4000-8000-000000000000/dashboard', '/api/v1/admin/00000007-0000-4000-8000-000000000000/bot-score']) {
       expect(urls).not.toContain(dead);
     }
   });
 
-  it('gives a plain member no admin entry points and no bot-score panel', async () => {
-    serve('member');
+  it('gates admin entry points on scopes, not role names', async () => {
+    // A role literally named community-owner with no scopes gets no admin surface...
+    serve([], undefined, 'community-owner');
+    const first = renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Acme HQ' });
+    expect(screen.queryByRole('link', { name: 'Admin Panel' })).not.toBeInTheDocument();
+    first.unmount();
+    // ...while a plainly named role holding the scopes does.
+    serve(ADMIN_SCOPES, undefined, 'Warden');
+    renderPage();
+    expect(await screen.findByRole('link', { name: 'Admin Panel' })).toBeInTheDocument();
+  });
+
+  it('shows a recent-activity error visibly without breaking the page', async () => {
+    serve([], (url) => {
+      if (url === '/api/v1/communities/00000007-0000-4000-8000-000000000000/activity') throw httpError(500, { error: 'Activity exploded' });
+      return undefined;
+    });
+    renderPage();
+    expect(await screen.findByText('We could not load recent activity')).toBeInTheDocument();
+    expect(screen.getByText('Activity exploded')).toBeInTheDocument();
+    expect(screen.getByTestId('leaderboard-card-watch-time')).toBeInTheDocument();
+  });
+
+  it('gives a plain member no admin entry points and no bot-score request', async () => {
+    const get = serve([]);
     renderPage();
     await screen.findByRole('heading', { level: 1, name: 'Acme HQ' });
     expect(screen.queryByRole('link', { name: 'Admin Panel' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Manage' })).not.toBeInTheDocument();
-    expect(screen.getAllByTestId('not-available-yet').map((el) => el.getAttribute('data-feature'))).toEqual(['community-recent-activity']);
+    expect(screen.queryByTestId('not-available-yet')).not.toBeInTheDocument();
+    expect(await screen.findAllByTestId('activity-item')).toHaveLength(2);
+    expect(get.mock.calls.some(([url]) => String(url).includes('bot-score'))).toBe(false);
   });
 
   it('tells a non-member they are not a member, with a way forward', async () => {
-    serve('member', (url) => (url === '/api/v1/auth/me' ? { success: true, user: { id: 1, communities: [] } } : undefined));
+    serve([], (url) => (url === '/api/v1/auth/me' ? { success: true, user: { id: 1, communities: [] } } : undefined));
     renderPage();
     const state = await screen.findByTestId('not-a-member');
     expect(within(state).getByRole('link', { name: 'View community' })).toHaveAttribute('href', '/communities/00000007-0000-4000-8000-000000000000');
@@ -129,7 +173,7 @@ describe('CommunityDashboard', () => {
 
   it('shows a retryable error when memberships cannot be loaded', async () => {
     let calls = 0;
-    serve('member', (url) => {
+    serve([], (url) => {
       if (url !== '/api/v1/auth/me') return undefined;
       calls += 1;
       if (calls === 1) throw httpError(500, { error: 'Database unavailable' });
@@ -143,7 +187,7 @@ describe('CommunityDashboard', () => {
   });
 
   it('still renders from /auth/me when the public record is unavailable', async () => {
-    serve('member', (url) => {
+    serve([], (url) => {
       if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') throw httpError(404, { error: 'Community not found' });
       return undefined;
     });
@@ -154,7 +198,7 @@ describe('CommunityDashboard', () => {
 
   it('isolates a live-streams failure: error with retry, rest of the page intact', async () => {
     let calls = 0;
-    serve('member', (url) => {
+    serve([], (url) => {
       if (url !== '/api/v1/communities/00000007-0000-4000-8000-000000000000/streams') return undefined;
       calls += 1;
       if (calls <= 1) throw httpError(402, { success: false, error: { code: 'FEATURE_NOT_ENABLED', message: 'Live streams are not enabled for this plan' } });
@@ -167,14 +211,14 @@ describe('CommunityDashboard', () => {
   });
 
   it('does not query announcements for plain members, and reports admin failures visibly', async () => {
-    const get = serve('member');
+    const get = serve([]);
     const first = renderPage();
     await screen.findByRole('heading', { level: 1 });
     await act(async () => {});
     expect(get.mock.calls.some(([url]) => url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements')).toBe(false);
     first.unmount();
 
-    serve('community-admin', (url) => {
+    serve(ADMIN_SCOPES, (url) => {
       if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements') throw httpError(500, { error: 'Announcements exploded' });
       return undefined;
     });
@@ -184,7 +228,7 @@ describe('CommunityDashboard', () => {
   });
 
   it('rejects an invalid id without querying', () => {
-    const get = serve('member');
+    const get = serve([]);
     renderPage('/dashboard/community/abc');
     expect(screen.getByText('This community link is not valid.')).toBeInTheDocument();
     expect(get).not.toHaveBeenCalled();

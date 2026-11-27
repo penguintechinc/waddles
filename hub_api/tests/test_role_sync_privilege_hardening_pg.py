@@ -10,6 +10,7 @@ Skipped (never failed) where the `docker` CLI is unavailable -- treat a SKIP as 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -22,6 +23,7 @@ from services import guild_pairing as pairing_svc
 from services import role_sync_inbound_service as inbound
 from services import role_sync_service as svc
 from services.errors import ApiError
+from services.member_roles import COMMUNITY_MEMBER_ROLE
 from services.role_sync_remediation import STATUS_DEMOTED, remediate_purged_bindings
 from tests import demo_pg_support as pg
 from tests.test_role_sync_service import (
@@ -89,11 +91,28 @@ class _World:
                 [self.tenant_id],
             )
         )
-        for name, prio in (("member", 0), ("vip", 5), ("moderator", 8), ("community-admin", 10)):
+        # Authority is the role row: only `community-owner` is admin-kind (protected); moderator and
+        # community-admin hold scopes; member/vip hold none (baseline).
+        for name, prio, kind, scopes in (
+            ("member", 0, 0, []),
+            ("vip", 5, 0, []),
+            ("moderator", 8, 0, ["community:moderate"]),
+            ("community-admin", 10, 0, ["community:moderate", "community:manage"]),
+            ("community-owner", 20, 1, []),
+        ):
             pg.q(
                 dal,
-                "INSERT INTO community_roles (community_id, name, priority) VALUES (%s, %s, %s)",
-                [self.cid, name, prio],
+                "INSERT INTO community_roles "
+                "(community_id, name, priority, role_kind, base_claims, is_system) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                [
+                    self.cid,
+                    name,
+                    prio,
+                    kind,
+                    json.dumps({"scopes": scopes}),
+                    name == COMMUNITY_MEMBER_ROLE,
+                ],
             )
 
     def pairing(
@@ -140,9 +159,10 @@ class _World:
         )
         pg.q(
             self.dal,
-            "INSERT INTO community_members (community_id, user_id, role, is_active) "
-            "VALUES (%s, %s, %s, true)",
-            [self.cid, str(hub_id), role],
+            "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+            "is_active) VALUES (%s, %s, %s, (SELECT id FROM community_roles "
+            "WHERE community_id = %s AND name = %s), true)",
+            [self.cid, str(hub_id), role, self.cid, role],
         )
         return hub_id
 
@@ -349,7 +369,11 @@ async def test_revoke_skips_grant_an_admin_changed_since(
     uid = world.member("800010", "member")
     await _platform_pass(world, pairing, {"800010": {VIP_DISCORD_ROLE}, "800099": set()})
     pg.q(
-        world.dal, "UPDATE community_members SET role = 'moderator' WHERE user_id = %s", [str(uid)]
+        world.dal,
+        "UPDATE community_members SET role = 'moderator', community_role_id = "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'moderator') "
+        "WHERE user_id = %s",
+        [world.cid, str(uid)],
     )
     await _platform_pass(world, pairing, {"800010": set(), "800099": set()})
     assert world.role_of(uid) == "moderator"
@@ -703,9 +727,11 @@ def test_remediation_queues_by_default_and_demotes_with_apply(world: _World) -> 
     )
     pg.q(
         world.dal,
-        "INSERT INTO community_members (community_id, user_id, role, is_active) "
-        "VALUES (%s, %s, 'community-admin', true)",
-        [world.cid, str(unlinked)],
+        "INSERT INTO community_members (community_id, user_id, role, community_role_id, "
+        "is_active) VALUES (%s, %s, 'community-admin', "
+        "(SELECT id FROM community_roles WHERE community_id = %s AND name = 'community-admin'), "
+        "true)",
+        [world.cid, str(unlinked), world.cid],
     )  # hand-made admin with no Discord link -> not attributable to sync
 
     review = remediate_purged_bindings(world.dal)
@@ -724,3 +750,19 @@ def test_remediation_queues_by_default_and_demotes_with_apply(world: _World) -> 
 def test_remediation_with_nothing_purged_reports_zero(world: _World) -> None:
     report = remediate_purged_bindings(world.dal, apply=True)
     assert report.purged_bindings_examined == 0 and report.demoted == 0
+
+
+def test_remediation_apply_refuses_when_baseline_role_missing(world: _World) -> None:
+    """No baseline row: never write a NULL link -- the member keeps the role, stays queued."""
+    pairing = world.pairing()
+    _purged(world, pairing, "community-admin")
+    promoted = world.member("800060", "community-admin")
+    pg.q(
+        world.dal,
+        "DELETE FROM community_roles WHERE community_id = %s AND name = 'member'",
+        [world.cid],
+    )
+    report = remediate_purged_bindings(world.dal, apply=True)
+    assert (report.candidates, report.demoted, report.role_missing) == (1, 0, 1)
+    assert world.role_of(promoted) == "community-admin"
+    assert pg.scalar(world.dal, "SELECT status FROM role_sync_remediation_queue") == 0

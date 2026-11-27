@@ -1,7 +1,8 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { PuzzlePieceIcon } from '@heroicons/react/24/outline';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
+import { useCommunityScopes } from '../../hooks/useCommunityScopes';
+import { COMMUNITY_SCOPES } from '../../lib/communityScopes';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import { bundleActivationApi } from '../../services/bundleActivationApi';
 import { BundleAdminError, bundleAdminApi } from '../../services/bundleAdminApi';
@@ -9,30 +10,21 @@ import BundleSettingsPanel from '../../components/bundles/BundleSettingsPanel';
 import { bundleName, describeError, settingsKeys } from '../../components/bundles/settingsHelpers';
 import { parseCommunityId } from '../../lib/communityId';
 
-// AuthContext.jsx is plain JS; type the slice this page reads explicitly.
-interface CommunityAuth {
-  user?: { communities?: { id: string; role: string }[] } | null;
-}
-
-const EDIT_ROLES = ['community-owner', 'community-admin'];
-const VIEW_ROLES = [...EDIT_ROLES, 'moderator'];
-
 /**
  * Pluggable app-bundle settings (Nextcloud-apps style): one card per ACTIVATED
  * bundle, each rendered generically from the bundle's declared config schema.
  * Gated by `waddles.webui.community_bundles` (same feature as Bundle Apps).
- * Moderators view; community admins edit. hub-api enforces both.
+ * `bundles.admin:moderate` views, `bundles.admin:admin` edits. hub-api enforces both.
  */
 export default function AdminBundleSettings() {
   const enabled = useFeatureFlag('waddles.webui.community_bundles');
   const { communityId: cidParam, appId } = useParams<{ communityId: string; appId?: string }>();
   const navigate = useNavigate();
-  const { user } = useAuth() as CommunityAuth;
   // '' marks an invalid route param: queries stay disabled and the page renders its invalid state.
   const communityId = parseCommunityId(cidParam) ?? '';
-  const role = user?.communities?.find((c) => c.id === communityId)?.role ?? '';
-  const canEdit = EDIT_ROLES.includes(role);
-  const canView = VIEW_ROLES.includes(role);
+  const { has, hasAny } = useCommunityScopes(communityId);
+  const canEdit = has(COMMUNITY_SCOPES.bundlesAdmin);
+  const canView = hasAny(COMMUNITY_SCOPES.bundlesModerate, COMMUNITY_SCOPES.bundlesAdmin);
 
   const list = useQuery({
     queryKey: ['community-bundle-activations', communityId],
@@ -59,7 +51,7 @@ export default function AdminBundleSettings() {
 
       {!canView && (
         <p role="alert" className="text-danger-fg">
-          You need to be a moderator or admin of this community to view app settings.
+          You do not have permission to view app settings for this community.
         </p>
       )}
       {list.isLoading && <p className="text-fg-muted">Loading apps…</p>}

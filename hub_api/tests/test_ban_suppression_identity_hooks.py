@@ -92,10 +92,11 @@ def _suppress(auth_db: Any, tenant_id: int, platform_user_id: str = PLATFORM_ID)
     auth_db.dal.commit()
 
 
-def _role(auth_db: Any, member_id: int) -> tuple[str, bool]:
+def _role(auth_db: Any, member_id: int) -> tuple[int, bool]:
+    """`(membership_state, is_active)` of one member row (a ban is the state, never the role)."""
     row = auth_db.dal(auth_db.dal.community_members.id == member_id).select().first()
     auth_db.dal.commit()
-    return row.role, bool(row.is_active)
+    return int(row.membership_state), bool(row.is_active)
 
 
 class TestNewAccountViaOAuth:
@@ -120,7 +121,7 @@ class TestNewAccountViaOAuth:
         )
 
         assert user.id
-        assert _role(auth_db, created["member"]) == ("banned", False)
+        assert _role(auth_db, created["member"]) == (2, False)
 
     async def test_an_unsuppressed_platform_id_keeps_its_membership(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -142,7 +143,7 @@ class TestNewAccountViaOAuth:
             user_data={"id": PLATFORM_ID, "username": "fine", "email": "fine@example.com"},
         )
 
-        assert _role(auth_db, created["member"]) == ("member", True)
+        assert _role(auth_db, created["member"]) == (1, True)
 
     async def test_a_key_failure_with_live_rows_is_loud(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -208,8 +209,8 @@ class TestLinkCallbacks:
             callback_base_url="http://localhost",
         )
 
-        assert _role(auth_db, acme_member) == ("banned", False)
-        assert _role(auth_db, beta_member) == ("member", True)  # per tenant only
+        assert _role(auth_db, acme_member) == (2, False)
+        assert _role(auth_db, beta_member) == (1, True)  # per tenant only
 
     async def test_oauth_link_retry_after_a_failed_recheck_still_applies_the_ban(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -240,7 +241,7 @@ class TestLinkCallbacks:
                 callback_base_url="http://localhost",
             )
         # The identity WAS linked before the re-check failed; the retry must still re-check.
-        assert _role(auth_db, member) == ("member", True)
+        assert _role(auth_db, member) == (1, True)
         monkeypatch.setenv(keys.ENV_CURRENT, MASTER_HEX)
         self._state(auth_db, user, "state-second")
 
@@ -254,7 +255,7 @@ class TestLinkCallbacks:
             callback_base_url="http://localhost",
         )
 
-        assert _role(auth_db, member) == ("banned", False)
+        assert _role(auth_db, member) == (2, False)
 
     async def test_identity_link_callback_bans_a_matching_membership(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -280,7 +281,7 @@ class TestLinkCallbacks:
             callback_base_url="http://localhost",
         )
 
-        assert _role(auth_db, member) == ("banned", False)
+        assert _role(auth_db, member) == (2, False)
 
     async def test_identity_link_retry_when_already_linked_still_applies_the_ban(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -310,7 +311,7 @@ class TestLinkCallbacks:
             callback_base_url="http://localhost",
         )
 
-        assert _role(auth_db, member) == ("banned", False)
+        assert _role(auth_db, member) == (2, False)
 
     async def test_linking_with_no_suppression_changes_nothing(
         self, auth_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -336,4 +337,4 @@ class TestLinkCallbacks:
             callback_base_url="http://localhost",
         )
 
-        assert _role(auth_db, member) == ("member", True)
+        assert _role(auth_db, member) == (1, True)

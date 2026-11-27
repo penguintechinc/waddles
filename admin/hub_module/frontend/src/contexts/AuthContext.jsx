@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../services/api';
+import { hasAdminSurface } from '../lib/communityScopes';
 
 const AuthContext = createContext(null);
 
@@ -223,13 +224,12 @@ export function AuthProvider({ children }) {
       const c = user?.communities?.find((x) => x.id === communityId);
       return c?.licenseTier === 2 ? 2 : 1;
     },
-    // Community-level admin check (for any community, or a specific one)
+    // Community admin-surface check (any community, or a specific one), by scope never role name.
     isCommunityAdmin: (communityId) => {
-      const adminRoles = ['community-owner', 'community-admin', 'moderator'];
       if (communityId) {
-        return user?.communities?.some(c => c.id === communityId && adminRoles.includes(c.role));
+        return user?.communities?.some(c => c.id === communityId && hasAdminSurface(c.scopes));
       }
-      return user?.communities?.some(c => adminRoles.includes(c.role));
+      return user?.communities?.some(c => hasAdminSurface(c.scopes));
     },
   };
 

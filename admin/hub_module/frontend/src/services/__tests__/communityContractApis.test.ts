@@ -28,11 +28,25 @@ describe('myCommunitiesApi', () => {
     await expect(fetchMyCommunities()).rejects.toThrow('"id" is not a string');
   });
 
-  it('defaults a membership displayName to its name and rejects a missing role', async () => {
-    mockApiGet(() => ({ user: { communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'n', role: 'member' }] } }));
-    await expect(fetchMyCommunities()).resolves.toEqual([{ id: '00000001-0000-4000-8000-000000000000', name: 'n', displayName: 'n', role: 'member' }]);
-    mockApiGet(() => ({ user: { communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'n' }] } }));
+  it('defaults a membership displayName to its name and carries roleId + scopes strictly', async () => {
+    const roleId = '000000a1-0000-4000-8000-000000000000';
+    const id = '00000001-0000-4000-8000-000000000000';
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', role: 'Warden', roleId, scopes: ['community:admin'] }] } }));
+    await expect(fetchMyCommunities()).resolves.toEqual([{ id, name: 'n', displayName: 'n', role: 'Warden', roleId, scopes: ['community:admin'] }]);
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', role: 'member', roleId: null, scopes: [] }] } }));
+    await expect(fetchMyCommunities()).resolves.toMatchObject([{ roleId: null, scopes: [] }]);
+  });
+
+  it('rejects a membership with a missing role, missing/invalid scopes, or a non-UUID roleId', async () => {
+    const id = '00000001-0000-4000-8000-000000000000';
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', scopes: [] }] } }));
     await expect(fetchMyCommunities()).rejects.toThrow('"role" is not a string');
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', role: 'member' }] } }));
+    await expect(fetchMyCommunities()).rejects.toThrow(/scopes/);
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', role: 'member', scopes: ['ok', 5] }] } }));
+    await expect(fetchMyCommunities()).rejects.toThrow('scopes[1] is not a string');
+    mockApiGet(() => ({ user: { communities: [{ id, name: 'n', role: 'member', roleId: '7', scopes: [] }] } }));
+    await expect(fetchMyCommunities()).rejects.toThrow('roleId is not a UUID');
   });
 
   it('requires the community wrapper and a list of results', async () => {
@@ -87,12 +101,17 @@ describe('communityActivityApi', () => {
 
 describe('communityMembersApi', () => {
   it('defaults username and totalPages, and omits blank filters from the request', async () => {
-    const page = parseMemberPage({ members: [{ id: 1, role: 'member' }], pagination: { page: 1, limit: 25, total: 1 } });
-    expect(page.members[0]).toMatchObject({ username: 'Unknown', userId: null, avatarUrl: null, joinedAt: null });
+    const uuid = '0000000b-0000-4000-8000-000000000000';
+    const page = parseMemberPage({ members: [{ userId: uuid }], pagination: { page: 1, limit: 25, total: 1 } });
+    expect(page.members[0]).toMatchObject({ userId: uuid, username: 'Unknown', roleId: null, roleName: null, avatarUrl: null, joinedAt: null });
+    expect(() => parseMemberPage({ members: [{ userId: 5 }], pagination: { page: 1, limit: 25, total: 1 } })).toThrow();
+    expect(() => parseMemberPage({ members: [{ userId: uuid, roleId: 'admin' }], pagination: { page: 1, limit: 25, total: 1 } })).toThrow('roleId is not a UUID');
     expect(page.totalPages).toBe(1);
     const get = mockApiGet(() => ({ members: [], pagination: { page: 1, limit: 25, total: 0 } }));
-    await fetchCommunityMembers('00000004-0000-4000-8000-000000000000', { page: 1, limit: 25, search: '  ', role: '' });
+    await fetchCommunityMembers('00000004-0000-4000-8000-000000000000', { page: 1, limit: 25, search: '  ', roleId: '' });
     expect(get).toHaveBeenCalledWith('/api/v1/admin/00000004-0000-4000-8000-000000000000/members', { params: { page: 1, limit: 25 } });
+    await fetchCommunityMembers('00000004-0000-4000-8000-000000000000', { page: 2, limit: 10, search: 'a', roleId: '000000a1-0000-4000-8000-000000000000' });
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000004-0000-4000-8000-000000000000/members', { params: { page: 2, limit: 10, search: 'a', roleId: '000000a1-0000-4000-8000-000000000000' } });
   });
 });
 

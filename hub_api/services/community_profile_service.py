@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from services import community_authz
 from services.community_authz import require_community_scope
 from services.errors import bad_request, not_found
 from services.scope_registry import SCOPE_BRANDING_MANAGE, SCOPE_PROFILE_MANAGE
@@ -115,26 +116,6 @@ def _format_community(row: Any, *, owner_username: str | None) -> CommunityProfi
     )
 
 
-async def _resolve_owner_username(dal: Any, async_dal: Any, owner_id: str | None) -> str | None:
-    """Resolve `communities.owner_id` (legacy VARCHAR) to a `hub_users.username`.
-
-    Node's own `getCommunityById()` does this via a raw SQL
-    `LEFT JOIN hub_users u ON c.owner_id = u.id` -- `owner_id` is VARCHAR
-    and `hub_users.id` is INTEGER, an operand-type mismatch real Postgres
-    has no implicit cast for (`operator does not exist: character varying
-    = integer`), a pre-existing gap in the same family documented in
-    `services/schema.py` (Node's own query would 500 against the real
-    schema). This resolves the same information as a safe two-step lookup
-    instead of porting a join that's guaranteed to fail -- matches
-    `hub_api/PORTING.md` Gotcha #4's own precedent (gap 2: adapt to
-    something that works rather than port guaranteed breakage).
-    """
-    if not owner_id or not owner_id.isdigit():
-        return None
-    rows = await async_dal.select_async(dal(dal.hub_users.id == int(owner_id)))
-    return rows.first().username if rows else None
-
-
 async def get_community_profile(
     async_dal: Any, dal: Any, *, community_id: int, viewer_id: int | None
 ) -> CommunityProfile | None:
@@ -168,7 +149,9 @@ async def get_community_profile(
             restricted=True,
         )
 
-    owner_username = await _resolve_owner_username(dal, async_dal, row.owner_id)
+    owner_username = await community_authz.community_owner_username(
+        async_dal, dal, community_id=community_id
+    )
     return _format_community(row, owner_username=owner_username)
 
 
@@ -234,7 +217,9 @@ async def update_community_profile(
 
     row = await _get_active_community(dal, async_dal, community_id)
     assert row is not None  # nosec B101 - just updated the same row above
-    owner_username = await _resolve_owner_username(dal, async_dal, row.owner_id)
+    owner_username = await community_authz.community_owner_username(
+        async_dal, dal, community_id=community_id
+    )
     return _format_community(row, owner_username=owner_username)
 
 

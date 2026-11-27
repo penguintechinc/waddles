@@ -30,12 +30,10 @@ Simplification vs. Node's full model (documented, not silently dropped --
 silently invent"): Node resolves the caller's admin-ness via a
 `community_roles.base_claims` JSON scopes join
 (`community:manage_members` / `community:manage_channels`); this port
-checks `community_members.role` directly against the two system-seeded
-admin-tier role names instead (`communityController.js`/
-`adminController.js`/`platformController.js` all also check
-`role === 'community-owner'` directly in several places, so this is not
-an invented convention). Binding `community_roles` +
-`hub_channel_permission_overrides` for a claims graph neither overlay
+gates on the caller's `community_roles` scopes (`community:admin`, admin kind) instead; authority
+never rides on a role NAME and a ban is a membership state, not a role (see
+`services.membership_state`). Node's direct `role === 'community-owner'` checks are not ported.
+Binding `hub_channel_permission_overrides` for a claims graph neither overlay
 nor calls otherwise needs is out of scope for this port group.
 """
 
@@ -52,6 +50,7 @@ from services.community_authz import (
     is_super_admin,
 )
 from services.errors import forbidden
+from services.membership_state import is_banned
 from services.scope_registry import SCOPE_COMMUNITY_ADMIN
 
 
@@ -153,6 +152,8 @@ async def require_community_member(
         & (dal.community_members.user_id == str(user_id))
         & (dal.community_members.is_active == True)  # noqa: E712 - pydal query operator
     )
-    rows = await async_dal.select_async(membership_query, dal.community_members.id)
-    if not rows:
+    rows = await async_dal.select_async(
+        membership_query, dal.community_members.id, dal.community_members.membership_state
+    )
+    if not rows or is_banned(rows[0]):
         raise forbidden("Community membership required")

@@ -447,7 +447,15 @@ class TestMeCommunityLicenseTier:
             "garbage-c": 1,
             "released-c": 1,
         }
-        assert set(comms["pro-c"]) == {"id", "name", "displayName", "role", "licenseTier"}
+        assert set(comms["pro-c"]) == {
+            "id",
+            "name",
+            "displayName",
+            "role",
+            "roleId",
+            "scopes",
+            "licenseTier",
+        }
 
     async def test_me_community_id_is_the_public_uuid(self, client: Any, auth_db: Any) -> None:
         """`user.communities[].id` is `communities.public_id` (UUID), never the numeric id."""
@@ -552,30 +560,97 @@ class TestMeCommunityLicenseTier:
         out = await auth_service._community_tier_codes(auth_db, auth_db.dal, [1, 2, 3, 4, 5])
         assert out == {} and queries == 3
 
-    async def test_me_returns_canonical_community_owner_role(
-        self, client: Any, auth_db: Any
-    ) -> None:
-        """regression: communities[].role is the stored role; owners must read 'community-owner'."""
-        user_id = _seed_user(auth_db, email="owner@example.com", username="owner1")
-        community_id = auth_db.dal.communities.insert(
-            name="owned",
-            display_name="Owned",
+    @staticmethod
+    def _community(auth_db: Any, name: str, *, tenant: bool = True) -> int:
+        dal = auth_db.dal
+        tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+        cid: int = dal.communities.insert(
+            name=name,
+            display_name=name,
             platform="discord",
             is_active=True,
+            tenant_id=tenant_row.id if tenant else None,
             public_id=str(uuid.uuid4()),
         )
+        dal.commit()
+        return cid
+
+    @staticmethod
+    def _role(auth_db: Any, cid: int, name: str, kind: int, scopes: list[str]) -> Any:
+        dal = auth_db.dal
+        rid = dal.community_roles.insert(
+            community_id=cid, name=name, role_kind=kind, base_claims={"scopes": scopes}
+        )
+        dal.commit()
+        return dal.community_roles[rid]
+
+    @staticmethod
+    def _join(auth_db: Any, cid: int, user_id: int, role: Any = None, **extra: Any) -> None:
         auth_db.dal.community_members.insert(
-            community_id=community_id,
+            community_id=cid,
             user_id=str(user_id),
-            role="community-owner",
+            role="member",
             is_active=True,
+            community_role_id=role.id if role is not None else None,
+            **extra,
         )
         auth_db.dal.commit()
-        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
-        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert [c["role"] for c in body["user"]["communities"]] == ["community-owner"]
+
+    async def test_me_role_and_scopes_come_from_the_role_row(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """role/roleId/scopes derive from community_roles, never from community_members.role."""
+        from services.scope_registry import all_scopes
+
+        uid = _seed_user(auth_db, email="r@example.com", username="r1")
+        admin_c = self._community(auth_db, "admin-c")
+        custom_c = self._community(auth_db, "custom-c")
+        bare_c = self._community(auth_db, "bare-c")
+        admin_role = self._role(auth_db, admin_c, "boss", 1, [])
+        custom_role = self._role(auth_db, custom_c, "vip", 0, ["community:read", "a:b"])
+        self._join(auth_db, admin_c, uid, admin_role)
+        self._join(auth_db, custom_c, uid, custom_role)
+        self._join(auth_db, bare_c, uid)  # no role row: stored string must not grant anything
+        comms = await _me_communities(client, uid)
+        assert comms["admin-c"]["role"] == "boss"
+        assert comms["admin-c"]["roleId"] == str(admin_role.public_id)
+        assert comms["admin-c"]["scopes"] == sorted(all_scopes())
+        assert comms["custom-c"]["role"] == "vip"
+        assert comms["custom-c"]["scopes"] == ["a:b", "community:read"]
+        assert comms["bare-c"]["role"] == "member"
+        assert comms["bare-c"]["roleId"] is None
+        assert comms["bare-c"]["scopes"] == []
+
+    async def test_me_excludes_banned_memberships(self, client: Any, auth_db: Any) -> None:
+        from services.membership_state import MembershipState
+
+        uid = _seed_user(auth_db, email="b@example.com", username="b1")
+        ok_c = self._community(auth_db, "ok-c")
+        banned_c = self._community(auth_db, "banned-c")
+        self._join(auth_db, ok_c, uid)
+        self._join(auth_db, banned_c, uid, membership_state=MembershipState.BANNED)
+        assert set(await _me_communities(client, uid)) == {"ok-c"}
+
+    async def test_me_tenant_admin_and_global_admin_hold_the_full_registry(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        from services.scope_registry import all_scopes
+
+        dal = auth_db.dal
+        tenant_id = dal(dal.tenants.slug == TENANT_SLUG).select().first().id
+        tadmin = _seed_user(auth_db, email="ta@example.com", username="ta")
+        dal.tenant_admins.insert(tenant_id=tenant_id, user_id=tadmin, role="admin")
+        dal.commit()
+        cid = self._community(auth_db, "t-c")
+        self._join(auth_db, cid, tadmin)  # plain member without a role row
+        assert (await _me_communities(client, tadmin))["t-c"]["scopes"] == sorted(all_scopes())
+        gadmin = _seed_user(auth_db, email="ga@example.com", username="ga")
+        grant_global_admin_sync(dal, gadmin)
+        self._join(auth_db, cid, gadmin)
+        assert (await _me_communities(client, gadmin))["t-c"]["scopes"] == sorted(all_scopes())
+        plain = _seed_user(auth_db, email="pl@example.com", username="pl")
+        self._join(auth_db, cid, plain)
+        assert (await _me_communities(client, plain))["t-c"]["scopes"] == []
 
 
 class TestSetPassword:

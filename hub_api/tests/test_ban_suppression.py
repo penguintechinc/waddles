@@ -32,6 +32,7 @@ from services import ban_suppression as bs
 from services import data_privacy_service as privacy
 from services import suppression_keys as keys
 from services.ban_suppression import RestrictionReason
+from services.membership_state import BanSource
 from tests.test_data_privacy_erasure import (  # noqa: F401 - fixtures re-exported for this module
     TRIGGER_MESSAGE,
     OtelSink,
@@ -94,8 +95,9 @@ def _community(db: Any, *, tenant_id: int | None, name: str = "c") -> int:
     return int(community_id)
 
 
-def _ban(db: Any, member_id: int, *, role: str = "banned") -> None:
-    db.dal(db.dal.community_members.id == member_id).update(role=role, is_active=False)
+def _ban(db: Any, member_id: int) -> None:
+    """Ban a member the way production does: BANNED membership_state + inactive; role untouched."""
+    db.dal(db.dal.community_members.id == member_id).update(membership_state=2, is_active=False)
     db.dal.commit()
 
 
@@ -393,7 +395,7 @@ class TestErasureBranching:
         assert set(rows) == {acme, beta}
         assert rows[acme].hmac != rows[beta].hmac  # same platform id, per-tenant key
 
-    async def test_only_the_role_banned_counts_as_an_active_restriction(self, db: Any) -> None:
+    async def test_only_the_banned_state_counts_as_an_active_restriction(self, db: Any) -> None:
         tenant = _tenant(db, "acme")
         user = _user(db, name="mod")
         _link_identity(db, user_id=user, platform="discord", platform_user_id=PUID)
@@ -634,7 +636,9 @@ class TestReturnRecatch:
             .first()
         )
         db.dal.commit()
-        assert (row.role, row.is_active) == ("banned", False)  # the restriction is re-applied
+        # the restriction is re-applied as STATE; the role link is never rewritten
+        assert (row.membership_state, row.is_active) == (2, False)
+        assert row.role != "banned"
 
     async def test_recatch_upgrades_an_existing_membership_instead_of_adding_a_second(
         self, db: Any
@@ -649,7 +653,7 @@ class TestReturnRecatch:
         assert await _check(db, community_id=target, user_id=returning) is not None
 
         assert _count(db, db.dal.community_members.user_id == str(returning)) == 1
-        assert _count(db, db.dal.community_members.role == "banned") >= 1
+        assert _count(db, db.dal.community_members.membership_state == 2) >= 1
 
     async def test_a_returning_benign_user_gets_a_fresh_start(self, db: Any) -> None:
         tenant = _tenant(db, "acme")
@@ -933,11 +937,10 @@ class TestReapplyAfterIdentityLink:
         banned = await bs.reapply_for_hub_user_async(db, db.dal, hub_user_id=user, keys=_source())
 
         assert banned == 1
-        assert (_member_row(db, acme_member).role, _member_row(db, acme_member).is_active) == (
-            "banned",
-            False,
-        )
-        assert _member_row(db, beta_member).role == "member"  # per tenant only
+        acme_row = _member_row(db, acme_member)
+        assert (acme_row.membership_state, acme_row.is_active) == (2, False)
+        assert acme_row.role == "member"  # the role link is untouched by a ban
+        assert _member_row(db, beta_member).membership_state == 1  # per tenant only
 
     async def test_an_already_banned_membership_is_not_recounted(self, db: Any) -> None:
         tenant = _tenant(db, "acme")
@@ -951,7 +954,7 @@ class TestReapplyAfterIdentityLink:
         assert (
             await bs.reapply_for_hub_user_async(db, db.dal, hub_user_id=user, keys=_source()) == 0
         )
-        assert _member_row(db, member).role == "banned"
+        assert _member_row(db, member).membership_state == 2
 
     async def test_no_identity_or_no_membership_is_a_no_op(self, db: Any) -> None:
         tenant = _tenant(db, "acme")
@@ -1117,10 +1120,135 @@ class TestStoreEdges:
         assert bs._later(now, now + timedelta(1)) == now + timedelta(1)
         assert bs._as_utc(datetime(2030, 1, 1)).tzinfo is UTC
 
-    def test_banned_role_matching_is_exact_and_case_insensitive(self) -> None:
-        assert bs._is_banned_role("banned") and bs._is_banned_role(" Banned ")
-        assert not bs._is_banned_role("ban") and not bs._is_banned_role(None)
-        assert not bs._is_banned_role("unbanned")
+    def test_ban_is_membership_state_never_a_role_name(self) -> None:
+        from types import SimpleNamespace
+
+        assert bs.is_banned(SimpleNamespace(membership_state=2, role="member"))
+        assert not bs.is_banned(SimpleNamespace(membership_state=1, role="banned"))  # NAME spoof
+        assert not bs.is_banned(SimpleNamespace(membership_state=None))
+
+    async def test_lift_membership_ban_restores_active_and_keeps_the_role_link(
+        self, db: Any
+    ) -> None:
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="lifted")
+        community = _community(db, tenant_id=tenant)
+        member = _banned_member(db, community_id=community, user_id=user)
+        role_before = _member_row(db, member).role
+        other = _member(db, community_id=_community(db, tenant_id=tenant), user_id=user)
+
+        restored = bs.lift_membership_ban(
+            db.dal,
+            community_id=community,
+            hub_user_id=user,
+            source=BanSource.MANUAL,
+            now=datetime.now(UTC),
+        )
+        db.dal.commit()
+
+        row = _member_row(db, member)
+        assert restored == 1
+        assert (row.membership_state, row.is_active) == (1, True)
+        assert row.role == role_before  # the role link was never touched
+        assert _member_row(db, other).membership_state == 1  # an ACTIVE row is left alone
+        assert (
+            bs.lift_membership_ban(
+                db.dal,
+                community_id=community,
+                hub_user_id=user,
+                source=BanSource.MANUAL,
+                now=datetime.now(UTC),
+            )
+            == 0
+        )
+
+    def test_each_lift_clears_only_its_own_source(self, db: Any) -> None:
+        """Regression (PR #1542 security review): BANNED until the LAST source is lifted."""
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="multi")
+        community = _community(db, tenant_id=tenant)
+        member = _member(db, community_id=community, user_id=user)
+        now = datetime.now(UTC)
+        for source in (BanSource.MANUAL, BanSource.SOFT_BAN, BanSource.SUPPRESSION):
+            bs.ban_membership(
+                db.dal, community_id=community, hub_user_id=user, source=source, now=now
+            )
+        db.dal.commit()
+
+        def lift(source: BanSource) -> int:
+            n = bs.lift_membership_ban(
+                db.dal, community_id=community, hub_user_id=user, source=source, now=now
+            )
+            db.dal.commit()
+            return n
+
+        assert lift(BanSource.SOFT_BAN) == 0
+        assert lift(BanSource.FLOOR_BAN) == 0  # never recorded: a no-op
+        assert lift(BanSource.SUPPRESSION) == 0
+        row = _member_row(db, member)
+        assert (row.membership_state, row.is_active) == (2, False)
+        assert row.ban_sources == int(BanSource.MANUAL)
+        assert lift(BanSource.MANUAL) == 1
+        row = _member_row(db, member)
+        assert (row.membership_state, row.is_active, row.ban_sources) == (1, True, 0)
+
+    def test_tenant_wide_lift_keeps_other_sources(self, db: Any) -> None:
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="tenantwide")
+        now = datetime.now(UTC)
+        only_floor = _community(db, tenant_id=tenant)
+        also_manual = _community(db, tenant_id=tenant)
+        for community in (only_floor, also_manual):
+            _member(db, community_id=community, user_id=user)
+            bs.ban_membership(
+                db.dal,
+                community_id=community,
+                hub_user_id=user,
+                source=BanSource.FLOOR_BAN,
+                now=now,
+            )
+        bs.ban_membership(
+            db.dal, community_id=also_manual, hub_user_id=user, source=BanSource.MANUAL, now=now
+        )
+        db.dal.commit()
+
+        restored = bs.lift_membership_bans_in_tenant(
+            db.dal, tenant_id=tenant, hub_user_id=user, source=BanSource.FLOOR_BAN, now=now
+        )
+        db.dal.commit()
+
+        assert restored == 1
+        cm = db.dal.community_members
+        state = {
+            int(r.community_id): int(r.membership_state)
+            for r in db.dal(cm.user_id == str(user)).select()
+        }
+        assert state == {only_floor: 1, also_manual: 2}
+
+    def test_unsourced_banned_row_counts_as_manual(self, db: Any) -> None:
+        """Fail closed: a BANNED row with no recorded source yields only to a MANUAL lift."""
+        tenant = _tenant(db, "acme")
+        user = _user(db, name="legacy")
+        community = _community(db, tenant_id=tenant)
+        member = _banned_member(db, community_id=community, user_id=user)
+        now = datetime.now(UTC)
+        for source in (BanSource.SOFT_BAN, BanSource.FLOOR_BAN, BanSource.SUPPRESSION):
+            assert (
+                bs.lift_membership_ban(
+                    db.dal, community_id=community, hub_user_id=user, source=source, now=now
+                )
+                == 0
+            )
+        bs.ban_membership(
+            db.dal, community_id=community, hub_user_id=user, source=BanSource.SOFT_BAN, now=now
+        )
+        db.dal.commit()
+        assert _member_row(db, member).ban_sources == int(BanSource.MANUAL | BanSource.SOFT_BAN)
+
+    def test_recompute_is_banned_while_any_source_remains(self) -> None:
+        assert bs.membership_state_for(0) == bs.MembershipState.ACTIVE
+        for bits in (1, 2, 4, 8, 15, 16):
+            assert bs.membership_state_for(bits) == bs.MembershipState.BANNED
 
     def test_lookups_validate_their_inputs(self, db: Any) -> None:
         with pytest.raises(keys.SuppressionInputError):

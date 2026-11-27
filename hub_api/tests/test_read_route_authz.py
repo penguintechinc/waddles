@@ -26,6 +26,7 @@ from blueprints.v1.live_activity import live_activity_bp
 from tests.community_ids import cpath, install_community_ids
 from tests.conftest import (
     OTHER_TENANT_SLUG,
+    TENANT_SLUG,
     insert_global_admin,
     make_user_token,
     seed_membership,
@@ -36,6 +37,21 @@ VIEWER_SCOPE = "*:read"
 
 
 @pytest.fixture
+def community_db(tenant_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Overrides conftest's: binds the full `community_members` (incl. membership_state) first."""
+    from services.community_common import ensure_community_tables
+    from services.schema import bind_auth_tables
+
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key")
+    bind_auth_tables(tenant_db, migrate=True)
+    ensure_community_tables(tenant_db, migrate=True)
+    tenant_row = tenant_db(tenant_db.tenants.slug == TENANT_SLUG).select().first()
+    community_id = tenant_db.communities.insert(name="test-community", tenant_id=tenant_row.id)
+    tenant_db.commit()
+    return tenant_db, community_id
+
+
+@pytest.fixture
 def seeded(community_db: Any) -> Any:
     """`(dal, community_id, foreign_community_id)` with an admin, a member and a banned member."""
     dal, community_id = community_db
@@ -43,8 +59,9 @@ def seeded(community_db: Any) -> Any:
     seed_membership(db, community_id=community_id, user_id=ADMIN_UID, role="community-admin")
     seed_membership(db, community_id=community_id, user_id=MEMBER_UID, role="member")
     seed_membership(db, community_id=community_id, user_id=BANNED_UID, role="member")
-    # A ban persists as `role='banned'` + `is_active=False` (`ban_suppression`).
-    dal(dal.community_members.user_id == str(BANNED_UID)).update(is_active=False)
+    # A ban is the BANNED membership_state (role link untouched); is_active stays True so ONLY the
+    # state can deny this member at the standing gate.
+    dal(dal.community_members.user_id == str(BANNED_UID)).update(membership_state=2)
     other = dal.tenants.insert(slug=OTHER_TENANT_SLUG, is_active=True)
     foreign = dal.communities.insert(name="foreign", tenant_id=other)
     dal.commit()

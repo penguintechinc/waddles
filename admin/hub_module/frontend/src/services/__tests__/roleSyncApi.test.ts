@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from '../../lib/apiClient';
 import { WireShapeError } from '../../lib/wire';
 import {
-  COMMUNITY_ROLES,
   SUBSCRIBER_TIERS,
   SYNC_SCOPES,
   extractErrorMessage,
@@ -65,7 +64,6 @@ describe('roleSyncApi', () => {
   it('exports the constraint value sets', () => {
     expect(SYNC_SCOPES).toEqual(['subscriber_tier', 'moderator', 'community_role']);
     expect(SUBSCRIBER_TIERS).toEqual([1, 2, 3]);
-    expect(COMMUNITY_ROLES).not.toContain('community-owner');
   });
 });
 

@@ -244,18 +244,6 @@
 - path: admin/hub_module/frontend/src/pages/dashboard/AccountSettings.jsx
   pattern: "<(NotAvailableYet|ServedFeature)"
   issue: TBD-file
-# community-recent-activity, bot-score
-- path: admin/hub_module/frontend/src/pages/dashboard/CommunityDashboard.tsx
-  pattern: "<(NotAvailableYet|ServedFeature)"
-  issue: TBD-file
-# member-roster
-- path: admin/hub_module/frontend/src/pages/dashboard/CommunityMembers.tsx
-  pattern: "<(NotAvailableYet|ServedFeature)"
-  issue: TBD-file
-# community-self-create
-- path: admin/hub_module/frontend/src/pages/dashboard/CreateCommunity.tsx
-  pattern: "<(NotAvailableYet|ServedFeature)"
-  issue: TBD-file
 # member-server-link-requests
 - path: admin/hub_module/frontend/src/pages/dashboard/MyChannels.jsx
   pattern: "<(NotAvailableYet|ServedFeature)"

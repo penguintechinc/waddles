@@ -1,6 +1,8 @@
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query';
 import {
   fetchLeaderboard,
+  fetchRecentActivity,
+  type RecentActivityItem,
   fetchLiveActivity,
   fetchMyActivityStats,
   type LeaderboardPage,
@@ -43,5 +45,13 @@ export function useLiveActivityBackfill(communityId: string, limit: number): Use
     queryFn: () => fetchLiveActivity(communityId, limit),
     staleTime: 0,
     gcTime: 0,
+  });
+}
+
+/** Recent member-facing activity (joins, announcements) for the dashboard. */
+export function useRecentActivity(communityId: string, limit = 10): UseQueryResult<RecentActivityItem[]> {
+  return useQuery({
+    queryKey: ['community', communityId, 'recent-activity', limit] as const,
+    queryFn: () => fetchRecentActivity(communityId, limit),
   });
 }

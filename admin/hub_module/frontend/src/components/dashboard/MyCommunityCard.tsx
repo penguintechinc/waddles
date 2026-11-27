@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import type { MyCommunity, PublicCommunity } from '../../services/myCommunitiesApi';
 import { getPlatformIcon, getPlatformLabel } from '../../utils/platformConfig';
 import { Badge } from '../ui';
-import { roleLabel, roleTone } from './communityRoles';
+import { roleLabel } from './communityRoles';
 
 export interface MyCommunityCardProps {
   community: MyCommunity;
@@ -35,7 +35,7 @@ export function MyCommunityCard({ community, details }: MyCommunityCardProps) {
             {platform ? <span title={getPlatformLabel(platform)}>{getPlatformIcon(platform)}</span> : null}
             <h3 className="truncate font-semibold text-fg">{community.displayName}</h3>
           </div>
-          <Badge tone={roleTone(community.role)} className="whitespace-nowrap">
+          <Badge tone="gray" className="whitespace-nowrap">
             {roleLabel(community.role)}
           </Badge>
         </div>

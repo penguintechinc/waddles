@@ -49,7 +49,6 @@ from services.errors import (
 )
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
-from services.member_roles import COMMUNITY_OWNER_ROLE
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 logger = logging.getLogger(__name__)
@@ -191,15 +190,17 @@ async def create_community(
     description: str | None,
     platform: str,
     platform_server_id: str | None,
-    owner_id: str | None,
-    owner_name: str | None,
     is_public: bool | None,
     community_type: str | None,
     caller_id: int,
     tenant_slug: str,
     tenant_id: int,
 ) -> Any:
-    """Create a new community owned by ``tenant_id`` (free tier: capped at 1)."""
+    """Create a new community owned by ``tenant_id`` (free tier: capped at 1).
+
+    Authority is the per-community role table: the caller becomes a member holding the seeded
+    system owner role (see `create_community_capped`); `communities.owner_id` is no longer written.
+    """
     _ensure_tables(dal)
     if not name or not platform:
         raise bad_request("Name and platform are required")
@@ -211,9 +212,17 @@ async def create_community(
         )
 
     slug = name.lower().strip().replace(" ", "-")
-    existing = await async_dal.select_async(dal(dal.communities.name == slug))
-    if existing:
-        raise conflict("Community name already exists")
+    comm = dal.communities
+    # Names stay globally unique (`communities_name_key`): name-only lookups (Rust tenant
+    # resolver, seeds) would cross tenants otherwise. Per-tenant uniqueness is a follow-up; the
+    # generic message never says WHICH tenant holds the name. A platform server (e.g. a Discord
+    # guild) may be claimed by ONE community across ALL tenants.
+    if await async_dal.select_async(dal(comm.name == slug)):
+        raise conflict("Community name is unavailable")
+    if platform_server_id and await async_dal.select_async(
+        dal((comm.platform == platform) & (comm.platform_server_id == platform_server_id))
+    ):
+        raise conflict("Platform server is already linked to a community")
 
     new_id = await create_community_capped(
         async_dal,
@@ -226,8 +235,6 @@ async def create_community(
             description=description or "",
             platform=platform,
             platform_server_id=platform_server_id,
-            owner_id=owner_id,
-            owner_name=owner_name,
             is_public=is_public is not False,
             community_type=validated_type,
             tenant_id=tenant_id,
@@ -236,13 +243,7 @@ async def create_community(
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         ),
-        member_values=lambda cid: dict(
-            community_id=cid,
-            user_id=str(caller_id),
-            role=COMMUNITY_OWNER_ROLE,
-            is_active=True,
-            joined_at=datetime.now(UTC),
-        ),
+        creator_id=caller_id,
     )
     return await get_community(async_dal, dal, community_id=new_id)
 
