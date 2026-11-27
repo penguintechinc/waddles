@@ -29,6 +29,7 @@ const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const PasswordRecoveryUnavailablePage = lazy(() => import('./pages/auth/PasswordRecoveryUnavailablePage'));
 const OAuthCallback = lazy(() => import('./pages/auth/OAuthCallback'));
+const VerifyEmailPage = lazy(() => import('./pages/auth/VerifyEmailPage'));
 
 // Cookie Policy page
 const CookiePolicy = lazy(() => import('./pages/CookiePolicy'));
@@ -279,6 +280,7 @@ function App() {
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/forgot-password" element={<PasswordRecoveryUnavailablePage />} />
         <Route path="/auth/callback" element={<OAuthCallback />} />
+        <Route path="/verify-email" element={<VerifyEmailPage />} />
         {DesignSystem && <Route path="/design-system" element={<DesignSystem />} />}
         <Route path="/cookie-policy" element={<CookiePolicy />} />
         <Route path="/privacy-rights" element={<PrivacyRights />} />

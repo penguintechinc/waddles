@@ -74,6 +74,13 @@ export const oauthApi = {
   startLink: (platform) => api.get(`/api/v1/auth/oauth/${platform}/link`),
 };
 
+// Account email verification (hub-api services/email_verification.py). The emailed link lands on
+// the webui /verify-email page with the token in the URL fragment; it is POSTed in the body only.
+export const emailVerificationApi = {
+  verify: (token) => api.post('/api/v1/auth/verify-email', { token }),
+  resend: (email) => api.post('/api/v1/auth/resend-verification', { email }),
+};
+
 // API helper functions
 export const publicApi = {
   getStats: () => api.get('/api/v1/public/stats'),
