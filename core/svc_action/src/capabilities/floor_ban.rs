@@ -195,8 +195,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             );
             return;
         };
+        // Server-side time of THIS confirmation (never caller-supplied): the platform unban has just
+        // happened, so every ban armed up to now is lifted and nothing later ever is.
+        let observed_ms = i64::try_from(super::now_epoch_ms()).unwrap_or(i64::MAX);
         match sync
-            .lift_from_platform(tenant_id, community_id, platform, user, &scope.app_id)
+            .lift_from_platform(
+                tenant_id,
+                community_id,
+                platform,
+                user,
+                &scope.app_id,
+                observed_ms,
+            )
             .await
         {
             Ok((lifted, soft)) => {

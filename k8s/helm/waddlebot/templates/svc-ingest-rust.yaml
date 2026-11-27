@@ -203,6 +203,21 @@ spec:
               key: OUTBOUND_PIN_KEYS
         - name: OUTBOUND_PIN_ACTIVE_KID
           value: {{ .Values.outboundPin.activeKid | default "k1" | quote }}
+        # Discord-native unban sync: the Ed25519 SIGNING half (svc-ingest only; svc-action holds the
+        # public key). Auto-provisioned by auto-provisioned-keys-job.yaml; absent => the sync is
+        # off and every ban-remove frame is ignored loudly (never sent unsigned).
+        - name: PLATFORM_UNBAN_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.platformUnban.secretName | default (printf "%s-platform-unban-signing" (include "waddlebot.fullname" .)) }}
+              key: PLATFORM_UNBAN_PRIVATE_KEY
+              optional: true
+        - name: PLATFORM_UNBAN_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.platformUnban.secretName | default (printf "%s-platform-unban-signing" (include "waddlebot.fullname" .)) }}
+              key: PLATFORM_UNBAN_KEY_ID
+              optional: true
         {{- if $ct.enabled }}
         # waddles.connector-tools env baseline (default OFF = legacy drains). ON: the executor path;
         # svc_ingest refuses to start if any item below is missing/malformed (no silent legacy fallback).

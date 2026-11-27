@@ -863,6 +863,7 @@ impl Rig {
             &settings,
             AssembleDeps {
                 interaction_routing: Some(interaction_routing),
+                platform_unban: None,
                 resolver: Arc::new(FakeHub { binds }),
                 scope: Arc::new(FakeScope {
                     slug: ctx.slug.clone(),

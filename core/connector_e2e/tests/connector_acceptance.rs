@@ -652,6 +652,7 @@ impl Rig {
             &settings,
             AssembleDeps {
                 interaction_routing: None,
+                platform_unban: None,
                 identify_budget: None,
                 resolver: hub,
                 scope: Arc::new(FakeScope {

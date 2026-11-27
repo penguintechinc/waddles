@@ -121,6 +121,31 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they become lifted and are never sent. The calling app
   is mandatory (no default; the pre-source-app overload is dropped). NO unban is enqueued back (no echo); replays are no-ops.
   Both directions are sticky.
+- **Platform -> Waddles, Discord's own UI** (`GUILD_BAN_REMOVE`): an unban done in Discord lifts the Waddles floor ban
+  too, with no bundle involved. svc-ingest (which holds the gateway connection and has no database) taps the frame
+  (`core/svc_ingest/src/platform_unban.rs`; the connector requests the non-privileged `GUILD_MODERATION` intent for it,
+  no Developer Portal toggle) and accepts it ONLY on the gateway WebSocket of the connection whose host-derived binding
+  names that guild and whose tenant owns the guild pairing; a frame for another tenant's guild, or through any
+  HTTP/webhook/poll edge, is dropped (`svc_ingest_platform_unban_rejected_total{reason}`, PII-free WARN). It tokenizes
+  the Discord user id to the user UUID through hub-api's identity tokenizer (the raw id never leaves ingest), signs
+  `{event id, tenant, connection id, guild, user uuid, observed time, expiry}` with its dedicated Ed25519 key and
+  `LPUSH`es it to `waddles:platform-unban:discord:events` (unpaired / lookup failure / tokenize failure -> ignored,
+  `svc_ingest_platform_unban_total{outcome=ignored,reason}`). svc-action (`core/svc_action/src/platform_unban.rs`)
+  `BRPOP`s it, verifies the signature with the PUBLIC key (it can verify, never mint), freshness (5 min) and single use,
+  then calls `reputation_floor_ban_lift_from_platform_guild` (alembic 0142) under the fixed source
+  Replay safety: frames replayed after a gateway RESUME carry the pre-disconnect observed time, and svc-ingest confirms Discord's current state (`GET /guilds/{id}/bans/{user}` = 404) before forwarding; a user banned again, or an unreadable state, is dropped (`ignored{reason=rebanned|ban_state_unavailable}`).
+  `system:discord-gateway` (counted on `waddles_floor_ban_dispatch_total{result=gateway_unban_*}`). That function lifts in
+  EVERY community of the signed tenant linked to the guild (approved `community_servers`, else the legacy primary
+  server); a guild claimed by two tenants lifts nothing and a lift never crosses tenants. **Time bound**: only bans
+  armed at or before the observed time are lifted (`armed_at`, re-stamped by a trigger whenever a refused row is
+  re-armed through the enqueue `ON CONFLICT` paths), so a late event never lifts a newer re-ban; the trusted
+  `mod.unban` hook passes the server-side confirmation time instead. Why a stream and not a grant to svc-ingest: ingest
+  has no database role by design and is the internet-facing stage. Bundles cannot inject the event: the executor has no
+  Valkey access and no key. Same guards as above: scope-1 only (a tenant-scope ban is NOT lifted), no echo, idempotent.
+  Keys: `autoProvisionedKeys.platformUnban` (create-if-absent Ed25519; private half only in svc-ingest, public
+  ConfigMap in svc-action). Deploy prerequisite: svc-ingest's machine identity needs `identity:ephemeral:mint` (granted
+  in the chart). The `p_observed_ms`/guild functions replace the 5-arg `reputation_floor_ban_lift_from_platform`; every
+  caller passes an observed time.
 - **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
   the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
   loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.

@@ -281,6 +281,14 @@ spec:
               key: OUTBOUND_PIN_KEYS
         - name: OUTBOUND_PIN_ACTIVE_KID
           value: {{ .Values.outboundPin.activeKid | default "k1" | quote }}
+        # Discord-native unban sync: PUBLIC verify keys only ({"<kid>":"<base64 ed25519 public key>"}),
+        # published by auto-provisioned-keys-job.yaml. This stage can verify but never mint an event.
+        - name: PLATFORM_UNBAN_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.autoProvisionedKeys.platformUnban.publicKeyConfigMapName | default (printf "%s-platform-unban-signing-public" (include "waddlebot.fullname" .)) }}
+              key: PLATFORM_UNBAN_PUBLIC_KEYS
+              optional: true
         # Event-sync request key (hub-api signs, svc-action verifies) -- templates/event-sync-request-secret.yaml.
         - name: EVENT_SYNC_REQUEST_KEYS
           valueFrom:

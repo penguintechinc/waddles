@@ -104,6 +104,9 @@ hmac = "=0.12.1"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"
 hex = "=0.4.3"
+# Ed25519 VERIFY of the platform-unban event signature (`src/platform_unban.rs`): this stage holds
+# public keys only. Same exact version rustls already resolves in this Cargo.lock (no new crate).
+ring = "=0.17.14"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed. Same exact version pins.
